@@ -106,8 +106,9 @@ class ArenaWorker:
             await self.state_machine.force_error(str(exc))
             raise NavigationError(str(exc), self._id)
 
-        # Dismiss Terms of Use dialog if present
+        # Dismiss popups (TOS dialog, login dialog) if present
         await self._dismiss_tos_dialog()
+        await self._dismiss_login_dialog()
 
         # Check for challenges
         challenge = await detect_challenge(self._page)
@@ -131,6 +132,33 @@ class ArenaWorker:
 
         await self.state_machine.transition(WorkerState.READY)
         await self._log("info", "Ready")
+
+    async def _dismiss_tos_dialog(self) -> None:
+        """Click 'Agree' on the Terms of Use dialog if it appears."""
+        try:
+            dialog_sel = self._selectors.get("tos_dialog")
+            dialog = await self._page.query_selector(dialog_sel)
+            if dialog:
+                btn_sel = self._selectors.get("tos_agree_button")
+                btn = await self._page.query_selector(btn_sel)
+                if btn:
+                    await self._human.click(self._page, btn_sel)
+                    await asyncio.sleep(1)
+                    await self._log("info", "Dismissed Terms of Use dialog")
+        except Exception as exc:
+            await self._log("debug", f"No TOS dialog or already dismissed: {exc}")
+
+    async def _dismiss_login_dialog(self) -> None:
+        """Close the login dialog by clicking the X button if it appears."""
+        try:
+            close_sel = self._selectors.get("login_dialog_close")
+            close_btn = await self._page.query_selector(close_sel)
+            if close_btn:
+                await self._human.click(self._page, close_sel)
+                await asyncio.sleep(1)
+                await self._log("info", "Dismissed login dialog")
+        except Exception as exc:
+            await self._log("debug", f"No login dialog or already dismissed: {exc}")
 
     async def _wait_for_challenge_resolution(self, timeout: float) -> None:
         deadline = asyncio.get_event_loop().time() + timeout

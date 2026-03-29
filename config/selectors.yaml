@@ -19,6 +19,9 @@ model_name_label: "button[aria-haspopup='dialog'] span.truncate"
 tos_dialog: "[role='dialog']"
 tos_agree_button: "[role='dialog'] button[type='submit']"
 
+# Login dialog (dismiss by clicking close X)
+login_dialog_close: "[role='dialog'] button:has(span.sr-only)"
+
 # Challenge detection
 challenge:
   turnstile_iframe: "iframe[src*='challenges.cloudflare.com']"
