@@ -1,0 +1,100 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>LM Arena Automation</title>
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+  <div class="container">
+
+    <!-- Header -->
+    <header>
+      <h1>LM Arena — Side-by-Side Automation</h1>
+      <div class="status-indicator">
+        <span class="dot disconnected" id="status-dot"></span>
+        <span id="status-text">Connecting...</span>
+      </div>
+    </header>
+
+    <!-- Settings -->
+    <div class="panel">
+      <div class="panel-title">Settings</div>
+      <div class="settings-grid">
+        <div class="form-group">
+          <label for="window-count">Windows</label>
+          <input type="number" id="window-count" value="2" min="1" max="12" />
+        </div>
+        <div class="form-group">
+          <label for="submission-gap">Gap (seconds)</label>
+          <input type="number" id="submission-gap" value="30" min="5" max="300" />
+        </div>
+        <div class="form-group">
+          <label for="model-left">Model Left (optional)</label>
+          <input type="text" id="model-left" placeholder="e.g. gpt-4o" />
+        </div>
+        <div class="form-group">
+          <label for="model-right">Model Right (optional)</label>
+          <input type="text" id="model-right" placeholder="e.g. claude-3.5-sonnet" />
+        </div>
+      </div>
+    </div>
+
+    <!-- Prompt -->
+    <div class="panel">
+      <div class="panel-title">Prompt</div>
+      <textarea id="prompt" placeholder="Enter your prompt here..."></textarea>
+      <div class="btn-row">
+        <button class="btn-primary" id="btn-start">Start Run</button>
+        <button class="btn-danger" id="btn-stop" disabled>Stop</button>
+        <button class="btn-secondary" id="btn-export" disabled>Export to Excel</button>
+      </div>
+    </div>
+
+    <!-- Progress -->
+    <div class="panel">
+      <div class="panel-title">Progress</div>
+      <div class="progress-container">
+        <div class="progress-bar">
+          <div class="progress-fill" id="progress-fill"></div>
+        </div>
+        <div class="progress-label" id="progress-text"></div>
+      </div>
+
+      <!-- Worker cards -->
+      <div class="workers-grid" id="workers"></div>
+    </div>
+
+    <!-- Log -->
+    <div class="panel">
+      <div class="panel-title">Log</div>
+      <div class="log-box" id="log-box"></div>
+    </div>
+
+    <!-- Results -->
+    <div class="panel" id="results-section">
+      <div class="panel-title">Results</div>
+      <div style="overflow-x: auto;">
+        <table class="results-table">
+          <thead>
+            <tr>
+              <th>#</th>
+              <th>Model A</th>
+              <th>Model B</th>
+              <th>Response A</th>
+              <th>Response B</th>
+              <th>Time</th>
+              <th>Status</th>
+            </tr>
+          </thead>
+          <tbody id="results-body"></tbody>
+        </table>
+      </div>
+    </div>
+
+  </div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

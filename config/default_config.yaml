@@ -1,0 +1,24 @@
+# LM Arena Automation — Default Configuration
+
+browser:
+  window_count: 2
+  window_size:
+    width: 900
+    height: 800
+  profile_dir: "browser_profiles"
+  headless: false
+
+timing:
+  submission_gap_seconds: 30.0
+  jitter_pct: 0.30
+  poll_interval_seconds: 2.0
+  stable_polls_required: 3
+  response_timeout_seconds: 300.0
+
+typing:
+  min_delay_ms: 50
+  max_delay_ms: 150
+
+arena_url: "https://arena.ai/text/side-by-side"
+output_dir: "outputs"
+log_level: "INFO"
