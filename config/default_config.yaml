@@ -19,6 +19,6 @@ typing:
   min_delay_ms: 50
   max_delay_ms: 150
 
-arena_url: "https://arena.ai/text/side-by-side"
+arena_url: "https://arena.ai/text/direct"
 output_dir: "outputs"
 log_level: "INFO"

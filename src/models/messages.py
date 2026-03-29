@@ -14,8 +14,7 @@ class StartRunRequest(BaseModel):
     prompt: str = Field(..., min_length=1, max_length=50_000)
     window_count: int = Field(default=2, ge=1, le=12)
     submission_gap_seconds: Optional[float] = Field(default=None, ge=5.0)
-    model_left: Optional[str] = None
-    model_right: Optional[str] = None
+    model: Optional[str] = None
 
 
 class StopRunRequest(BaseModel):
@@ -60,10 +59,8 @@ class LogMessage(BaseModel):
 
 class WindowResultPayload(BaseModel):
     worker_id: int
-    model_a_name: Optional[str] = None
-    model_b_name: Optional[str] = None
-    response_a: Optional[str] = None
-    response_b: Optional[str] = None
+    model_name: Optional[str] = None
+    response: Optional[str] = None
     elapsed_seconds: Optional[float] = None
     error: Optional[str] = None
 

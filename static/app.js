@@ -13,8 +13,7 @@
   const statusText = document.getElementById("status-text");
   const windowCountInput = document.getElementById("window-count");
   const submissionGapInput = document.getElementById("submission-gap");
-  const modelLeftInput = document.getElementById("model-left");
-  const modelRightInput = document.getElementById("model-right");
+  const modelInput = document.getElementById("model");
   const promptInput = document.getElementById("prompt");
   const startBtn = document.getElementById("btn-start");
   const stopBtn = document.getElementById("btn-stop");
@@ -154,10 +153,8 @@
       const tr = document.createElement("tr");
       tr.innerHTML = `
         <td>${r.worker_id + 1}</td>
-        <td>${r.model_a_name || "—"}</td>
-        <td>${r.model_b_name || "—"}</td>
-        <td class="response-cell">${escapeHtml(r.response_a || "—")}</td>
-        <td class="response-cell">${escapeHtml(r.response_b || "—")}</td>
+        <td>${r.model_name || "—"}</td>
+        <td class="response-cell">${escapeHtml(r.response || "—")}</td>
         <td>${r.elapsed_seconds ? r.elapsed_seconds.toFixed(1) + "s" : "—"}</td>
         <td>${r.error ? '<span class="error-badge">Error</span>' : '<span class="success-badge">OK</span>'}</td>
       `;
@@ -215,8 +212,7 @@
       prompt: prompt,
       window_count: windowCount,
       submission_gap_seconds: parseFloat(submissionGapInput.value) || null,
-      model_left: modelLeftInput.value.trim() || null,
-      model_right: modelRightInput.value.trim() || null,
+      model: modelInput.value.trim() || null,
     });
 
     appendLog("info", `Starting run with ${windowCount} window(s)...`);

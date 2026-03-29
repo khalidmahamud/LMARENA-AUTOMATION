@@ -34,10 +34,8 @@ def export_to_excel(run_result: RunResult, output_dir: str = "outputs") -> Path:
     # Header row
     headers = [
         "Window #",
-        "Model A",
-        "Model B",
-        "Response A",
-        "Response B",
+        "Model",
+        "Response",
         "Elapsed (s)",
         "Status",
         "Error",
@@ -50,13 +48,11 @@ def export_to_excel(run_result: RunResult, output_dir: str = "outputs") -> Path:
     # Data rows
     for row_idx, wr in enumerate(run_result.window_results, start=2):
         ws.cell(row=row_idx, column=1, value=wr.worker_id + 1)
-        ws.cell(row=row_idx, column=2, value=wr.model_a_name or "")
-        ws.cell(row=row_idx, column=3, value=wr.model_b_name or "")
-        ws.cell(row=row_idx, column=4, value=wr.response_a or "").alignment = WRAP_ALIGNMENT
-        ws.cell(row=row_idx, column=5, value=wr.response_b or "").alignment = WRAP_ALIGNMENT
-        ws.cell(row=row_idx, column=6, value=round(wr.elapsed_seconds, 1) if wr.elapsed_seconds else "")
-        ws.cell(row=row_idx, column=7, value="success" if wr.success else "error")
-        ws.cell(row=row_idx, column=8, value=wr.error or "")
+        ws.cell(row=row_idx, column=2, value=wr.model_name or "")
+        ws.cell(row=row_idx, column=3, value=wr.response or "").alignment = WRAP_ALIGNMENT
+        ws.cell(row=row_idx, column=4, value=round(wr.elapsed_seconds, 1) if wr.elapsed_seconds else "")
+        ws.cell(row=row_idx, column=5, value="success" if wr.success else "error")
+        ws.cell(row=row_idx, column=6, value=wr.error or "")
 
     # Summary sheet
     summary = wb.create_sheet("Summary")
@@ -80,12 +76,10 @@ def export_to_excel(run_result: RunResult, output_dir: str = "outputs") -> Path:
     # Column widths
     ws.column_dimensions["A"].width = 10
     ws.column_dimensions["B"].width = 20
-    ws.column_dimensions["C"].width = 20
-    ws.column_dimensions["D"].width = 60
-    ws.column_dimensions["E"].width = 60
-    ws.column_dimensions["F"].width = 12
-    ws.column_dimensions["G"].width = 10
-    ws.column_dimensions["H"].width = 30
+    ws.column_dimensions["C"].width = 60
+    ws.column_dimensions["D"].width = 12
+    ws.column_dimensions["E"].width = 10
+    ws.column_dimensions["F"].width = 30
 
     wb.save(str(filename))
     logger.info("Excel exported to %s", filename)

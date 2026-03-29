@@ -100,8 +100,7 @@ class RunOrchestrator:
             try:
                 await worker.submit_prompt(
                     prompt=request.prompt,
-                    model_left=request.model_left,
-                    model_right=request.model_right,
+                    model=request.model,
                 )
                 submitted_workers.append(worker)
             except Exception as exc:

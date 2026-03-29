@@ -70,8 +70,7 @@ class SelectorRegistry:
         critical_keys = [
             "prompt_textarea",
             "submit_button",
-            "response_panel.left",
-            "response_panel.right",
+            "response_panel",
         ]
         results: Dict[str, bool] = {}
         for key in critical_keys:

@@ -86,7 +86,7 @@ class ArenaWorker:
     # ── Navigation ──
 
     async def navigate_to_arena(self) -> None:
-        """Navigate to the Arena side-by-side page, handling challenges."""
+        """Navigate to the Arena direct chat page, handling challenges."""
         await self.state_machine.transition(WorkerState.LAUNCHING)
 
         self._page = (
@@ -105,6 +105,9 @@ class ArenaWorker:
         except Exception as exc:
             await self.state_machine.force_error(str(exc))
             raise NavigationError(str(exc), self._id)
+
+        # Dismiss Terms of Use dialog if present
+        await self._dismiss_tos_dialog()
 
         # Check for challenges
         challenge = await detect_challenge(self._page)
@@ -151,20 +154,16 @@ class ArenaWorker:
     async def submit_prompt(
         self,
         prompt: str,
-        model_left: Optional[str] = None,
-        model_right: Optional[str] = None,
+        model: Optional[str] = None,
     ) -> None:
-        """Select models (optional), paste prompt, and submit."""
+        """Select model (optional), paste prompt, and submit."""
         assert self._page is not None
         self._started_at = datetime.now(timezone.utc)
 
         # Optional model selection
-        if model_left or model_right:
+        if model:
             await self.state_machine.transition(WorkerState.SELECTING_MODEL)
-            if model_left:
-                await self._select_model("left", model_left)
-            if model_right:
-                await self._select_model("right", model_right)
+            await self._select_model(model)
 
         # Paste prompt
         await self.state_machine.transition(WorkerState.PASTING)
@@ -181,10 +180,10 @@ class ArenaWorker:
         # Transition to polling
         await self.state_machine.transition(WorkerState.POLLING)
 
-    async def _select_model(self, panel: str, model_name: str) -> None:
+    async def _select_model(self, model_name: str) -> None:
         """Click model dropdown, search, and select."""
         try:
-            dropdown_sel = self._selectors.get(f"model_dropdown.{panel}")
+            dropdown_sel = self._selectors.get("model_dropdown")
             await self._human.click(self._page, dropdown_sel)
             await asyncio.sleep(0.5)
 
@@ -194,11 +193,11 @@ class ArenaWorker:
 
             option_sel = self._selectors.get("model_option")
             await self._human.click(self._page, option_sel)
-            await self._log("info", f"Selected model '{model_name}' on {panel}")
+            await self._log("info", f"Selected model '{model_name}'")
         except Exception as exc:
             await self._log(
                 "warning",
-                f"Model selection failed for {panel}: {exc}. Using Arena defaults.",
+                f"Model selection failed: {exc}. Using Arena default.",
             )
 
     # ── Polling ──
@@ -208,7 +207,7 @@ class ArenaWorker:
         assert self._page is not None
 
         try:
-            resp_a, resp_b, model_a, model_b = await self._poller.poll(
+            response, model_name = await self._poller.poll(
                 page=self._page,
                 selectors=self._selectors,
                 worker_id=self._id,
@@ -224,10 +223,8 @@ class ArenaWorker:
             self._result = WindowResult(
                 worker_id=self._id,
                 prompt="",  # set by orchestrator
-                model_a_name=model_a,
-                model_b_name=model_b,
-                response_a=resp_a,
-                response_b=resp_b,
+                model_name=model_name,
+                response=response,
                 started_at=self._started_at,
                 completed_at=completed_at,
                 elapsed_seconds=elapsed,

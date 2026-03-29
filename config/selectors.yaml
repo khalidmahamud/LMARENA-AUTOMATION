@@ -1,23 +1,23 @@
-# LM Arena DOM Selectors — centralized, easy to update when Arena changes UI
-# NOTE: These are initial placeholders. Must be refined by inspecting the live site.
+# LM Arena DOM Selectors — Direct Mode
+# Based on live site inspection of https://arena.ai/text/direct
 
-prompt_textarea: "textarea[placeholder*='Send a message'], textarea[placeholder*='Type your message']"
+prompt_textarea: "textarea[placeholder*='Ask anything'], textarea[placeholder*='Send a message'], textarea[placeholder*='Type your message']"
 submit_button: "button[data-testid='send-button'], button[aria-label='Send'], form button[type='submit']"
 
-model_dropdown:
-  left: ".model-picker:first-child button, [data-testid='model-selector-left']"
-  right: ".model-picker:last-child button, [data-testid='model-selector-right']"
+# Single model picker (direct mode has one model, not left/right)
+model_dropdown: "button[aria-haspopup='dialog']"
+model_search_input: "input[cmdk-input]"
+model_option: "[cmdk-item][role='option']"
 
-model_search_input: "input[placeholder*='Search'], input[placeholder*='search']"
-model_option: "[role='option'], [data-testid='model-option']"
+# Single response panel (direct mode produces one response)
+response_panel: ".chat-message .markdown-content, [data-testid='response-panel']"
 
-response_panel:
-  left: "[data-testid='response-left'], .chat-message:nth-child(1) .markdown-content"
-  right: "[data-testid='response-right'], .chat-message:nth-child(2) .markdown-content"
+# Model name display (read from the dropdown button span after selection)
+model_name_label: "button[aria-haspopup='dialog'] span.truncate"
 
-model_name_label:
-  left: "[data-testid='model-name-left']"
-  right: "[data-testid='model-name-right']"
+# Terms of Use dialog
+tos_dialog: "[role='dialog']"
+tos_agree_button: "[role='dialog'] button[type='submit']"
 
 # Challenge detection
 challenge:

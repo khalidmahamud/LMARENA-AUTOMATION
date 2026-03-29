@@ -11,7 +11,7 @@
 
     <!-- Header -->
     <header>
-      <h1>LM Arena — Side-by-Side Automation</h1>
+      <h1>LM Arena — Direct Chat Automation</h1>
       <div class="status-indicator">
         <span class="dot disconnected" id="status-dot"></span>
         <span id="status-text">Connecting...</span>
@@ -31,12 +31,8 @@
           <input type="number" id="submission-gap" value="30" min="5" max="300" />
         </div>
         <div class="form-group">
-          <label for="model-left">Model Left (optional)</label>
-          <input type="text" id="model-left" placeholder="e.g. gpt-4o" />
-        </div>
-        <div class="form-group">
-          <label for="model-right">Model Right (optional)</label>
-          <input type="text" id="model-right" placeholder="e.g. claude-3.5-sonnet" />
+          <label for="model">Model (optional)</label>
+          <input type="text" id="model" placeholder="e.g. claude-opus-4-6" />
         </div>
       </div>
     </div>
@@ -80,10 +76,8 @@
           <thead>
             <tr>
               <th>#</th>
-              <th>Model A</th>
-              <th>Model B</th>
-              <th>Response A</th>
-              <th>Response B</th>
+              <th>Model</th>
+              <th>Response</th>
               <th>Time</th>
               <th>Status</th>
             </tr>

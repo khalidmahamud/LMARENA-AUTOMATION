@@ -43,7 +43,7 @@ class AppConfig(BaseModel):
     browser: BrowserConfig = Field(default_factory=BrowserConfig)
     timing: TimingConfig = Field(default_factory=TimingConfig)
     typing: TypingConfig = Field(default_factory=TypingConfig)
-    arena_url: str = Field(default="https://arena.ai/text/side-by-side")
+    arena_url: str = Field(default="https://arena.ai/text/direct")
     output_dir: str = Field(default="outputs")
     log_level: str = Field(default="INFO")
 
