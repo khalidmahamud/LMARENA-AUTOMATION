@@ -148,17 +148,22 @@ class ArenaWorker:
         except Exception as exc:
             await self._log("debug", f"No TOS dialog or already dismissed: {exc}")
 
-    async def _dismiss_login_dialog(self) -> None:
+    async def _dismiss_login_dialog(self, wait: bool = False) -> None:
         """Close the login dialog by clicking the X button if it appears."""
         try:
             close_sel = self._selectors.get("login_dialog_close")
-            close_btn = await self._page.query_selector(close_sel)
+            if wait:
+                close_btn = await self._page.wait_for_selector(
+                    close_sel, timeout=5_000
+                )
+            else:
+                close_btn = await self._page.query_selector(close_sel)
             if close_btn:
-                await self._human.click(self._page, close_sel)
+                await close_btn.click()
                 await asyncio.sleep(1)
                 await self._log("info", "Dismissed login dialog")
-        except Exception as exc:
-            await self._log("debug", f"No login dialog or already dismissed: {exc}")
+        except Exception:
+            pass  # no dialog present — expected
 
     async def _wait_for_challenge_resolution(self, timeout: float) -> None:
         deadline = asyncio.get_event_loop().time() + timeout
@@ -204,6 +209,10 @@ class ArenaWorker:
         submit_sel = self._selectors.get("submit_button")
         await self._human.click(self._page, submit_sel)
         await self._log("info", "Submitted")
+
+        # Arena may show login dialog after submission — dismiss it
+        await asyncio.sleep(2)
+        await self._dismiss_login_dialog(wait=True)
 
         # Transition to polling
         await self.state_machine.transition(WorkerState.POLLING)

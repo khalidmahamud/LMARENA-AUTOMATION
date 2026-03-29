@@ -45,7 +45,19 @@ class ResponsePoller:
 
         sel_response = selectors.get("response_panel")
 
+        login_close_sel = selectors.get("login_dialog_close")
+
         while time.monotonic() < deadline:
+            # Dismiss login dialog if it pops up during polling
+            try:
+                btn = await page.query_selector(login_close_sel)
+                if btn:
+                    await btn.click()
+                    await asyncio.sleep(1)
+                    logger.info("Worker %d: dismissed login dialog during polling", worker_id)
+            except Exception:
+                pass
+
             cur_text = await self._extract_text(page, sel_response)
 
             if cur_text and cur_text == prev_text:

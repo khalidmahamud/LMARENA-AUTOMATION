@@ -4,8 +4,8 @@
 prompt_textarea: "textarea[placeholder*='Ask anything'], textarea[placeholder*='Send a message'], textarea[placeholder*='Type your message']"
 submit_button: "button[data-testid='send-button'], button[aria-label='Send'], form button[type='submit']"
 
-# Single model picker (direct mode has one model, not left/right)
-model_dropdown: "button[aria-haspopup='dialog']"
+# Single model picker — the model button contains a span.truncate with the model name
+model_dropdown: "button[aria-haspopup='dialog']:has(span.truncate)"
 model_search_input: "input[cmdk-input]"
 model_option: "[cmdk-item][role='option']"
 
@@ -19,15 +19,14 @@ model_name_label: "button[aria-haspopup='dialog'] span.truncate"
 tos_dialog: "[role='dialog']"
 tos_agree_button: "[role='dialog'] button[type='submit']"
 
-# Login dialog (dismiss by clicking close X)
-login_dialog_close: "[role='dialog'] button:has(span.sr-only)"
+# Login dialog (dismiss by clicking the X — it's a direct child of the dialog)
+login_dialog_close: "[role='dialog'] > button"
 
 # Challenge detection
 challenge:
   turnstile_iframe: "iframe[src*='challenges.cloudflare.com']"
   turnstile_container: "#cf-turnstile"
   recaptcha_iframe: "iframe[src*='google.com/recaptcha']"
-  login_button: "button:has-text('Sign in'), a:has-text('Log in')"
 
 # Streaming indicators
 streaming_indicator: ".streaming, [data-streaming='true'], .animate-pulse"

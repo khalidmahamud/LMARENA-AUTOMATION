@@ -47,21 +47,14 @@ async def detect_challenge(page: Page) -> ChallengeType:
         logger.warning("Cloudflare interstitial detected via page title")
         return ChallengeType.TURNSTILE
 
-    # reCAPTCHA
+    # reCAPTCHA — only flag if the iframe is actually visible
+    # (Arena embeds invisible reCAPTCHA in the background; that's not a blocker)
     try:
         sel = selectors.get("challenge.recaptcha_iframe")
-        if await page.query_selector(sel):
+        el = await page.query_selector(sel)
+        if el and await el.is_visible():
             logger.warning("reCAPTCHA challenge detected")
             return ChallengeType.RECAPTCHA
-    except KeyError:
-        pass
-
-    # Login wall
-    try:
-        sel = selectors.get("challenge.login_button")
-        if await page.query_selector(sel):
-            logger.info("Login wall detected")
-            return ChallengeType.LOGIN_WALL
     except KeyError:
         pass
 
