@@ -4,7 +4,7 @@ import logging
 import shutil
 import tempfile
 from pathlib import Path
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 from playwright.async_api import BrowserContext, Playwright, async_playwright
 
@@ -29,6 +29,7 @@ class BrowserManager:
         self._tiles: List[TileLayout] = []
         self._run_profile_base: Optional[Path] = None
         self._tmp_root = Path(".tmp_browser_profiles")
+        self._context_dirs: Dict[int, Path] = {}
 
     async def start(self) -> None:
         """Initialise the Playwright engine (call once at server startup)."""
@@ -67,11 +68,16 @@ class BrowserManager:
         self._run_profile_base = Path(
             tempfile.mkdtemp(prefix="arena_run_", dir=str(self._tmp_root))
         )
+        self._context_dirs.clear()
 
         for i in range(count):
             tile = self._tiles[i]
-            profile_dir = self._run_profile_base / f"context_{i}"
-            profile_dir.mkdir(parents=True, exist_ok=True)
+            profile_dir = Path(
+                tempfile.mkdtemp(
+                    prefix=f"context_{i}_",
+                    dir=str(self._run_profile_base),
+                )
+            )
 
             ctx = await self._playwright.chromium.launch_persistent_context(
                 user_data_dir=str(profile_dir),
@@ -96,6 +102,7 @@ class BrowserManager:
             await apply_stealth(ctx)
 
             self._contexts.append(ctx)
+            self._context_dirs[i] = profile_dir
             logger.info(
                 "Context %d launched at (%d, %d) size %dx%d",
                 i,
@@ -118,6 +125,7 @@ class BrowserManager:
         if self._run_profile_base and self._run_profile_base.exists():
             shutil.rmtree(self._run_profile_base, ignore_errors=True)
         self._run_profile_base = None
+        self._context_dirs.clear()
         if self._tmp_root.exists():
             shutil.rmtree(self._tmp_root, ignore_errors=True)
         logger.info("All browser contexts closed")
@@ -150,10 +158,16 @@ class BrowserManager:
                 tempfile.mkdtemp(prefix="arena_run_", dir=str(self._tmp_root))
             )
 
-        profile_dir = self._run_profile_base / f"context_{index}"
-        if profile_dir.exists():
-            shutil.rmtree(profile_dir, ignore_errors=True)
-        profile_dir.mkdir(parents=True, exist_ok=True)
+        old_profile_dir = self._context_dirs.get(index)
+        if old_profile_dir and old_profile_dir.exists():
+            shutil.rmtree(old_profile_dir, ignore_errors=True)
+
+        profile_dir = Path(
+            tempfile.mkdtemp(
+                prefix=f"context_{index}_",
+                dir=str(self._run_profile_base),
+            )
+        )
 
         # Launch new context at the same tile position
         tile = self._tiles[index]
@@ -178,6 +192,7 @@ class BrowserManager:
         await apply_stealth(ctx)
 
         self._contexts[index] = ctx
+        self._context_dirs[index] = profile_dir
         logger.info("Context %d recreated at (%d, %d)", index, tile.x, tile.y)
         return ctx
 
