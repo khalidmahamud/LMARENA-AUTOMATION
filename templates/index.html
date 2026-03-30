@@ -70,6 +70,11 @@
         <!-- System prompt (first input before the actual prompt) -->
         <details class="system-prompt-details" id="system-prompt-details">
           <summary class="system-prompt-toggle">System Prompt <span class="system-prompt-hint">&#8212; sent first before each actual prompt run</span></summary>
+          <label class="combine-prompt-option">
+            <input type="checkbox" id="combine-with-first" />
+            Combine with prompt
+            <span class="system-prompt-hint">&#8212; send as one message instead of two turns</span>
+          </label>
           <textarea id="system-prompt" rows="3" placeholder="e.g. You are a helpful assistant. Answer concisely."></textarea>
         </details>
 
@@ -275,6 +280,23 @@
           <div class="tile-preview" id="tile-preview-label"></div>
         </div>
 
+      </div>
+    </div>
+  </div>
+
+  <!-- Response Viewer Modal -->
+  <div class="modal-overlay hidden" id="response-modal">
+    <div class="modal modal-response">
+      <div class="modal-header">
+        <h2 id="response-modal-title">Response</h2>
+        <div class="response-modal-actions">
+          <button class="btn-modal-action" id="btn-copy-response" title="Copy to clipboard">&#128203; Copy</button>
+          <button class="btn-modal-action" id="btn-download-response" title="Download as text">&#11015; Download</button>
+          <button class="modal-close" id="btn-close-response">&times;</button>
+        </div>
+      </div>
+      <div class="modal-body">
+        <pre class="response-full-text" id="response-full-text"></pre>
       </div>
     </div>
   </div>

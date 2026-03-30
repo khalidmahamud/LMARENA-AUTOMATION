@@ -15,6 +15,7 @@ from src.models.messages import (
     RunProgressMessage,
     ToastMessage,
     WindowResultPayload,
+    WorkerResultMessage,
     WorkerUpdateMessage,
 )
 
@@ -76,6 +77,12 @@ class WsBroadcaster:
                 progress_pct=100.0,
                 message="Error occurred",
                 error=d.get("error"),
+            )
+
+        if event.type == EventType.WORKER_COMPLETE:
+            result_data = d.get("result", {})
+            return WorkerResultMessage(
+                result=WindowResultPayload(**result_data),
             )
 
         if event.type == EventType.RUN_PROGRESS:

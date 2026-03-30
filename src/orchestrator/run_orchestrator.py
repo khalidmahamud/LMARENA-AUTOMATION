@@ -56,9 +56,15 @@ class RunOrchestrator:
         count = request.window_count
         self._cancelled = False
         system_prompt = request.system_prompt.strip()
+        combine_with_first = request.combine_with_first and bool(system_prompt)
 
         # Determine all prompts and chunk into batches
         all_prompts = request.prompts if request.prompts else [request.prompt]
+
+        if combine_with_first:
+            all_prompts = [f"{system_prompt}\n\n{p}" for p in all_prompts]
+            system_prompt = ""  # Skip Phase 1 entirely
+
         batches: List[List[str]] = [
             all_prompts[i : i + count]
             for i in range(0, len(all_prompts), count)
@@ -143,6 +149,17 @@ class RunOrchestrator:
         gap = request.submission_gap_seconds or self._config.timing.submission_gap_seconds
         all_window_results: List[WindowResult] = []
 
+        if combine_with_first:
+            await self._event_bus.publish(
+                Event(
+                    type=EventType.LOG,
+                    data={
+                        "level": "info",
+                        "text": "Combined mode: system prompt merged into each prompt",
+                    },
+                )
+            )
+
         for batch_idx, batch_prompts in enumerate(batches):
             if self._cancelled:
                 break
@@ -183,6 +200,7 @@ class RunOrchestrator:
             # Submit this batch's prompts (sequential with gap)
             workers_in_batch = min(len(batch_prompts), count)
             batch_results: List[WindowResult] = []
+            early_failures: List[Tuple[int, ArenaWorker, str]] = []
             submitted: List[
                 Tuple[int, ArenaWorker, str, Optional[Tuple[str, str]]]
             ] = []
@@ -215,14 +233,7 @@ class RunOrchestrator:
                             i,
                             batch_idx,
                         )
-                        batch_results.append(
-                            self._failed_result(
-                                worker_id=i,
-                                prompt=prompt,
-                                batch_idx=batch_idx,
-                                error="Worker was not ready for the system prompt phase",
-                            )
-                        )
+                        early_failures.append((i, worker, prompt))
                         continue
 
                     try:
@@ -239,14 +250,7 @@ class RunOrchestrator:
                             batch_idx,
                             exc,
                         )
-                        batch_results.append(
-                            self._failed_result(
-                                worker_id=i,
-                                prompt=prompt,
-                                batch_idx=batch_idx,
-                                error=f"System prompt submission failed: {exc}",
-                            )
-                        )
+                        early_failures.append((i, worker, prompt))
 
                     if i < workers_in_batch - 1 and not self._cancelled:
                         jittered = self._apply_jitter(gap)
@@ -271,22 +275,8 @@ class RunOrchestrator:
                     system_result = worker.get_result()
                     actual_prompt = batch_prompts[worker_idx]
                     if not system_result or not system_result.success:
-                        error_text = (
-                            "System prompt phase failed"
-                            if not system_result
-                            else (
-                                f"System prompt phase failed: "
-                                f"{system_result.error or 'unknown error'}"
-                            )
-                        )
-                        batch_results.append(
-                            self._failed_result(
-                                worker_id=worker_idx,
-                                prompt=actual_prompt,
-                                batch_idx=batch_idx,
-                                error=error_text,
-                                source=system_result,
-                            )
+                        early_failures.append(
+                            (worker_idx, worker, actual_prompt)
                         )
                         continue
 
@@ -295,14 +285,12 @@ class RunOrchestrator:
                             await worker.prepare_for_followup_prompt()
                         )
                     except Exception as exc:
-                        batch_results.append(
-                            self._failed_result(
-                                worker_id=worker_idx,
-                                prompt=actual_prompt,
-                                batch_idx=batch_idx,
-                                error=f"Could not prepare follow-up prompt: {exc}",
-                                source=system_result,
-                            )
+                        logger.error(
+                            "Worker %d follow-up preparation failed (batch %d): %s",
+                            worker_idx, batch_idx, exc,
+                        )
+                        early_failures.append(
+                            (worker_idx, worker, actual_prompt)
                         )
 
                 await self._event_bus.publish(
@@ -331,16 +319,10 @@ class RunOrchestrator:
                         continue
                 if worker.state_machine.state != WorkerState.READY:
                     logger.warning(
-                        "Worker %d not ready (batch %d), skipping", i, batch_idx
+                        "Worker %d not ready (batch %d), marking for recovery",
+                        i, batch_idx,
                     )
-                    batch_results.append(
-                        self._failed_result(
-                            worker_id=i,
-                            prompt=prompt,
-                            batch_idx=batch_idx,
-                            error="Worker was not ready for prompt submission",
-                        )
-                    )
+                    early_failures.append((i, worker, prompt))
                     continue
 
                 try:
@@ -357,14 +339,7 @@ class RunOrchestrator:
                         "Worker %d submission failed (batch %d): %s",
                         i, batch_idx, exc,
                     )
-                    batch_results.append(
-                        self._failed_result(
-                            worker_id=i,
-                            prompt=prompt,
-                            batch_idx=batch_idx,
-                            error=f"Prompt submission failed: {exc}",
-                        )
-                    )
+                    early_failures.append((i, worker, prompt))
 
                 # Emit progress
                 completed_prompts = (
@@ -408,11 +383,12 @@ class RunOrchestrator:
             if self._cancelled:
                 break
 
-            # Collect batch results
+            # Collect batch results — separate successes from failures
             retain = request.retain_output
+            poll_failures: List[Tuple[int, ArenaWorker, str]] = []
             for worker_idx, worker, prompt, _ in submitted:
                 result = worker.get_result()
-                if result:
+                if result and result.success:
                     result.prompt = prompt
                     result.batch_index = batch_idx
                     if retain == "model_a":
@@ -423,12 +399,67 @@ class RunOrchestrator:
                         result.model_a_response = None
                     batch_results.append(result)
                 else:
+                    poll_failures.append((worker_idx, worker, prompt))
+
+            # Attempt recovery for all failed workers (early + polling failures)
+            all_failures = early_failures + poll_failures
+            if all_failures and not self._cancelled:
+                await self._event_bus.publish(
+                    Event(
+                        type=EventType.LOG,
+                        data={
+                            "level": "warning",
+                            "text": (
+                                f"Batch {batch_idx + 1}: {len(all_failures)} "
+                                "worker(s) failed — attempting recovery"
+                            ),
+                        },
+                    )
+                )
+                recovery_tasks = [
+                    self._attempt_recovery(
+                        worker=worker,
+                        worker_idx=widx,
+                        prompt=prompt,
+                        batch_idx=batch_idx,
+                        request=request,
+                        system_prompt=system_prompt,
+                    )
+                    for widx, worker, prompt in all_failures
+                ]
+                recovery_results = await asyncio.gather(
+                    *recovery_tasks, return_exceptions=True
+                )
+                for (widx, _, prompt), recovery_out in zip(
+                    all_failures, recovery_results
+                ):
+                    if isinstance(recovery_out, Exception):
+                        batch_results.append(
+                            self._failed_result(
+                                worker_id=widx,
+                                prompt=prompt,
+                                batch_idx=batch_idx,
+                                error=f"Recovery raised exception: {recovery_out}",
+                            )
+                        )
+                    else:
+                        if recovery_out.success:
+                            if retain == "model_a":
+                                recovery_out.model_b_name = None
+                                recovery_out.model_b_response = None
+                            elif retain == "model_b":
+                                recovery_out.model_a_name = None
+                                recovery_out.model_a_response = None
+                        batch_results.append(recovery_out)
+            elif all_failures:
+                # Cancelled — record failures without recovery
+                for widx, _, prompt in all_failures:
                     batch_results.append(
                         self._failed_result(
-                            worker_id=worker_idx,
+                            worker_id=widx,
                             prompt=prompt,
                             batch_idx=batch_idx,
-                            error="No result returned after polling",
+                            error="Worker failed and recovery skipped (run cancelled)",
                         )
                     )
 
@@ -597,6 +628,101 @@ class RunOrchestrator:
             success=False,
             error=error,
         )
+
+    async def _attempt_recovery(
+        self,
+        worker: ArenaWorker,
+        worker_idx: int,
+        prompt: str,
+        batch_idx: int,
+        request: StartRunRequest,
+        system_prompt: str,
+    ) -> WindowResult:
+        """Attempt a single orchestrator-level retry for a failed worker.
+
+        Closes the browser window, reopens fresh, re-navigates, and
+        re-submits the same prompt.  Returns the result (success or failure).
+        """
+        if self._cancelled:
+            return self._failed_result(
+                worker_id=worker_idx,
+                prompt=prompt,
+                batch_idx=batch_idx,
+                error="Recovery skipped: run was cancelled",
+            )
+
+        await self._event_bus.publish(
+            Event(
+                type=EventType.LOG,
+                worker_id=worker_idx,
+                data={
+                    "level": "warning",
+                    "text": (
+                        f"Worker {worker_idx}: attempting recovery — "
+                        "reopening browser and retrying prompt"
+                    ),
+                },
+            )
+        )
+
+        try:
+            await worker.reset_with_fresh_context(
+                zoom_pct=request.zoom_pct,
+                clear_cookies=request.clear_cookies,
+            )
+        except Exception as exc:
+            return self._failed_result(
+                worker_id=worker_idx,
+                prompt=prompt,
+                batch_idx=batch_idx,
+                error=f"Recovery failed (context recreation): {exc}",
+            )
+
+        try:
+            # System prompt phase (if applicable)
+            recovery_baseline: Optional[Tuple[str, str]] = None
+            if system_prompt:
+                await worker.submit_prompt(
+                    prompt=system_prompt,
+                    model_a=request.model_a,
+                    model_b=request.model_b,
+                )
+                sys_result = await worker.poll_for_completion()
+                if not sys_result.success:
+                    return self._failed_result(
+                        worker_id=worker_idx,
+                        prompt=prompt,
+                        batch_idx=batch_idx,
+                        error=(
+                            f"Recovery failed (system prompt): "
+                            f"{sys_result.error or 'unknown error'}"
+                        ),
+                        source=sys_result,
+                    )
+                recovery_baseline = await worker.prepare_for_followup_prompt()
+
+            # Submit actual prompt
+            await worker.submit_prompt(
+                prompt=prompt,
+                model_a=None if system_prompt else request.model_a,
+                model_b=None if system_prompt else request.model_b,
+            )
+
+            # Poll for completion
+            result = await worker.poll_for_completion(
+                baseline_responses=recovery_baseline,
+            )
+            result.prompt = prompt
+            result.batch_index = batch_idx
+            return result
+
+        except Exception as exc:
+            return self._failed_result(
+                worker_id=worker_idx,
+                prompt=prompt,
+                batch_idx=batch_idx,
+                error=f"Recovery failed (retry attempt): {exc}",
+            )
 
     @property
     def last_result(self) -> Optional[RunResult]:

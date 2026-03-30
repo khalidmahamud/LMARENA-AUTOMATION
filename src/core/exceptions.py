@@ -64,6 +64,13 @@ class RateLimitError(BrowserError):
         super().__init__(message, worker_id)
 
 
+class LoginDialogError(BrowserError):
+    """Login dialog appeared, requiring window recreation."""
+
+    def __init__(self, worker_id: int, message: str = "Login dialog detected"):
+        super().__init__(message, worker_id)
+
+
 class SelectorNotFoundError(BrowserError):
     """Expected DOM selector not found on page."""
 

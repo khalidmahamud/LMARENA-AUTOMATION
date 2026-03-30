@@ -13,6 +13,7 @@ from src.browser.selectors import SelectorRegistry
 from src.core.events import Event, EventBus, EventType
 from src.core.exceptions import (
     ChallengeDetectedError,
+    LoginDialogError,
     NavigationError,
     RateLimitError,
 )
@@ -136,11 +137,10 @@ class ArenaWorker:
                 "z => document.body.style.zoom = z + '%'", self._zoom_pct
             )
 
-        # Dismiss popups (TOS dialog, login dialog) if present
+        # Dismiss TOS dialog if present
         await self._dismiss_tos_dialog()
-        await self._dismiss_login_dialog()
 
-        # Check for challenges — retry by reopening window if possible
+        # Check for challenges (including login dialog) — retry by reopening window
         challenge = await detect_challenge(self._page)
         if challenge != ChallengeType.NONE:
             await self.state_machine.transition(
@@ -189,23 +189,6 @@ class ArenaWorker:
         except Exception as exc:
             await self._log("debug", f"No TOS dialog or already dismissed: {exc}")
         return False
-
-    async def _dismiss_login_dialog(self, wait: bool = False) -> None:
-        """Close the login dialog by clicking the X button if it appears."""
-        try:
-            close_sel = self._selectors.get("login_dialog_close")
-            if wait:
-                close_btn = await self._page.wait_for_selector(
-                    close_sel, timeout=5_000
-                )
-            else:
-                close_btn = await self._page.query_selector(close_sel)
-            if close_btn:
-                await close_btn.click()
-                await asyncio.sleep(1)
-                await self._log("info", "Dismissed login dialog")
-        except Exception:
-            pass  # no dialog present — expected
 
     async def _handle_challenge(
         self,
@@ -275,7 +258,6 @@ class ArenaWorker:
                 )
 
             await self._dismiss_tos_dialog()
-            await self._dismiss_login_dialog()
 
             challenge = await detect_challenge(self._page)
             if challenge == ChallengeType.NONE:
@@ -327,11 +309,10 @@ class ArenaWorker:
         submit_sel = self._selectors.get("submit_button")
         await self._submit_prompt_form(prompt_element, submit_sel)
 
-        # TOS or login dialog may pop up after submit — dismiss and re-submit
-        # only if the first submit was consumed by the dialog
-        await asyncio.sleep(2)
+        # TOS or login dialog may pop up after submit — dismiss TOS and let
+        # detect_challenge() catch login dialogs for window recreation
+        await asyncio.sleep(3)
         tos_dismissed = await self._dismiss_tos_dialog()
-        await self._dismiss_login_dialog(wait=True)
         challenge = await detect_challenge(self._page)
         if challenge != ChallengeType.NONE:
             if retry_on_challenge <= 0:
@@ -907,7 +888,6 @@ class ArenaWorker:
                 )
 
             await self._dismiss_tos_dialog()
-            await self._dismiss_login_dialog()
 
             await self._event_bus.publish(
                 Event(type=EventType.CHALLENGE_RESOLVED, worker_id=self._id)
@@ -922,6 +902,68 @@ class ArenaWorker:
             )
 
             # Re-poll with decremented retry count
+            return await self.poll_for_completion(
+                baseline_responses=baseline_responses,
+                _rate_limit_retries=_rate_limit_retries - 1,
+            )
+
+        except LoginDialogError:
+            if _rate_limit_retries <= 0 or self._context_recreator is None:
+                raise
+
+            await self._log(
+                "warning",
+                "Login dialog detected — closing window, reopening fresh, and retrying",
+            )
+            await self._event_bus.publish(
+                Event(
+                    type=EventType.CHALLENGE_DETECTED,
+                    worker_id=self._id,
+                    data={"challenge_type": "login_wall"},
+                )
+            )
+
+            await self.state_machine.transition(
+                WorkerState.WAITING_FOR_CHALLENGE
+            )
+
+            self._context = await self._context_recreator(self._id)
+            self._page = (
+                self._context.pages[0]
+                if self._context.pages
+                else await self._context.new_page()
+            )
+
+            await self.state_machine.transition(WorkerState.NAVIGATING)
+            await self._log("info", "Fresh window opened; navigating back to Arena")
+            try:
+                await self._page.goto(
+                    self._config.arena_url,
+                    wait_until="domcontentloaded",
+                    timeout=60_000,
+                )
+            except Exception as nav_exc:
+                await self.state_machine.force_error(str(nav_exc))
+                raise NavigationError(str(nav_exc), self._id)
+
+            if self._zoom_pct != 100:
+                await self._page.evaluate(
+                    "z => document.body.style.zoom = z + '%'", self._zoom_pct
+                )
+
+            await self._dismiss_tos_dialog()
+
+            await self._event_bus.publish(
+                Event(type=EventType.CHALLENGE_RESOLVED, worker_id=self._id)
+            )
+
+            await self.state_machine.transition(WorkerState.READY)
+            await self.submit_prompt(
+                prompt=self._last_prompt,
+                model_a=self._last_model_a,
+                model_b=self._last_model_b,
+            )
+
             return await self.poll_for_completion(
                 baseline_responses=baseline_responses,
                 _rate_limit_retries=_rate_limit_retries - 1,
@@ -963,6 +1005,47 @@ class ArenaWorker:
 
         self._result = None
         return baseline
+
+    # ── Recovery ──
+
+    async def reset_with_fresh_context(
+        self,
+        zoom_pct: int = 100,
+        clear_cookies: bool = False,
+    ) -> None:
+        """Reset this worker with a completely fresh browser context.
+
+        Sequence: reset state machine → recreate context → navigate to Arena.
+        After this method completes the worker is in READY state and can
+        accept a new ``submit_prompt()`` call.
+
+        Raises if context recreation or navigation fails.
+        """
+        if self._context_recreator is None:
+            raise RuntimeError(
+                f"Worker {self._id}: no context_recreator available for reset"
+            )
+
+        # 1. Reset state machine back to IDLE
+        if self.state_machine.is_terminal:
+            await self.state_machine.reset()
+        elif self.state_machine.state != WorkerState.IDLE:
+            await self.state_machine.force_error("Resetting for retry")
+            await self.state_machine.reset()
+
+        # 2. Clear internal state
+        self._result = None
+        self._cancelled = False
+        self._cancel_event.clear()
+
+        # 3. Recreate the browser context (closes old window, opens fresh one)
+        self._context = await self._context_recreator(self._id)
+
+        # 4. Navigate to Arena (handles challenges, TOS, login dialogs)
+        await self.navigate_to_arena(
+            clear_cookies=clear_cookies,
+            zoom_pct=zoom_pct,
+        )
 
     # ── Lifecycle ──
 

@@ -8,8 +8,8 @@ from typing import Dict, List, Optional, Tuple
 from playwright.async_api import Page
 
 from src.browser.selectors import SelectorRegistry
-from src.browser.challenges import ChallengeType, detect_challenge
-from src.core.exceptions import PollingTimeoutError, RateLimitError
+from src.browser.challenges import ChallengeType, detect_challenge, detect_login_dialog
+from src.core.exceptions import LoginDialogError, PollingTimeoutError, RateLimitError
 from src.models.config import TimingConfig
 
 logger = logging.getLogger(__name__)
@@ -57,7 +57,6 @@ class ResponsePoller:
             else ""
         )
 
-        login_close_sel = selectors.get("login_dialog_close")
         slide_sel = selectors.get("response_slide")
         streaming_indicator_sel = selectors.get("streaming_indicator")
         stop_generation_sel = selectors.get("stop_generation_button")
@@ -69,13 +68,13 @@ class ResponsePoller:
             if cancel_event and cancel_event.is_set():
                 raise asyncio.CancelledError("Run cancelled")
 
-            # Dismiss login dialog if it pops up during polling
+            # Check for login dialog during polling — raise to trigger window recreation
             try:
-                btn = await page.query_selector(login_close_sel)
-                if btn:
-                    await btn.click()
-                    await asyncio.sleep(1)
-                    logger.info("Worker %d: dismissed login dialog during polling", worker_id)
+                if await detect_login_dialog(page):
+                    logger.warning("Worker %d: login dialog detected during polling", worker_id)
+                    raise LoginDialogError(worker_id)
+            except LoginDialogError:
+                raise
             except Exception:
                 if cancel_event and cancel_event.is_set():
                     raise asyncio.CancelledError("Run cancelled")

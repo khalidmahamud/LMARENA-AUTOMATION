@@ -19,6 +19,25 @@ class ChallengeType(str, Enum):
     RATE_LIMIT = "rate_limit"
 
 
+_LOGIN_DIALOG_JS = """() => {
+    const dialogs = document.querySelectorAll('[role="dialog"]');
+    return [...dialogs].some(d => {
+        const style = window.getComputedStyle(d);
+        if (style.display === 'none' || style.visibility === 'hidden') return false;
+        const text = (d.innerText || '').toLowerCase();
+        return text.includes('login or create account') || text.includes('continue with google');
+    });
+}"""
+
+
+async def detect_login_dialog(page: Page) -> bool:
+    """Return ``True`` if a visible login dialog is present on the page."""
+    try:
+        return bool(await page.evaluate(_LOGIN_DIALOG_JS))
+    except Exception:
+        return False
+
+
 async def detect_challenge(page: Page) -> ChallengeType:
     """Inspect the current page for known challenge / login barriers.
 
@@ -79,6 +98,10 @@ async def detect_challenge(page: Page) -> ChallengeType:
             return ChallengeType.RATE_LIMIT
     except Exception:
         pass
+
+    # Login dialog (e.g. "Login or Create Account")
+    if await detect_login_dialog(page):
+        return ChallengeType.LOGIN_WALL
 
     # reCAPTCHA — only flag if the iframe is actually visible
     # (Arena embeds invisible reCAPTCHA in the background; that's not a blocker)

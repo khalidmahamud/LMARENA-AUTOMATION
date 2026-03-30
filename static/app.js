@@ -12,6 +12,7 @@
   let runResults = null; // last run results for JSON view
   let workerStartTimes = {};
   let workerData = {};   // live data per worker
+  let incrementalResults = {}; // worker_id -> result payload (available as each worker completes)
 
   // File upload state
   let promptMode = "manual"; // "manual" | "file"
@@ -32,6 +33,7 @@
   const zoomInput         = document.getElementById("zoom");
   const clearCookiesInput = document.getElementById("clear-cookies");
   const systemPromptInput = document.getElementById("system-prompt");
+  const combineWithFirstInput = document.getElementById("combine-with-first");
   const promptInput       = document.getElementById("prompt");
   const monitorCountInput = document.getElementById("monitor-count");
   const monitorWidthInput = document.getElementById("monitor-width");
@@ -61,6 +63,14 @@
   const autoScrollToggle  = document.getElementById("auto-scroll-toggle");
 
   const toastContainer    = document.getElementById("toast-container");
+
+  // Response modal DOM refs
+  const responseModal     = document.getElementById("response-modal");
+  const responseModalTitle = document.getElementById("response-modal-title");
+  const responseFullText  = document.getElementById("response-full-text");
+  const btnCopyResponse   = document.getElementById("btn-copy-response");
+  const btnDownloadResponse = document.getElementById("btn-download-response");
+  const btnCloseResponse  = document.getElementById("btn-close-response");
 
   // File upload DOM refs
   const modeManualBtn     = document.getElementById("mode-manual");
@@ -130,6 +140,9 @@
       case "worker_update":
         updateWorkerCard(msg);
         updateResultRow(msg);
+        break;
+      case "worker_result":
+        onWorkerResult(msg.result);
         break;
       case "run_progress":
         updateProgress(msg);
@@ -354,25 +367,59 @@
     }
   }
 
+  function buildResultCellHTML(modelName, responseText, workerId, side) {
+    const name = modelName || "\u2014";
+    const text = responseText || "\u2014";
+    const hasResponse = responseText && responseText !== "\u2014";
+    return `
+      <div class="response-cell">
+        <span class="response-model-name">${escapeHtml(name)}</span>
+        <span class="response-text-preview">${escapeHtml(truncate(text, 80))}</span>
+        ${hasResponse ? `<div class="response-actions">
+          <button class="btn-view-response" data-worker-id="${workerId}" data-side="${side}">&#128065; View</button>
+          <button class="btn-copy-inline" data-worker-id="${workerId}" data-side="${side}">&#128203; Copy</button>
+        </div>` : ""}
+      </div>
+    `;
+  }
+
+  function updateResultRowWithData(result) {
+    const row = ensureResultRow(result.worker_id);
+    const colA = row.querySelector(".col-model-a");
+    const colB = row.querySelector(".col-model-b");
+    const colTime = row.querySelector(".col-time");
+    const colTokens = row.querySelector(".col-tokens");
+    const colStatus = row.querySelector(".col-status");
+
+    colA.className = "col-model-a";
+    colA.innerHTML = buildResultCellHTML(result.model_a_name, result.model_a_response, result.worker_id, "a");
+
+    colB.className = "col-model-b";
+    colB.innerHTML = buildResultCellHTML(result.model_b_name, result.model_b_response, result.worker_id, "b");
+
+    colTime.textContent = result.elapsed_seconds ? result.elapsed_seconds.toFixed(0) + "s" : "\u2014";
+
+    const responseA = result.model_a_response || "";
+    const responseB = result.model_b_response || "";
+    const tokens = estimateTokens(responseA + responseB);
+    colTokens.textContent = tokens > 0 ? formatNumber(tokens) : "\u2014";
+
+    colStatus.innerHTML = result.error
+      ? '<span class="badge badge-error">&#10007; Error</span>'
+      : '<span class="badge badge-done">&#10003; Done</span>';
+  }
+
+  function onWorkerResult(result) {
+    incrementalResults[result.worker_id] = result;
+    updateResultRowWithData(result);
+  }
+
   function populateFinalResults(results) {
     resultsBody.innerHTML = "";
     results.forEach((r) => {
-      const row = document.createElement("tr");
-      const responseA = r.model_a_response || "\u2014";
-      const responseB = r.model_b_response || "\u2014";
-      const tokens = estimateTokens(responseA + responseB);
-      row.innerHTML = `
-        <td>W${r.worker_id + 1}</td>
-        <td class="response-preview" title="${escapeAttr(responseA)}">${escapeHtml(r.model_a_name || "\u2014")}: ${escapeHtml(truncate(responseA, 60))}</td>
-        <td class="response-preview" title="${escapeAttr(responseB)}">${escapeHtml(r.model_b_name || "\u2014")}: ${escapeHtml(truncate(responseB, 60))}</td>
-        <td>${r.elapsed_seconds ? r.elapsed_seconds.toFixed(0) + "s" : "\u2014"}</td>
-        <td>${tokens > 0 ? formatNumber(tokens) : "\u2014"}</td>
-        <td>${r.error
-          ? '<span class="badge badge-error">&#10007; Error</span>'
-          : '<span class="badge badge-done">&#10003; Done</span>'
-        }</td>
-      `;
-      resultsBody.appendChild(row);
+      incrementalResults[r.worker_id] = r;
+      ensureResultRow(r.worker_id);
+      updateResultRowWithData(r);
     });
   }
 
@@ -513,6 +560,7 @@
     progressPct.textContent = "0%";
     etaText.textContent = "ETA: \u2014";
     runResults = null;
+    incrementalResults = {};
     resultsJsonPre.textContent = "";
 
     const windowCount = parseInt(windowCountInput.value, 10) || 4;
@@ -535,6 +583,7 @@
       prompt: singlePrompt,
       prompts: isFileMode ? prompts : null,
       system_prompt: systemPromptInput.value.trim() || "",
+      combine_with_first: combineWithFirstInput.checked,
       window_count: windowCount,
       submission_gap_seconds: parseFloat(submissionGapInput.value) || null,
       model_a: modelAInput.value.trim() || null,
@@ -552,12 +601,20 @@
     if (isFileMode) {
       const batches = Math.ceil(prompts.length / windowCount);
       if (systemPromptInput.value.trim()) {
-        appendLog("info", "System prompt will be sent first before each batch prompt.");
+        if (combineWithFirstInput.checked) {
+          appendLog("info", "System prompt will be combined with each prompt as a single message.");
+        } else {
+          appendLog("info", "System prompt will be sent first before each batch prompt.");
+        }
       }
       appendLog("info", `Starting run: ${prompts.length} prompt(s), ${windowCount} window(s), ${batches} batch(es)...`);
     } else {
       if (systemPromptInput.value.trim()) {
-        appendLog("info", "System prompt will be sent first before the manual prompt.");
+        if (combineWithFirstInput.checked) {
+          appendLog("info", "System prompt will be combined with the prompt as a single message.");
+        } else {
+          appendLog("info", "System prompt will be sent first before the manual prompt.");
+        }
       }
       appendLog("info", `Starting run with ${windowCount} window(s)...`);
     }
@@ -810,8 +867,90 @@
   });
 
   document.addEventListener("keydown", (e) => {
-    if (e.key === "Escape" && !settingsModal.classList.contains("hidden")) {
-      settingsModal.classList.add("hidden");
+    if (e.key === "Escape") {
+      if (!responseModal.classList.contains("hidden")) {
+        responseModal.classList.add("hidden");
+      } else if (!settingsModal.classList.contains("hidden")) {
+        settingsModal.classList.add("hidden");
+      }
+    }
+  });
+
+  // ══════════════════════════════════════
+  // Response Viewer Modal
+  // ══════════════════════════════════════
+
+  let currentResponseText = "";
+  let currentResponseModelName = "";
+
+  function showResponseModal(title, text) {
+    currentResponseText = text;
+    currentResponseModelName = title;
+    responseModalTitle.textContent = title;
+    responseFullText.textContent = text;
+    responseModal.classList.remove("hidden");
+  }
+
+  btnCloseResponse.addEventListener("click", () => {
+    responseModal.classList.add("hidden");
+  });
+
+  responseModal.addEventListener("click", (e) => {
+    if (e.target === responseModal) {
+      responseModal.classList.add("hidden");
+    }
+  });
+
+  btnCopyResponse.addEventListener("click", async () => {
+    try {
+      await navigator.clipboard.writeText(currentResponseText);
+      showToast("Copied to clipboard", "success");
+    } catch {
+      showToast("Clipboard access denied", "warning");
+    }
+  });
+
+  btnDownloadResponse.addEventListener("click", () => {
+    const safeName = currentResponseModelName.replace(/[^a-zA-Z0-9_\-. ]/g, "_").substring(0, 60);
+    const blob = new Blob([currentResponseText], { type: "text/plain" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `${safeName}.txt`;
+    a.click();
+    URL.revokeObjectURL(url);
+  });
+
+  // Event delegation for View/Copy buttons inside result table rows
+  resultsBody.addEventListener("click", async (e) => {
+    const viewBtn = e.target.closest(".btn-view-response");
+    if (viewBtn) {
+      const workerId = parseInt(viewBtn.dataset.workerId, 10);
+      const side = viewBtn.dataset.side;
+      const result = incrementalResults[workerId] || (runResults && runResults.find(r => r.worker_id === workerId));
+      if (result) {
+        const name = side === "a" ? result.model_a_name : result.model_b_name;
+        const text = side === "a" ? result.model_a_response : result.model_b_response;
+        showResponseModal(`${name || "Unknown"}`, text || "No response available");
+      }
+      return;
+    }
+
+    const copyBtn = e.target.closest(".btn-copy-inline");
+    if (copyBtn) {
+      const workerId = parseInt(copyBtn.dataset.workerId, 10);
+      const side = copyBtn.dataset.side;
+      const result = incrementalResults[workerId] || (runResults && runResults.find(r => r.worker_id === workerId));
+      if (result) {
+        const text = side === "a" ? result.model_a_response : result.model_b_response;
+        try {
+          await navigator.clipboard.writeText(text || "");
+          showToast("Copied to clipboard", "success");
+        } catch {
+          showToast("Clipboard access denied", "warning");
+        }
+      }
+      return;
     }
   });
 

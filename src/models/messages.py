@@ -14,6 +14,7 @@ class StartRunRequest(BaseModel):
     prompt: str = Field(default="", max_length=50_000)
     prompts: Optional[List[str]] = Field(default=None)
     system_prompt: str = Field(default="", max_length=100_000)
+    combine_with_first: bool = False
     window_count: int = Field(default=2, ge=1, le=12)
     submission_gap_seconds: Optional[float] = Field(default=None, ge=5.0)
     model_a: Optional[str] = None
@@ -99,6 +100,11 @@ class WindowResultPayload(BaseModel):
     error: Optional[str] = None
 
 
+class WorkerResultMessage(BaseModel):
+    type: Literal["worker_result"] = "worker_result"
+    result: WindowResultPayload
+
+
 class RunCompleteMessage(BaseModel):
     type: Literal["run_complete"] = "run_complete"
     results: List[WindowResultPayload]
@@ -135,6 +141,7 @@ class ErrorMessage(BaseModel):
 
 OutboundMessage = Union[
     WorkerUpdateMessage,
+    WorkerResultMessage,
     RunProgressMessage,
     LogMessage,
     RunCompleteMessage,
