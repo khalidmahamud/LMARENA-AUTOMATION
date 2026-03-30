@@ -6,6 +6,7 @@ Layers:
   ├── BrowserError
   │   ├── NavigationError
   │   ├── ChallengeDetectedError
+  │   ├── RateLimitError
   │   └── SelectorNotFoundError
   ├── WorkerError
   │   ├── SubmissionError
@@ -54,6 +55,13 @@ class ChallengeDetectedError(BrowserError):
     def __init__(self, worker_id: int, challenge_type: str = "unknown"):
         self.challenge_type = challenge_type
         super().__init__(f"Challenge ({challenge_type}) not resolved", worker_id)
+
+
+class RateLimitError(BrowserError):
+    """Model rate limit reached on Arena."""
+
+    def __init__(self, worker_id: int, message: str = "Rate limit reached"):
+        super().__init__(message, worker_id)
 
 
 class SelectorNotFoundError(BrowserError):

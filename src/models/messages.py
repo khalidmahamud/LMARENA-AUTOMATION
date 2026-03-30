@@ -72,6 +72,9 @@ class RunProgressMessage(BaseModel):
     total_workers: int
     completed_workers: int
     overall_pct: float
+    phase: Optional[str] = None
+    batch: Optional[int] = None
+    total_batches: Optional[int] = None
 
 
 class LogMessage(BaseModel):

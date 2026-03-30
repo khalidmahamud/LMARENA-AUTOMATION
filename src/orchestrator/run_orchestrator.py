@@ -10,6 +10,7 @@ from typing import List, Optional, Tuple
 from src.browser.manager import BrowserManager
 from src.core.events import Event, EventBus, EventType
 from src.core.exceptions import AllWorkersFailedError, RunCancelledError
+from src.export.excel_exporter import export_to_csv, export_to_excel, export_to_json
 from src.models.config import AppConfig, DisplayConfig
 from src.models.messages import StartRunRequest
 from src.models.results import RunResult, WindowResult
@@ -434,6 +435,13 @@ class RunOrchestrator:
             batch_results.sort(key=lambda item: item.worker_id)
             all_window_results.extend(batch_results)
 
+            # Save incremental results after each batch
+            self._current_run = self._build_result(
+                run_id, all_prompts, total_batches,
+                started_at, all_window_results,
+            )
+            self._save_incremental(self._current_run)
+
             # Emit batch complete progress
             await self._event_bus.publish(
                 Event(
@@ -469,23 +477,16 @@ class RunOrchestrator:
             )
 
         # Final result
-        completed_at = datetime.now(timezone.utc)
-        successful = sum(1 for r in all_window_results if r.success)
-        failed = sum(1 for r in all_window_results if not r.success)
-
-        run_result = RunResult(
-            run_id=run_id,
-            prompt=all_prompts[0],
-            prompts=all_prompts,
-            total_batches=total_batches,
-            started_at=started_at,
-            completed_at=completed_at,
-            total_elapsed_seconds=(completed_at - started_at).total_seconds(),
-            window_results=all_window_results,
-            total_windows=len(all_window_results),
-            successful_windows=successful,
-            failed_windows=failed,
+        run_result = self._build_result(
+            run_id, all_prompts, total_batches,
+            started_at, all_window_results,
         )
+        run_result.completed_at = datetime.now(timezone.utc)
+        run_result.total_elapsed_seconds = (
+            run_result.completed_at - started_at
+        ).total_seconds()
+        self._current_run = run_result
+        self._save_incremental(run_result)
 
         await self._event_bus.publish(
             Event(
@@ -493,8 +494,6 @@ class RunOrchestrator:
                 data={"run_result": run_result.model_dump(mode="json")},
             )
         )
-
-        self._current_run = run_result
 
         # Close browser windows after successful completion
         await self._browser_manager.close_contexts()
@@ -516,23 +515,12 @@ class RunOrchestrator:
     ) -> RunResult:
         """Clean up after cancellation: close browsers, notify UI, return."""
         await self._browser_manager.close_contexts()
-        completed_at = datetime.now(timezone.utc)
-        successful = sum(1 for r in partial_results if r.success)
-        failed = sum(1 for r in partial_results if not r.success)
-        run_result = RunResult(
-            run_id=run_id,
-            prompt=all_prompts[0] if all_prompts else request.prompt,
-            prompts=all_prompts,
-            total_batches=total_batches,
-            started_at=started_at,
-            completed_at=completed_at,
-            total_elapsed_seconds=(completed_at - started_at).total_seconds(),
-            window_results=partial_results,
-            total_windows=len(partial_results),
-            successful_windows=successful,
-            failed_windows=failed,
+        run_result = self._build_result(
+            run_id, all_prompts, total_batches, started_at, partial_results,
         )
         self._current_run = run_result
+        if partial_results:
+            self._save_incremental(run_result)
         # RUN_CANCELLED already published by cancel()
         return run_result
 
@@ -545,6 +533,41 @@ class RunOrchestrator:
         await self._browser_manager.close_contexts()
         await self._event_bus.publish(Event(type=EventType.RUN_CANCELLED))
         logger.info("Run cancelled")
+
+    @staticmethod
+    def _build_result(
+        run_id: str,
+        all_prompts: List[str],
+        total_batches: int,
+        started_at: datetime,
+        window_results: List[WindowResult],
+    ) -> RunResult:
+        successful = sum(1 for r in window_results if r.success)
+        failed = sum(1 for r in window_results if not r.success)
+        now = datetime.now(timezone.utc)
+        return RunResult(
+            run_id=run_id,
+            prompt=all_prompts[0] if all_prompts else "",
+            prompts=all_prompts,
+            total_batches=total_batches,
+            started_at=started_at,
+            completed_at=now,
+            total_elapsed_seconds=(now - started_at).total_seconds(),
+            window_results=window_results,
+            total_windows=len(window_results),
+            successful_windows=successful,
+            failed_windows=failed,
+        )
+
+    def _save_incremental(self, run_result: RunResult) -> None:
+        """Save current results to Excel, CSV, and JSON (overwrites each call)."""
+        out_dir = self._config.output_dir
+        try:
+            export_to_excel(run_result, out_dir)
+            export_to_csv(run_result, out_dir)
+            export_to_json(run_result, out_dir)
+        except Exception as exc:
+            logger.warning("Incremental save failed: %s", exc)
 
     def _apply_jitter(self, base: float) -> float:
         jitter_range = base * self._config.timing.jitter_pct

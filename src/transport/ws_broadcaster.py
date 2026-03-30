@@ -85,6 +85,9 @@ class WsBroadcaster:
                 total_workers=total,
                 completed_workers=submitted,
                 overall_pct=submitted / max(total, 1) * 100,
+                phase=d.get("phase"),
+                batch=d.get("batch"),
+                total_batches=d.get("total_batches"),
             )
 
         if event.type == EventType.RUN_COMPLETE:

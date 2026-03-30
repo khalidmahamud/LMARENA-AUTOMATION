@@ -20,7 +20,7 @@ from openpyxl import load_workbook
 from src.browser.manager import BrowserManager
 from src.browser.selectors import SelectorRegistry
 from src.core.events import EventBus
-from src.export.excel_exporter import export_to_excel
+from src.export.excel_exporter import export_to_csv, export_to_excel, export_to_json
 from src.models.config import AppConfig
 from src.orchestrator.run_orchestrator import RunOrchestrator
 from src.transport.ws_broadcaster import WsBroadcaster
@@ -145,18 +145,26 @@ async def export_excel():
     return {"error": "No results available"}
 
 
+@app.get("/export-csv")
+async def export_csv_file():
+    orch = ws_handler.orchestrator
+    if orch and orch.last_result:
+        path = export_to_csv(orch.last_result, config.output_dir)
+        return FileResponse(path, filename=path.name, media_type="text/csv")
+    return {"error": "No results available"}
+
+
 @app.get("/export-json")
 async def export_json():
     orch = ws_handler.orchestrator
     if orch and orch.last_result:
-        data = orch.last_result.model_dump(mode="json")
-        return JSONResponse(
-            content=data,
-            headers={
-                "Content-Disposition": f'attachment; filename="arena_results_{orch.last_result.run_id}.json"'
-            },
+        path = export_to_json(orch.last_result, config.output_dir)
+        return FileResponse(
+            path,
+            filename=path.name,
+            media_type="application/json",
         )
-    return JSONResponse({"error": "No results available"}, status_code=404)
+    return {"error": "No results available"}
 
 
 # ── Entry point ──

@@ -135,7 +135,14 @@
               <button class="tab" id="tab-json">JSON</button>
             </div>
           </div>
-          <button class="btn-export" id="btn-export" disabled>&#128196; Export .xlsx</button>
+          <div class="export-group">
+            <button class="btn-export" id="btn-export" disabled>&#11015; Export</button>
+            <div class="export-dropdown hidden" id="export-dropdown">
+              <a href="/export" class="export-option" download>Excel (.xlsx)</a>
+              <a href="/export-csv" class="export-option" download>CSV (.csv)</a>
+              <a href="/export-json" class="export-option" download>JSON (.json)</a>
+            </div>
+          </div>
         </div>
         <div id="results-table-wrap">
           <table class="results-table">

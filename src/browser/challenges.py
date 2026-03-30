@@ -16,6 +16,7 @@ class ChallengeType(str, Enum):
     RECAPTCHA = "recaptcha"
     SECURITY_MODAL = "security_modal"
     LOGIN_WALL = "login_wall"
+    RATE_LIMIT = "rate_limit"
 
 
 async def detect_challenge(page: Page) -> ChallengeType:
@@ -62,6 +63,20 @@ async def detect_challenge(page: Page) -> ChallengeType:
         if has_security_modal:
             logger.warning("Security verification modal detected")
             return ChallengeType.SECURITY_MODAL
+    except Exception:
+        pass
+
+    # Rate limit banner (e.g. "You have reached your rate limit for ...")
+    try:
+        has_rate_limit = await page.evaluate(
+            """() => {
+                const text = document.body?.innerText || "";
+                return text.includes("You have reached your rate limit");
+            }"""
+        )
+        if has_rate_limit:
+            logger.warning("Rate limit detected")
+            return ChallengeType.RATE_LIMIT
     except Exception:
         pass
 

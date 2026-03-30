@@ -8,7 +8,8 @@ from typing import Dict, List, Optional, Tuple
 from playwright.async_api import Page
 
 from src.browser.selectors import SelectorRegistry
-from src.core.exceptions import PollingTimeoutError
+from src.browser.challenges import ChallengeType, detect_challenge
+from src.core.exceptions import PollingTimeoutError, RateLimitError
 from src.models.config import TimingConfig
 
 logger = logging.getLogger(__name__)
@@ -78,6 +79,20 @@ class ResponsePoller:
             except Exception:
                 if cancel_event and cancel_event.is_set():
                     raise asyncio.CancelledError("Run cancelled")
+
+            # Check for rate limit banner during polling
+            try:
+                challenge = await detect_challenge(page)
+                if challenge == ChallengeType.RATE_LIMIT:
+                    logger.warning(
+                        "Worker %d: rate limit detected during polling",
+                        worker_id,
+                    )
+                    raise RateLimitError(worker_id)
+            except RateLimitError:
+                raise
+            except Exception:
+                pass
 
             slides = await self._extract_slide_payloads(
                 page,
@@ -171,13 +186,8 @@ class ResponsePoller:
                     const style = document.createElement('style');
                     style.id = '_arena_hide_thinking';
                     style.textContent = `
-                        /* Hide the thinking disclosure content panel */
-                        div.not-prose[data-state] > div.text-text-secondary,
-                        div.not-prose[data-state] > div[style*="overflow: clip"] {
-                            display: none !important;
-                        }
-                        /* Collapse the thinking button itself */
-                        div.not-prose[data-state] > button[aria-expanded] {
+                        /* Hide reasoning/thinking accordions inside model slides */
+                        [role='group'][aria-roledescription='slide'] div.not-prose[data-state] {
                             display: none !important;
                         }
                     `;

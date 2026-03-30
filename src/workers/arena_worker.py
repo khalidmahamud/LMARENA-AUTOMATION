@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from datetime import datetime, timezone
 from typing import Callable, Coroutine, Optional
 
@@ -13,6 +14,7 @@ from src.core.events import Event, EventBus, EventType
 from src.core.exceptions import (
     ChallengeDetectedError,
     NavigationError,
+    RateLimitError,
 )
 from src.core.state_machine import WorkerStateMachine
 from src.models.config import AppConfig
@@ -52,6 +54,9 @@ class ArenaWorker:
         self._started_at: Optional[datetime] = None
         self._cancelled = False
         self._cancel_event = asyncio.Event()
+        self._last_prompt: Optional[str] = None
+        self._last_model_a: Optional[str] = None
+        self._last_model_b: Optional[str] = None
 
         self._selectors = SelectorRegistry.instance()
         self._human = HumanSimulator(config.typing)
@@ -297,6 +302,9 @@ class ArenaWorker:
         """Select models (optional), paste prompt, and submit."""
         assert self._page is not None
         self._started_at = datetime.now(timezone.utc)
+        self._last_prompt = prompt
+        self._last_model_a = model_a
+        self._last_model_b = model_b
 
         # Optional model selection (side-by-side has two dropdowns)
         if model_a or model_b:
@@ -673,6 +681,17 @@ class ArenaWorker:
 
     # ── Clipboard extraction ──
 
+    @staticmethod
+    def _clipboard_contains_hidden_reasoning(text: str) -> bool:
+        normalized = "\n".join(line.strip() for line in text.splitlines())
+        return bool(
+            re.search(
+                r"(^|\n)Thought for \d+\s+second",
+                normalized,
+                flags=re.IGNORECASE,
+            )
+        )
+
     async def _extract_via_clipboard(
         self, button_index: int, label: str
     ) -> Optional[str]:
@@ -766,6 +785,13 @@ class ArenaWorker:
                         break
 
             if clipboard_text and clipboard_text.strip():
+                if self._clipboard_contains_hidden_reasoning(clipboard_text):
+                    await self._log(
+                        "debug",
+                        f"Clipboard content for {label} included hidden reasoning; "
+                        "falling back to DOM extraction",
+                    )
+                    return None
                 await self._log(
                     "info",
                     f"Copied {label} response via clipboard ({len(clipboard_text)} chars)",
@@ -783,6 +809,7 @@ class ArenaWorker:
     async def poll_for_completion(
         self,
         baseline_responses: Optional[tuple[str, str]] = None,
+        _rate_limit_retries: int = 2,
     ) -> WindowResult:
         """Poll DOM until both responses are stable. Returns result."""
         assert self._page is not None
@@ -831,6 +858,74 @@ class ArenaWorker:
                 )
             )
             return self._result
+
+        except RateLimitError:
+            if _rate_limit_retries <= 0 or self._context_recreator is None:
+                raise  # fall through to general handler below
+
+            await self._log(
+                "warning",
+                "Rate limit hit — closing window, reopening fresh, and retrying",
+            )
+            await self._event_bus.publish(
+                Event(
+                    type=EventType.CHALLENGE_DETECTED,
+                    worker_id=self._id,
+                    data={"challenge_type": "rate_limit"},
+                )
+            )
+
+            # Transition to WAITING_FOR_CHALLENGE (allowed from POLLING)
+            await self.state_machine.transition(
+                WorkerState.WAITING_FOR_CHALLENGE
+            )
+
+            # Close and reopen window
+            self._context = await self._context_recreator(self._id)
+            self._page = (
+                self._context.pages[0]
+                if self._context.pages
+                else await self._context.new_page()
+            )
+
+            # Re-navigate
+            await self.state_machine.transition(WorkerState.NAVIGATING)
+            await self._log("info", "Fresh window opened; navigating back to Arena")
+            try:
+                await self._page.goto(
+                    self._config.arena_url,
+                    wait_until="domcontentloaded",
+                    timeout=60_000,
+                )
+            except Exception as nav_exc:
+                await self.state_machine.force_error(str(nav_exc))
+                raise NavigationError(str(nav_exc), self._id)
+
+            if self._zoom_pct != 100:
+                await self._page.evaluate(
+                    "z => document.body.style.zoom = z + '%'", self._zoom_pct
+                )
+
+            await self._dismiss_tos_dialog()
+            await self._dismiss_login_dialog()
+
+            await self._event_bus.publish(
+                Event(type=EventType.CHALLENGE_RESOLVED, worker_id=self._id)
+            )
+
+            # Re-submit the same prompt
+            await self.state_machine.transition(WorkerState.READY)
+            await self.submit_prompt(
+                prompt=self._last_prompt,
+                model_a=self._last_model_a,
+                model_b=self._last_model_b,
+            )
+
+            # Re-poll with decremented retry count
+            return await self.poll_for_completion(
+                baseline_responses=baseline_responses,
+                _rate_limit_retries=_rate_limit_retries - 1,
+            )
 
         except Exception as exc:
             self._result = WindowResult(

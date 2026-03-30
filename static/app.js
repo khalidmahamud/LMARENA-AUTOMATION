@@ -385,6 +385,20 @@
     progressFill.style.width = `${pct}%`;
     progressPct.textContent = `${pct}%`;
 
+    // Enable export as soon as the first batch is done
+    if (msg.phase === "batch_complete" && exportBtn.disabled) {
+      exportBtn.disabled = false;
+    }
+
+    // Show batch progress in ETA label
+    if (msg.batch && msg.total_batches && msg.total_batches > 1) {
+      const batchLabel = `Batch ${msg.batch}/${msg.total_batches}`;
+      if (msg.phase === "batch_complete" && msg.batch < msg.total_batches) {
+        etaText.textContent = `${batchLabel} done`;
+        return;
+      }
+    }
+
     // ETA calculation
     if (runStartTime && pct > 0 && pct < 100) {
       const elapsed = (Date.now() - runStartTime) / 1000;
@@ -572,13 +586,21 @@
     promptInput.focus();
   });
 
-  // Export button — format depends on active tab
-  exportBtn.addEventListener("click", () => {
-    if (tabJson.classList.contains("active")) {
-      window.location.href = "/export-json";
-    } else {
-      window.location.href = "/export";
-    }
+  // Export dropdown
+  const exportDropdown = document.getElementById("export-dropdown");
+
+  exportBtn.addEventListener("click", (e) => {
+    e.stopPropagation();
+    exportDropdown.classList.toggle("hidden");
+  });
+
+  // Close dropdown when clicking outside
+  document.addEventListener("click", () => {
+    exportDropdown.classList.add("hidden");
+  });
+
+  exportDropdown.addEventListener("click", () => {
+    exportDropdown.classList.add("hidden");
   });
 
   // ══════════════════════════════════════

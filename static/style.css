@@ -826,6 +826,45 @@ textarea#prompt:focus {
   cursor: not-allowed;
 }
 
+/* Export dropdown */
+
+.export-group {
+  position: relative;
+}
+
+.export-dropdown {
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 0;
+  background: var(--surface);
+  border: 1px solid var(--border-light);
+  border-radius: var(--radius);
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.4);
+  z-index: 50;
+  min-width: 140px;
+  overflow: hidden;
+}
+
+.export-option {
+  display: block;
+  padding: 0.5rem 0.85rem;
+  font-size: 0.8rem;
+  font-family: var(--font);
+  color: var(--text);
+  text-decoration: none;
+  transition: background 0.1s;
+  cursor: pointer;
+}
+
+.export-option:hover {
+  background: var(--surface-2);
+  color: var(--accent);
+}
+
+.export-option:not(:last-child) {
+  border-bottom: 1px solid var(--border);
+}
+
 #results-table-wrap {
   flex: 1;
   min-height: 0;

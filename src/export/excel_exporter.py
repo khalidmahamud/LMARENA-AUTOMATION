@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import csv
+import json
 import logging
 from datetime import datetime, timezone
 from pathlib import Path
@@ -24,8 +26,7 @@ def export_to_excel(run_result: RunResult, output_dir: str = "outputs") -> Path:
     out = Path(output_dir)
     out.mkdir(parents=True, exist_ok=True)
 
-    ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-    filename = out / f"arena_results_{run_result.run_id}_{ts}.xlsx"
+    filename = out / f"arena_results_{run_result.run_id}.xlsx"
 
     wb = Workbook()
     ws = wb.active
@@ -125,4 +126,56 @@ def export_to_excel(run_result: RunResult, output_dir: str = "outputs") -> Path:
 
     wb.save(str(filename))
     logger.info("Excel exported to %s", filename)
+    return filename
+
+
+def export_to_csv(run_result: RunResult, output_dir: str = "outputs") -> Path:
+    """Generate a ``.csv`` file from a ``RunResult``."""
+    out = Path(output_dir)
+    out.mkdir(parents=True, exist_ok=True)
+    filename = out / f"arena_results_{run_result.run_id}.csv"
+
+    has_batches = run_result.total_batches > 1
+    headers = ["window"]
+    if has_batches:
+        headers.append("batch")
+    headers += [
+        "prompt", "model_a", "response_a",
+        "model_b", "response_b", "elapsed_s", "status", "error",
+    ]
+
+    with open(filename, "w", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        writer.writerow(headers)
+        for wr in run_result.window_results:
+            row = [wr.worker_id + 1]
+            if has_batches:
+                row.append(wr.batch_index + 1)
+            row += [
+                wr.prompt or "",
+                wr.model_a_name or "",
+                wr.model_a_response or "",
+                wr.model_b_name or "",
+                wr.model_b_response or "",
+                round(wr.elapsed_seconds, 1) if wr.elapsed_seconds else "",
+                "success" if wr.success else "error",
+                wr.error or "",
+            ]
+            writer.writerow(row)
+
+    logger.info("CSV exported to %s", filename)
+    return filename
+
+
+def export_to_json(run_result: RunResult, output_dir: str = "outputs") -> Path:
+    """Generate a ``.json`` file from a ``RunResult``."""
+    out = Path(output_dir)
+    out.mkdir(parents=True, exist_ok=True)
+    filename = out / f"arena_results_{run_result.run_id}.json"
+
+    data = run_result.model_dump(mode="json")
+    with open(filename, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2, ensure_ascii=False)
+
+    logger.info("JSON exported to %s", filename)
     return filename
