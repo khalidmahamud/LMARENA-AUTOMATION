@@ -38,7 +38,8 @@
 
 html, body {
   height: 100%;
-  overflow: hidden;
+  overflow-y: auto;
+  scroll-behavior: smooth;
 }
 
 body {
@@ -435,6 +436,340 @@ textarea#prompt:focus {
   white-space: nowrap;
   min-width: 2.5rem;
   text-align: right;
+}
+
+/* ══════════════════════════════════════
+   SYSTEM PROMPT (collapsible)
+   ══════════════════════════════════════ */
+
+.system-prompt-details {
+  margin-bottom: 0.6rem;
+}
+
+.system-prompt-toggle {
+  font-size: 0.7rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-dim);
+  cursor: pointer;
+  padding: 0.35rem 0;
+  list-style: none;
+  user-select: none;
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.system-prompt-toggle::before {
+  content: "\25B6";
+  font-size: 0.55rem;
+  transition: transform 0.15s;
+}
+
+.system-prompt-details[open] .system-prompt-toggle::before {
+  transform: rotate(90deg);
+}
+
+.system-prompt-toggle::-webkit-details-marker {
+  display: none;
+}
+
+.system-prompt-hint {
+  font-weight: 400;
+  text-transform: none;
+  letter-spacing: normal;
+  color: var(--text-dim);
+  font-size: 0.68rem;
+}
+
+.system-prompt-details textarea#system-prompt {
+  width: 100%;
+  height: 60px;
+  max-height: 120px;
+  margin-top: 0.35rem;
+  padding: 0.6rem 0.75rem;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text);
+  font-size: 0.82rem;
+  font-family: var(--font);
+  line-height: 1.5;
+  resize: vertical;
+  outline: none;
+  transition: border-color 0.15s;
+}
+
+.system-prompt-details textarea#system-prompt:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent-glow);
+}
+
+/* ══════════════════════════════════════
+   PROMPT MODE TOGGLE & FILE UPLOAD
+   ══════════════════════════════════════ */
+
+.prompt-mode-toggle {
+  display: flex;
+  gap: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+
+.mode-btn {
+  padding: 0.25rem 0.65rem;
+  border: none;
+  background: var(--surface-2);
+  color: var(--text-dim);
+  font-size: 0.72rem;
+  font-weight: 600;
+  cursor: pointer;
+  font-family: var(--font);
+  transition: all 0.15s;
+}
+
+.mode-btn:not(:last-child) {
+  border-right: 1px solid var(--border);
+}
+
+.mode-btn:hover {
+  color: var(--text-muted);
+  background: var(--surface-3);
+}
+
+.mode-btn.active {
+  background: var(--accent);
+  color: #fff;
+}
+
+/* Upload area */
+
+.upload-area {
+  border: 2px dashed var(--border-light);
+  border-radius: var(--radius);
+  padding: 1.25rem 1rem;
+  text-align: center;
+  cursor: pointer;
+  color: var(--text-muted);
+  font-size: 0.85rem;
+  transition: all 0.2s;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.2rem;
+}
+
+.upload-area:hover,
+.upload-area.dragover {
+  border-color: var(--accent);
+  background: rgba(20, 184, 166, 0.05);
+  color: var(--text);
+}
+
+.upload-icon {
+  font-size: 1.3rem;
+}
+
+.upload-hint {
+  font-size: 0.7rem;
+  color: var(--text-dim);
+}
+
+/* File info bar */
+
+.file-info-bar {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.5rem 0.75rem;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  margin-bottom: 0.6rem;
+}
+
+.file-name {
+  font-weight: 600;
+  font-size: 0.82rem;
+  color: var(--text);
+}
+
+.file-row-count {
+  font-size: 0.72rem;
+  color: var(--text-muted);
+  font-family: var(--mono);
+}
+
+.file-info-bar .btn-icon {
+  margin-left: auto;
+}
+
+/* Columns + Row range — single row */
+
+.file-config-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 1.25rem;
+  margin-bottom: 0.5rem;
+}
+
+.file-config-group {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.3rem;
+  flex: 1;
+  min-width: 0;
+}
+
+.file-config-group.file-config-range {
+  flex: 0 0 auto;
+  flex-wrap: nowrap;
+}
+
+.file-config-label {
+  font-size: 0.68rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-dim);
+  margin-right: 0.2rem;
+  flex-shrink: 0;
+}
+
+/* Column chips */
+
+.column-checkboxes {
+  display: contents;
+}
+
+.column-chip {
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+  padding: 0.2rem 0.5rem;
+  border-radius: 4px;
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+  cursor: pointer;
+  font-size: 0.72rem;
+  color: var(--text-muted);
+  transition: all 0.15s;
+  user-select: none;
+  white-space: nowrap;
+}
+
+.column-chip:hover {
+  border-color: var(--border-light);
+  color: var(--text);
+}
+
+.column-chip.selected {
+  border-color: var(--accent);
+  background: rgba(20, 184, 166, 0.1);
+  color: var(--accent);
+}
+
+.column-chip input[type="checkbox"] {
+  accent-color: var(--accent);
+  cursor: pointer;
+  margin: 0;
+  width: 12px;
+  height: 12px;
+}
+
+/* Row range inputs */
+
+.file-config-range input[type="number"] {
+  width: 65px;
+  padding: 0.25rem 0.45rem;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--text);
+  font-size: 0.78rem;
+  font-family: var(--mono);
+  outline: none;
+  transition: border-color 0.15s;
+}
+
+.file-config-range input[type="number"]:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent-glow);
+}
+
+.row-range-sep {
+  font-size: 0.72rem;
+  color: var(--text-dim);
+}
+
+.row-range-info {
+  font-size: 0.68rem;
+  color: var(--text-dim);
+  font-family: var(--mono);
+  white-space: nowrap;
+}
+
+/* File preview */
+
+.file-preview {
+  max-height: 100px;
+  overflow-y: auto;
+  font-size: 0.7rem;
+  font-family: var(--mono);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  margin-bottom: 0.35rem;
+}
+
+.file-preview:empty {
+  display: none;
+}
+
+.file-preview table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.file-preview th {
+  text-align: left;
+  padding: 0.25rem 0.5rem;
+  font-weight: 600;
+  color: var(--text-dim);
+  border-bottom: 1px solid var(--border);
+  position: sticky;
+  top: 0;
+  background: var(--surface-3);
+}
+
+.file-preview td {
+  padding: 0.2rem 0.5rem;
+  color: var(--text-muted);
+  border-bottom: 1px solid var(--border);
+  max-width: 200px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.file-preview tr:last-child td {
+  border-bottom: none;
+}
+
+/* Batch info */
+
+.batch-info {
+  font-size: 0.75rem;
+  color: var(--accent);
+  font-family: var(--mono);
+  font-weight: 500;
+}
+
+.batch-info:empty {
+  display: none;
 }
 
 /* ══════════════════════════════════════
@@ -918,7 +1253,8 @@ textarea#prompt:focus {
 }
 
 .form-group input[type="text"],
-.form-group input[type="number"] {
+.form-group input[type="number"],
+.form-group select {
   width: 100%;
   padding: 0.5rem 0.75rem;
   background: var(--surface-2);
@@ -929,6 +1265,7 @@ textarea#prompt:focus {
   font-family: var(--font);
   outline: none;
   transition: border-color 0.15s;
+  cursor: pointer;
 }
 
 .form-group input:focus {

@@ -39,7 +39,7 @@ TRANSITION_TABLE: Dict[WorkerState, Set[WorkerState]] = {
         WorkerState.ERROR,
         WorkerState.CANCELLED,
     },
-    WorkerState.COMPLETE: {WorkerState.IDLE},
+    WorkerState.COMPLETE: {WorkerState.IDLE, WorkerState.READY},
     WorkerState.ERROR: {WorkerState.IDLE},
     WorkerState.CANCELLED: {WorkerState.IDLE},
 }

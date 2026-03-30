@@ -55,7 +55,16 @@ class WsHandler:
                 msg_type = data.get("type")
 
                 if msg_type == "start_run":
-                    request = StartRunRequest(**data)
+                    try:
+                        request = StartRunRequest(**data)
+                    except Exception as exc:
+                        logger.error("Invalid start_run request: %s", exc)
+                        await websocket.send_text(
+                            ErrorMessage(
+                                message=f"Invalid request: {exc}"
+                            ).model_dump_json()
+                        )
+                        continue
                     await self._handle_start_run(request)
 
                 elif msg_type == "stop_run":

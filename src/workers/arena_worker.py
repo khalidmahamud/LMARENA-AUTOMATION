@@ -780,7 +780,10 @@ class ArenaWorker:
 
     # ── Polling ──
 
-    async def poll_for_completion(self) -> WindowResult:
+    async def poll_for_completion(
+        self,
+        baseline_responses: Optional[tuple[str, str]] = None,
+    ) -> WindowResult:
         """Poll DOM until both responses are stable. Returns result."""
         assert self._page is not None
 
@@ -790,6 +793,7 @@ class ArenaWorker:
                 selectors=self._selectors,
                 worker_id=self._id,
                 cancel_event=self._cancel_event,
+                baseline_responses=baseline_responses,
             )
 
             # Click copy buttons and read clipboard (falls back to DOM text)
@@ -846,6 +850,24 @@ class ArenaWorker:
                 )
             )
             return self._result
+
+    async def prepare_for_followup_prompt(self) -> tuple[str, str]:
+        """Ready the current page for another prompt in the same chat."""
+        baseline = (
+            self._result.model_a_response if self._result else "",
+            self._result.model_b_response if self._result else "",
+        )
+
+        if self.state_machine.state == WorkerState.COMPLETE:
+            await self.state_machine.transition(WorkerState.READY)
+        elif self.state_machine.state != WorkerState.READY:
+            raise RuntimeError(
+                f"Worker {self._id} is not ready for a follow-up prompt "
+                f"(state={self.state_machine.state.value})"
+            )
+
+        self._result = None
+        return baseline
 
     # ── Lifecycle ──
 

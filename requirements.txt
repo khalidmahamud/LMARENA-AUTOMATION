@@ -1,4 +1,5 @@
 fastapi>=0.100
+python-multipart>=0.0.5
 uvicorn[standard]>=0.20
 playwright>=1.40
 playwright-stealth>=1.0

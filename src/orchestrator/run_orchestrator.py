@@ -5,7 +5,7 @@ import logging
 import random
 import uuid
 from datetime import datetime, timezone
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 from src.browser.manager import BrowserManager
 from src.core.events import Event, EventBus, EventType
@@ -27,9 +27,12 @@ class RunOrchestrator:
     2. Launch N browser contexts via ``BrowserManager``
     3. Create N ``ArenaWorker`` instances
     4. Navigate all workers to Arena (parallel)
-    5. Submit prompts sequentially with staggered gap
-    6. Poll all workers for completion (parallel)
-    7. Collect results and emit ``RUN_COMPLETE``
+    5. For each batch of prompts:
+       a. Submit prompts sequentially with staggered gap
+       b. Poll all workers for completion (parallel)
+       c. Collect results
+       d. Reset workers and re-navigate for next batch
+    6. Aggregate results and emit ``RUN_COMPLETE``
     """
 
     def __init__(
@@ -51,6 +54,15 @@ class RunOrchestrator:
         started_at = datetime.now(timezone.utc)
         count = request.window_count
         self._cancelled = False
+        system_prompt = request.system_prompt.strip()
+
+        # Determine all prompts and chunk into batches
+        all_prompts = request.prompts if request.prompts else [request.prompt]
+        batches: List[List[str]] = [
+            all_prompts[i : i + count]
+            for i in range(0, len(all_prompts), count)
+        ]
+        total_batches = len(batches)
 
         await self._event_bus.publish(
             Event(
@@ -58,7 +70,9 @@ class RunOrchestrator:
                 data={
                     "run_id": run_id,
                     "window_count": count,
-                    "prompt": request.prompt[:200],
+                    "prompt": all_prompts[0][:200],
+                    "total_prompts": len(all_prompts),
+                    "total_batches": total_batches,
                 },
             )
         )
@@ -120,81 +134,355 @@ class RunOrchestrator:
             )
 
         if self._cancelled:
-            return await self._finish_cancelled(run_id, request, started_at, count)
+            return await self._finish_cancelled(
+                run_id, request, started_at, count, all_prompts, total_batches, []
+            )
 
-        # Phase 4: Sequential submission with staggered gap
+        # Phase 4-6: Batch loop
         gap = request.submission_gap_seconds or self._config.timing.submission_gap_seconds
-        submitted_workers: List[ArenaWorker] = []
+        all_window_results: List[WindowResult] = []
 
-        for i, worker in enumerate(self._workers):
+        for batch_idx, batch_prompts in enumerate(batches):
             if self._cancelled:
                 break
-            if worker.state_machine.state != WorkerState.READY:
-                logger.warning("Worker %d not ready, skipping", i)
-                continue
 
-            try:
-                await worker.submit_prompt(
-                    prompt=request.prompt,
-                    model_a=request.model_a,
-                    model_b=request.model_b,
-                )
-                submitted_workers.append(worker)
-            except Exception as exc:
-                logger.error("Worker %d submission failed: %s", i, exc)
-
+            # Log batch start
             await self._event_bus.publish(
                 Event(
-                    type=EventType.RUN_PROGRESS,
+                    type=EventType.LOG,
                     data={
-                        "total_workers": count,
-                        "submitted": len(submitted_workers),
-                        "phase": "submitting",
+                        "level": "info",
+                        "text": (
+                            f"Batch {batch_idx + 1}/{total_batches} starting "
+                            f"({len(batch_prompts)} prompt(s))"
+                        ),
                     },
                 )
             )
 
-            # Stagger next submission (skip after last)
-            if i < count - 1 and not self._cancelled:
-                jittered = self._apply_jitter(gap)
-                await asyncio.sleep(jittered)
+            # Re-navigate for subsequent batches
+            if batch_idx > 0:
+                for worker in self._workers:
+                    await worker.state_machine.reset()
+                nav_results = await asyncio.gather(
+                    *(w.navigate_to_arena(zoom_pct=request.zoom_pct)
+                      for w in self._workers),
+                    return_exceptions=True,
+                )
+                for i, result in enumerate(nav_results):
+                    if isinstance(result, Exception):
+                        logger.error(
+                            "Worker %d re-navigation failed (batch %d): %s",
+                            i, batch_idx, result,
+                        )
 
+            if self._cancelled:
+                break
+
+            # Submit this batch's prompts (sequential with gap)
+            workers_in_batch = min(len(batch_prompts), count)
+            batch_results: List[WindowResult] = []
+            submitted: List[
+                Tuple[int, ArenaWorker, str, Optional[Tuple[str, str]]]
+            ] = []
+            ready_for_actual: dict[int, Tuple[str, str]] = {}
+
+            if system_prompt:
+                await self._event_bus.publish(
+                    Event(
+                        type=EventType.LOG,
+                        data={
+                            "level": "info",
+                            "text": (
+                                f"Batch {batch_idx + 1}/{total_batches}: "
+                                "sending system prompt first"
+                            ),
+                        },
+                    )
+                )
+
+                submitted_system: List[Tuple[int, ArenaWorker]] = []
+                for i in range(workers_in_batch):
+                    worker = self._workers[i]
+                    prompt = batch_prompts[i]
+
+                    if self._cancelled:
+                        break
+                    if worker.state_machine.state != WorkerState.READY:
+                        logger.warning(
+                            "Worker %d not ready for system prompt (batch %d)",
+                            i,
+                            batch_idx,
+                        )
+                        batch_results.append(
+                            self._failed_result(
+                                worker_id=i,
+                                prompt=prompt,
+                                batch_idx=batch_idx,
+                                error="Worker was not ready for the system prompt phase",
+                            )
+                        )
+                        continue
+
+                    try:
+                        await worker.submit_prompt(
+                            prompt=system_prompt,
+                            model_a=request.model_a,
+                            model_b=request.model_b,
+                        )
+                        submitted_system.append((i, worker))
+                    except Exception as exc:
+                        logger.error(
+                            "Worker %d system prompt submission failed (batch %d): %s",
+                            i,
+                            batch_idx,
+                            exc,
+                        )
+                        batch_results.append(
+                            self._failed_result(
+                                worker_id=i,
+                                prompt=prompt,
+                                batch_idx=batch_idx,
+                                error=f"System prompt submission failed: {exc}",
+                            )
+                        )
+
+                    if i < workers_in_batch - 1 and not self._cancelled:
+                        jittered = self._apply_jitter(gap)
+                        await asyncio.sleep(jittered)
+
+                if self._cancelled:
+                    break
+
+                system_poll_tasks = [
+                    asyncio.create_task(worker.poll_for_completion())
+                    for _, worker in submitted_system
+                ]
+                if system_poll_tasks:
+                    await asyncio.gather(
+                        *system_poll_tasks, return_exceptions=True
+                    )
+
+                if self._cancelled:
+                    break
+
+                for worker_idx, worker in submitted_system:
+                    system_result = worker.get_result()
+                    actual_prompt = batch_prompts[worker_idx]
+                    if not system_result or not system_result.success:
+                        error_text = (
+                            "System prompt phase failed"
+                            if not system_result
+                            else (
+                                f"System prompt phase failed: "
+                                f"{system_result.error or 'unknown error'}"
+                            )
+                        )
+                        batch_results.append(
+                            self._failed_result(
+                                worker_id=worker_idx,
+                                prompt=actual_prompt,
+                                batch_idx=batch_idx,
+                                error=error_text,
+                                source=system_result,
+                            )
+                        )
+                        continue
+
+                    try:
+                        ready_for_actual[worker_idx] = (
+                            await worker.prepare_for_followup_prompt()
+                        )
+                    except Exception as exc:
+                        batch_results.append(
+                            self._failed_result(
+                                worker_id=worker_idx,
+                                prompt=actual_prompt,
+                                batch_idx=batch_idx,
+                                error=f"Could not prepare follow-up prompt: {exc}",
+                                source=system_result,
+                            )
+                        )
+
+                await self._event_bus.publish(
+                    Event(
+                        type=EventType.LOG,
+                        data={
+                            "level": "info",
+                            "text": (
+                                f"Batch {batch_idx + 1}/{total_batches}: "
+                                "system prompt phase complete"
+                            ),
+                        },
+                    )
+                )
+
+            for i in range(workers_in_batch):
+                worker = self._workers[i]
+                prompt = batch_prompts[i]
+                baseline_responses: Optional[Tuple[str, str]] = None
+
+                if self._cancelled:
+                    break
+                if system_prompt:
+                    baseline_responses = ready_for_actual.get(i)
+                    if baseline_responses is None:
+                        continue
+                if worker.state_machine.state != WorkerState.READY:
+                    logger.warning(
+                        "Worker %d not ready (batch %d), skipping", i, batch_idx
+                    )
+                    batch_results.append(
+                        self._failed_result(
+                            worker_id=i,
+                            prompt=prompt,
+                            batch_idx=batch_idx,
+                            error="Worker was not ready for prompt submission",
+                        )
+                    )
+                    continue
+
+                try:
+                    await worker.submit_prompt(
+                        prompt=prompt,
+                        model_a=None if system_prompt else request.model_a,
+                        model_b=None if system_prompt else request.model_b,
+                    )
+                    submitted.append(
+                        (i, worker, prompt, baseline_responses)
+                    )
+                except Exception as exc:
+                    logger.error(
+                        "Worker %d submission failed (batch %d): %s",
+                        i, batch_idx, exc,
+                    )
+                    batch_results.append(
+                        self._failed_result(
+                            worker_id=i,
+                            prompt=prompt,
+                            batch_idx=batch_idx,
+                            error=f"Prompt submission failed: {exc}",
+                        )
+                    )
+
+                # Emit progress
+                completed_prompts = (
+                    len(all_window_results)
+                    + len(batch_results)
+                    + len(submitted)
+                )
+                await self._event_bus.publish(
+                    Event(
+                        type=EventType.RUN_PROGRESS,
+                        data={
+                            "total_workers": len(all_prompts),
+                            "submitted": completed_prompts,
+                            "phase": "submitting",
+                            "batch": batch_idx + 1,
+                            "total_batches": total_batches,
+                        },
+                    )
+                )
+
+                # Stagger next submission (skip after last in batch)
+                if i < workers_in_batch - 1 and not self._cancelled:
+                    jittered = self._apply_jitter(gap)
+                    await asyncio.sleep(jittered)
+
+            if self._cancelled:
+                break
+
+            # Poll submitted workers
+            poll_tasks = [
+                asyncio.create_task(
+                    worker.poll_for_completion(
+                        baseline_responses=baseline_responses
+                    )
+                )
+                for _, worker, _, baseline_responses in submitted
+            ]
+            if poll_tasks:
+                await asyncio.gather(*poll_tasks, return_exceptions=True)
+
+            if self._cancelled:
+                break
+
+            # Collect batch results
+            retain = request.retain_output
+            for worker_idx, worker, prompt, _ in submitted:
+                result = worker.get_result()
+                if result:
+                    result.prompt = prompt
+                    result.batch_index = batch_idx
+                    if retain == "model_a":
+                        result.model_b_name = None
+                        result.model_b_response = None
+                    elif retain == "model_b":
+                        result.model_a_name = None
+                        result.model_a_response = None
+                    batch_results.append(result)
+                else:
+                    batch_results.append(
+                        self._failed_result(
+                            worker_id=worker_idx,
+                            prompt=prompt,
+                            batch_idx=batch_idx,
+                            error="No result returned after polling",
+                        )
+                    )
+
+            batch_results.sort(key=lambda item: item.worker_id)
+            all_window_results.extend(batch_results)
+
+            # Emit batch complete progress
+            await self._event_bus.publish(
+                Event(
+                    type=EventType.RUN_PROGRESS,
+                    data={
+                        "total_workers": len(all_prompts),
+                        "submitted": len(all_window_results),
+                        "phase": "batch_complete",
+                        "batch": batch_idx + 1,
+                        "total_batches": total_batches,
+                    },
+                )
+            )
+
+            await self._event_bus.publish(
+                Event(
+                    type=EventType.LOG,
+                    data={
+                        "level": "info",
+                        "text": (
+                            f"Batch {batch_idx + 1}/{total_batches} complete "
+                            f"— {len(all_window_results)}/{len(all_prompts)} prompts done"
+                        ),
+                    },
+                )
+            )
+
+        # Cancelled mid-batch — return partial results
         if self._cancelled:
-            return await self._finish_cancelled(run_id, request, started_at, count)
+            return await self._finish_cancelled(
+                run_id, request, started_at, count,
+                all_prompts, total_batches, all_window_results,
+            )
 
-        # Phase 5: Parallel polling
-        poll_tasks = [
-            asyncio.create_task(w.poll_for_completion())
-            for w in submitted_workers
-        ]
-
-        if poll_tasks:
-            await asyncio.gather(*poll_tasks, return_exceptions=True)
-
-        # Check cancellation after polling completes
-        if self._cancelled:
-            return await self._finish_cancelled(run_id, request, started_at, count)
-
-        # Phase 6: Collect results
-        window_results: List[WindowResult] = []
-        for worker in self._workers:
-            result = worker.get_result()
-            if result:
-                result.prompt = request.prompt
-                window_results.append(result)
-
+        # Final result
         completed_at = datetime.now(timezone.utc)
-        successful = sum(1 for r in window_results if r.success)
-        failed = sum(1 for r in window_results if not r.success)
+        successful = sum(1 for r in all_window_results if r.success)
+        failed = sum(1 for r in all_window_results if not r.success)
 
         run_result = RunResult(
             run_id=run_id,
-            prompt=request.prompt,
+            prompt=all_prompts[0],
+            prompts=all_prompts,
+            total_batches=total_batches,
             started_at=started_at,
             completed_at=completed_at,
             total_elapsed_seconds=(completed_at - started_at).total_seconds(),
-            window_results=window_results,
-            total_windows=count,
+            window_results=all_window_results,
+            total_windows=len(all_window_results),
             successful_windows=successful,
             failed_windows=failed,
         )
@@ -211,8 +499,8 @@ class RunOrchestrator:
         # Close browser windows after successful completion
         await self._browser_manager.close_contexts()
 
-        if successful == 0 and count > 0:
-            raise AllWorkersFailedError(count)
+        if successful == 0 and len(all_prompts) > 0:
+            raise AllWorkersFailedError(len(all_prompts))
 
         return run_result
 
@@ -222,20 +510,27 @@ class RunOrchestrator:
         request: StartRunRequest,
         started_at: datetime,
         count: int,
+        all_prompts: List[str],
+        total_batches: int,
+        partial_results: List[WindowResult],
     ) -> RunResult:
         """Clean up after cancellation: close browsers, notify UI, return."""
         await self._browser_manager.close_contexts()
         completed_at = datetime.now(timezone.utc)
+        successful = sum(1 for r in partial_results if r.success)
+        failed = sum(1 for r in partial_results if not r.success)
         run_result = RunResult(
             run_id=run_id,
-            prompt=request.prompt,
+            prompt=all_prompts[0] if all_prompts else request.prompt,
+            prompts=all_prompts,
+            total_batches=total_batches,
             started_at=started_at,
             completed_at=completed_at,
             total_elapsed_seconds=(completed_at - started_at).total_seconds(),
-            window_results=[],
-            total_windows=count,
-            successful_windows=0,
-            failed_windows=0,
+            window_results=partial_results,
+            total_windows=len(partial_results),
+            successful_windows=successful,
+            failed_windows=failed,
         )
         self._current_run = run_result
         # RUN_CANCELLED already published by cancel()
@@ -254,6 +549,31 @@ class RunOrchestrator:
     def _apply_jitter(self, base: float) -> float:
         jitter_range = base * self._config.timing.jitter_pct
         return base + random.uniform(-jitter_range, jitter_range)
+
+    @staticmethod
+    def _failed_result(
+        worker_id: int,
+        prompt: str,
+        batch_idx: int,
+        error: str,
+        source: Optional[WindowResult] = None,
+    ) -> WindowResult:
+        return WindowResult(
+            worker_id=worker_id,
+            prompt=prompt,
+            batch_index=batch_idx,
+            model_a_name=source.model_a_name if source else None,
+            model_b_name=source.model_b_name if source else None,
+            started_at=source.started_at if source else None,
+            completed_at=(
+                source.completed_at
+                if source and source.completed_at
+                else datetime.now(timezone.utc)
+            ),
+            elapsed_seconds=source.elapsed_seconds if source else None,
+            success=False,
+            error=error,
+        )
 
     @property
     def last_result(self) -> Optional[RunResult]:

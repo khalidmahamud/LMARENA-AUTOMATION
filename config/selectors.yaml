@@ -34,3 +34,5 @@ challenge:
 
 # Streaming indicators
 streaming_indicator: ".streaming, [data-streaming='true'], .animate-pulse"
+stop_generation_button: "button[aria-label='Stop generation']"
+

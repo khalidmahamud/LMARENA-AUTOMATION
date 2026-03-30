@@ -8,7 +8,7 @@ from typing import Dict, List, Optional, Tuple
 from playwright.async_api import Page
 
 from src.browser.selectors import SelectorRegistry
-from src.core.exceptions import PollingTimeoutError, ResponseExtractionError
+from src.core.exceptions import PollingTimeoutError
 from src.models.config import TimingConfig
 
 logger = logging.getLogger(__name__)
@@ -31,6 +31,7 @@ class ResponsePoller:
         selectors: SelectorRegistry,
         worker_id: int = -1,
         cancel_event: Optional[asyncio.Event] = None,
+        baseline_responses: Optional[Tuple[str, str]] = None,
     ) -> Tuple[Tuple[str, str], Tuple[Optional[str], Optional[str]]]:
         """Poll until both responses are stable.
 
@@ -44,9 +45,24 @@ class ResponsePoller:
         prev_text_a = ""
         prev_text_b = ""
         stable_count = 0
+        baseline_a = (
+            self._normalize_text(baseline_responses[0])
+            if baseline_responses
+            else ""
+        )
+        baseline_b = (
+            self._normalize_text(baseline_responses[1])
+            if baseline_responses
+            else ""
+        )
 
         login_close_sel = selectors.get("login_dialog_close")
         slide_sel = selectors.get("response_slide")
+        streaming_indicator_sel = selectors.get("streaming_indicator")
+        stop_generation_sel = selectors.get("stop_generation_button")
+
+        # Inject CSS once to hide "Thinking..." disclosure panels
+        await self._hide_thinking_boxes(page)
 
         while time.monotonic() < deadline:
             if cancel_event and cancel_event.is_set():
@@ -63,7 +79,11 @@ class ResponsePoller:
                 if cancel_event and cancel_event.is_set():
                     raise asyncio.CancelledError("Run cancelled")
 
-            slides = await self._extract_slide_payloads(page, slide_sel)
+            slides = await self._extract_slide_payloads(
+                page,
+                slide_sel,
+                streaming_indicator_sel,
+            )
 
             if cancel_event and cancel_event.is_set():
                 raise asyncio.CancelledError("Run cancelled")
@@ -83,13 +103,24 @@ class ResponsePoller:
                 and slides[0]["has_copy_button"]
                 and slides[1]["has_copy_button"]
             )
-            streaming_active = any(
+            slide_streaming_active = any(
                 slide["has_streaming_indicator"] for slide in slides[:2]
+            )
+            stop_generation_active = await self._has_visible_element(
+                page,
+                stop_generation_sel,
+            )
+            streaming_active = (
+                slide_streaming_active or stop_generation_active
             )
 
             if (
                 cur_a
                 and cur_b
+                and (
+                    baseline_responses is None
+                    or (cur_a != baseline_a and cur_b != baseline_b)
+                )
                 and cur_a == prev_text_a
                 and cur_b == prev_text_b
                 and (copy_ready or not streaming_active)
@@ -131,20 +162,82 @@ class ResponsePoller:
         )
 
     @staticmethod
+    async def _hide_thinking_boxes(page: Page) -> None:
+        """Inject a CSS rule to collapse 'Thinking...' disclosure panels."""
+        try:
+            await page.evaluate(
+                """() => {
+                    if (document.getElementById('_arena_hide_thinking')) return;
+                    const style = document.createElement('style');
+                    style.id = '_arena_hide_thinking';
+                    style.textContent = `
+                        /* Hide the thinking disclosure content panel */
+                        div.not-prose[data-state] > div.text-text-secondary,
+                        div.not-prose[data-state] > div[style*="overflow: clip"] {
+                            display: none !important;
+                        }
+                        /* Collapse the thinking button itself */
+                        div.not-prose[data-state] > button[aria-expanded] {
+                            display: none !important;
+                        }
+                    `;
+                    document.head.appendChild(style);
+                }"""
+            )
+        except Exception:
+            pass
+
+    @staticmethod
     def _normalize_text(text: str) -> str:
         return " ".join(
             text.replace("\u200b", "").replace("\ufeff", "").split()
         ).strip()
 
     @staticmethod
+    async def _has_visible_element(
+        page: Page,
+        selector: str,
+    ) -> bool:
+        try:
+            return bool(
+                await page.evaluate(
+                    """(selector) => {
+                        const isVisible = (el) => {
+                            if (!el) return false;
+                            const style = window.getComputedStyle(el);
+                            const rect = el.getBoundingClientRect();
+                            return (
+                                style.display !== "none" &&
+                                style.visibility !== "hidden" &&
+                                rect.width > 0 &&
+                                rect.height > 0
+                            );
+                        };
+
+                        return Array.from(document.querySelectorAll(selector))
+                            .some(isVisible);
+                    }""",
+                    selector,
+                )
+            )
+        except Exception as exc:
+            logger.debug(
+                "Visible-element check failed for %s: %s",
+                selector,
+                exc,
+            )
+            return False
+
+    @staticmethod
     async def _extract_slide_payloads(
         page: Page,
         slide_selector: str,
+        streaming_indicator_selector: str,
     ) -> List[Dict[str, object]]:
         """Return visible slide payloads for the two model response cards."""
         try:
             payloads = await page.evaluate(
-                """(selector) => {
+                """({ slideSelector, streamingSelector }) => {
                     const isVisible = (el) => {
                         if (!el) return false;
                         const style = window.getComputedStyle(el);
@@ -167,7 +260,7 @@ class ResponsePoller:
                         );
                     };
 
-                    return Array.from(document.querySelectorAll(selector))
+                    return Array.from(document.querySelectorAll(slideSelector))
                         .filter(isVisible)
                         .map((slide) => {
                             const proseNodes = Array.from(
@@ -181,7 +274,7 @@ class ResponsePoller:
                                 slide.querySelectorAll("button[type='button']")
                             ).find((btn) => isVisible(btn) && hasCopyIcon(btn));
                             const streamingNode = slide.querySelector(
-                                ".streaming, [data-streaming='true'], .animate-pulse"
+                                streamingSelector
                             );
 
                             return {
@@ -199,7 +292,10 @@ class ResponsePoller:
                         })
                         .slice(0, 2);
                 }""",
-                slide_selector,
+                {
+                    "slideSelector": slide_selector,
+                    "streamingSelector": streaming_indicator_selector,
+                },
             )
             if isinstance(payloads, list):
                 return payloads

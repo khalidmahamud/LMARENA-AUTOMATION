@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import List, Literal, Optional, Union
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 # ──── Inbound (GUI → Backend) ────
@@ -11,11 +11,14 @@ from pydantic import BaseModel, Field
 
 class StartRunRequest(BaseModel):
     type: Literal["start_run"] = "start_run"
-    prompt: str = Field(..., min_length=1, max_length=50_000)
+    prompt: str = Field(default="", max_length=50_000)
+    prompts: Optional[List[str]] = Field(default=None)
+    system_prompt: str = Field(default="", max_length=100_000)
     window_count: int = Field(default=2, ge=1, le=12)
     submission_gap_seconds: Optional[float] = Field(default=None, ge=5.0)
     model_a: Optional[str] = None
     model_b: Optional[str] = None
+    retain_output: str = Field(default="both")  # "both", "model_a", "model_b"
     clear_cookies: bool = False
     zoom_pct: int = Field(default=100, ge=25, le=200)
     # Display / tiling overrides (sent from UI, fall back to config defaults)
@@ -24,6 +27,21 @@ class StartRunRequest(BaseModel):
     monitor_height: Optional[int] = Field(default=None, ge=600, le=4320)
     taskbar_height: Optional[int] = Field(default=None, ge=0, le=200)
     margin: Optional[int] = Field(default=None, ge=0, le=50)
+
+    @model_validator(mode="after")
+    def validate_has_prompt(self):
+        if self.prompts:
+            self.prompts = [p for p in self.prompts if p.strip()]
+        if not self.prompt and not self.prompts:
+            raise ValueError("Either 'prompt' or 'prompts' must be provided")
+        return self
+
+    def get_prompt_for_worker(self, worker_index: int) -> str:
+        """Return the actual prompt assigned to a specific worker."""
+        if self.prompts and len(self.prompts) > 0:
+            idx = min(worker_index, len(self.prompts) - 1)
+            return self.prompts[idx]
+        return self.prompt
 
 
 class StopRunRequest(BaseModel):
@@ -68,6 +86,8 @@ class LogMessage(BaseModel):
 
 class WindowResultPayload(BaseModel):
     worker_id: int
+    prompt: Optional[str] = None
+    batch_index: Optional[int] = None
     model_a_name: Optional[str] = None
     model_a_response: Optional[str] = None
     model_b_name: Optional[str] = None

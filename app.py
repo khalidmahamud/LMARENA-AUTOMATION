@@ -6,13 +6,16 @@ Open: http://localhost:8000
 
 from __future__ import annotations
 
+import csv
+import io
 import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, WebSocket
-from fastapi.responses import FileResponse, HTMLResponse
+from fastapi import FastAPI, UploadFile, WebSocket
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
+from openpyxl import load_workbook
 
 from src.browser.manager import BrowserManager
 from src.browser.selectors import SelectorRegistry
@@ -83,6 +86,52 @@ async def websocket_endpoint(websocket: WebSocket):
     await ws_handler.handle(websocket)
 
 
+@app.post("/upload-prompts")
+async def upload_prompts(file: UploadFile):
+    """Parse a CSV or Excel file and return columns + all rows."""
+    if not file.filename:
+        return JSONResponse({"error": "No file provided"}, status_code=400)
+
+    ext = Path(file.filename).suffix.lower()
+    raw = await file.read()
+
+    try:
+        if ext == ".csv":
+            text = raw.decode("utf-8-sig")
+            reader = csv.DictReader(io.StringIO(text))
+            columns = reader.fieldnames or []
+            rows = [dict(r) for r in reader]
+        elif ext == ".xlsx":
+            wb = load_workbook(filename=io.BytesIO(raw), read_only=True)
+            ws = wb.active
+            all_rows = list(ws.iter_rows(values_only=True))
+            if not all_rows:
+                return JSONResponse({"error": "Empty spreadsheet"}, status_code=400)
+            columns = [str(c) if c else f"Column {i+1}" for i, c in enumerate(all_rows[0])]
+            rows = [
+                {columns[j]: (str(cell) if cell is not None else "")
+                 for j, cell in enumerate(row)}
+                for row in all_rows[1:]
+            ]
+            wb.close()
+        else:
+            return JSONResponse(
+                {"error": f"Unsupported file type: {ext}. Use .csv or .xlsx"},
+                status_code=400,
+            )
+    except Exception as exc:
+        logger.error("Failed to parse upload: %s", exc)
+        return JSONResponse({"error": f"Parse error: {exc}"}, status_code=400)
+
+    return {
+        "filename": file.filename,
+        "columns": columns,
+        "rows": rows,
+        "row_count": len(rows),
+        "preview": rows[:5],
+    }
+
+
 @app.get("/export")
 async def export_excel():
     orch = ws_handler.orchestrator
@@ -94,6 +143,20 @@ async def export_excel():
             media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
     return {"error": "No results available"}
+
+
+@app.get("/export-json")
+async def export_json():
+    orch = ws_handler.orchestrator
+    if orch and orch.last_result:
+        data = orch.last_result.model_dump(mode="json")
+        return JSONResponse(
+            content=data,
+            headers={
+                "Content-Disposition": f'attachment; filename="arena_results_{orch.last_result.run_id}.json"'
+            },
+        )
+    return JSONResponse({"error": "No results available"}, status_code=404)
 
 
 # ── Entry point ──

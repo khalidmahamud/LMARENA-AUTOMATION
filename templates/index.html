@@ -58,11 +58,58 @@
         <div class="panel-header">
           <span class="panel-title">&#9998; PROMPT</span>
           <div class="panel-actions">
+            <div class="prompt-mode-toggle">
+              <button class="mode-btn active" id="mode-manual">Manual</button>
+              <button class="mode-btn" id="mode-file">File Upload</button>
+            </div>
             <button class="btn-icon" id="btn-paste">&#128203; Paste</button>
             <button class="btn-icon" id="btn-clear">&#128465; Clear</button>
           </div>
         </div>
-        <textarea id="prompt" rows="8" placeholder="Enter your prompt here..."></textarea>
+
+        <!-- System prompt (first input before the actual prompt) -->
+        <details class="system-prompt-details" id="system-prompt-details">
+          <summary class="system-prompt-toggle">System Prompt <span class="system-prompt-hint">&#8212; sent first before each actual prompt run</span></summary>
+          <textarea id="system-prompt" rows="3" placeholder="e.g. You are a helpful assistant. Answer concisely."></textarea>
+        </details>
+
+        <!-- Manual mode (default) -->
+        <div id="manual-prompt-section">
+          <textarea id="prompt" rows="8" placeholder="Enter your prompt here..."></textarea>
+        </div>
+
+        <!-- File upload mode -->
+        <div id="file-prompt-section" class="hidden">
+          <div class="upload-area" id="upload-area">
+            <div class="upload-icon">&#128193;</div>
+            <span>Drop CSV or Excel file here, or <strong>click to browse</strong></span>
+            <span class="upload-hint">.csv, .xlsx</span>
+            <input type="file" id="file-input" accept=".csv,.xlsx" hidden />
+          </div>
+          <div id="file-info" class="hidden">
+            <div class="file-info-bar">
+              <span class="file-name" id="file-name"></span>
+              <span class="file-row-count" id="file-row-count"></span>
+              <button class="btn-icon" id="btn-remove-file">&#10005; Remove</button>
+            </div>
+            <div class="file-config-row">
+              <div class="file-config-group">
+                <span class="file-config-label">Columns (combined per row)</span>
+                <div class="column-checkboxes" id="column-checkboxes"></div>
+              </div>
+              <div class="file-config-group file-config-range">
+                <span class="file-config-label">Rows</span>
+                <input type="number" id="row-start" min="1" value="1" />
+                <span class="row-range-sep">&ndash;</span>
+                <input type="number" id="row-end" min="1" value="" placeholder="end" />
+                <span class="row-range-info" id="row-range-info"></span>
+              </div>
+            </div>
+            <div class="file-preview" id="file-preview"></div>
+            <div class="batch-info" id="batch-info"></div>
+          </div>
+        </div>
+
         <div class="prompt-controls">
           <div class="prompt-buttons">
             <button class="btn-start" id="btn-start">&#8853; Start Run</button>
@@ -166,6 +213,14 @@
             <div class="form-group">
               <label for="model-b">Model B (optional)</label>
               <input type="text" id="model-b" placeholder="e.g. claude-opus-4-6" />
+            </div>
+            <div class="form-group">
+              <label for="retain-output">Retain Output</label>
+              <select id="retain-output">
+                <option value="both">Both Models</option>
+                <option value="model_a">Model A only</option>
+                <option value="model_b">Model B only</option>
+              </select>
             </div>
           </div>
         </div>

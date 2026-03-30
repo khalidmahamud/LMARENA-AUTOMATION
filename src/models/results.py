@@ -11,6 +11,7 @@ class WindowResult(BaseModel):
 
     worker_id: int
     prompt: str
+    batch_index: int = 0
     model_a_name: Optional[str] = None
     model_a_response: Optional[str] = None
     model_b_name: Optional[str] = None
@@ -27,6 +28,8 @@ class RunResult(BaseModel):
 
     run_id: str
     prompt: str
+    prompts: List[str] = Field(default_factory=list)
+    total_batches: int = 1
     started_at: datetime
     completed_at: Optional[datetime] = None
     total_elapsed_seconds: Optional[float] = None

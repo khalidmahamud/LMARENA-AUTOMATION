@@ -60,65 +60,110 @@ class HumanSimulator:
             raise RuntimeError(f"Element not found: {selector}")
         return fallback
 
+    @staticmethod
+    def _normalize_text(text: str) -> str:
+        return text.replace("\r\n", "\n").replace("\r", "\n")
+
+    async def _read_element_text(self, element: ElementHandle) -> str:
+        value = await element.evaluate(
+            """el => {
+                const tag = el.tagName.toLowerCase();
+                if (tag === "input" || tag === "textarea") {
+                    return el.value || "";
+                }
+                if (
+                    el.isContentEditable ||
+                    el.getAttribute("contenteditable") === "true"
+                ) {
+                    return el.innerText || el.textContent || "";
+                }
+                return el.value || el.innerText || el.textContent || "";
+            }"""
+        )
+        return value if isinstance(value, str) else ""
+
+    async def _paste_value(
+        self,
+        page: Page,
+        element: ElementHandle,
+        text: str,
+    ) -> None:
+        await element.click()
+        await asyncio.sleep(random.uniform(0.15, 0.35))
+
+        await element.evaluate(
+            """(el, value) => {
+                const tag = el.tagName.toLowerCase();
+                const fireInput = (target) => {
+                    target.dispatchEvent(
+                        new InputEvent("input", {
+                            bubbles: true,
+                            cancelable: true,
+                            inputType: "insertFromPaste",
+                            data: value,
+                        })
+                    );
+                    target.dispatchEvent(new Event("change", { bubbles: true }));
+                };
+
+                if (tag === "textarea") {
+                    const setter = Object.getOwnPropertyDescriptor(
+                        HTMLTextAreaElement.prototype,
+                        "value"
+                    )?.set;
+                    if (setter) setter.call(el, value);
+                    else el.value = value;
+                    fireInput(el);
+                    return;
+                }
+
+                if (tag === "input") {
+                    const setter = Object.getOwnPropertyDescriptor(
+                        HTMLInputElement.prototype,
+                        "value"
+                    )?.set;
+                    if (setter) setter.call(el, value);
+                    else el.value = value;
+                    fireInput(el);
+                    return;
+                }
+
+                if (
+                    el.isContentEditable ||
+                    el.getAttribute("contenteditable") === "true"
+                ) {
+                    el.focus();
+                    el.textContent = value;
+                    fireInput(el);
+                    return;
+                }
+
+                el.textContent = value;
+                fireInput(el);
+            }""",
+            text,
+        )
+
+        await asyncio.sleep(random.uniform(0.1, 0.2))
+
     async def type_text(
         self,
         page: Page,
         selector: str,
         text: str,
     ) -> ElementHandle:
-        """Click the element then type *text*.
-
-        Uses real keyboard input for native editors so reactive chat composers
-        observe the same input events a user would trigger.
-        """
+        """Populate the target element with *text* immediately."""
         element = await self._find_visible_element(page, selector)
+        await self._paste_value(page, element, text)
 
-        tag = await element.evaluate("el => el.tagName.toLowerCase()")
-        is_contenteditable = await element.evaluate(
-            "el => el.getAttribute('contenteditable') === 'true'"
-        )
-
-        if tag in ("input", "textarea"):
-            # Native form elements: use real typing to trigger composer state.
-            await element.click()
-            await asyncio.sleep(random.uniform(0.2, 0.5))
-            await page.keyboard.press("Control+a")
-            await asyncio.sleep(0.1)
-            await page.keyboard.press("Backspace")
-            await page.keyboard.type(
-                text,
-                delay=random.randint(
-                    self._config.min_delay_ms,
-                    self._config.max_delay_ms,
-                ),
-            )
-        elif is_contenteditable:
-            # TipTap / ProseMirror: replace via keyboard events.
-            await element.click()
-            await asyncio.sleep(random.uniform(0.3, 0.6))
-            await page.keyboard.press("Control+a")
-            await asyncio.sleep(0.1)
-            await page.keyboard.press("Backspace")
-            await page.keyboard.type(
-                text,
-                delay=random.randint(
-                    self._config.min_delay_ms,
-                    self._config.max_delay_ms,
-                ),
-            )
-        else:
-            # Fallback: click and type.
-            await element.click()
-            await asyncio.sleep(random.uniform(0.2, 0.5))
-            await page.keyboard.type(
-                text,
-                delay=random.randint(
-                    self._config.min_delay_ms,
-                    self._config.max_delay_ms,
-                ),
+        current = self._normalize_text(await self._read_element_text(element))
+        expected = self._normalize_text(text)
+        if current != expected:
+            raise RuntimeError(
+                f"Pasted value did not match the requested text for {selector}"
             )
 
-        logger.debug("Typed %d characters into %s", len(text), selector)
+        logger.debug("Pasted %d characters into %s", len(text), selector)
         return element
 
     async def click_element(self, page: Page, element: ElementHandle) -> None:

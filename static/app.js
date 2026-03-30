@@ -13,6 +13,11 @@
   let workerStartTimes = {};
   let workerData = {};   // live data per worker
 
+  // File upload state
+  let promptMode = "manual"; // "manual" | "file"
+  let uploadedRows = null;   // raw parsed rows from backend
+  let uploadedPrompts = [];  // combined prompts built per row from selected columns
+
   // ── DOM refs ──
   const statusBadge       = document.getElementById("status-badge");
   const statusDot         = document.getElementById("status-dot");
@@ -23,8 +28,10 @@
   const arenaUrlInput     = document.getElementById("arena-url");
   const modelAInput       = document.getElementById("model-a");
   const modelBInput       = document.getElementById("model-b");
+  const retainOutputInput = document.getElementById("retain-output");
   const zoomInput         = document.getElementById("zoom");
   const clearCookiesInput = document.getElementById("clear-cookies");
+  const systemPromptInput = document.getElementById("system-prompt");
   const promptInput       = document.getElementById("prompt");
   const monitorCountInput = document.getElementById("monitor-count");
   const monitorWidthInput = document.getElementById("monitor-width");
@@ -54,6 +61,24 @@
   const autoScrollToggle  = document.getElementById("auto-scroll-toggle");
 
   const toastContainer    = document.getElementById("toast-container");
+
+  // File upload DOM refs
+  const modeManualBtn     = document.getElementById("mode-manual");
+  const modeFileBtn       = document.getElementById("mode-file");
+  const manualSection     = document.getElementById("manual-prompt-section");
+  const fileSection       = document.getElementById("file-prompt-section");
+  const uploadArea        = document.getElementById("upload-area");
+  const fileInput         = document.getElementById("file-input");
+  const fileInfoDiv       = document.getElementById("file-info");
+  const fileNameSpan      = document.getElementById("file-name");
+  const fileRowCountSpan  = document.getElementById("file-row-count");
+  const removeFileBtn     = document.getElementById("btn-remove-file");
+  const columnCheckboxes  = document.getElementById("column-checkboxes");
+  const rowStartInput     = document.getElementById("row-start");
+  const rowEndInput       = document.getElementById("row-end");
+  const rowRangeInfo      = document.getElementById("row-range-info");
+  const filePreviewDiv    = document.getElementById("file-preview");
+  const batchInfoDiv      = document.getElementById("batch-info");
 
   // Footer stats
   const statRuns        = document.getElementById("stat-runs");
@@ -124,6 +149,13 @@
         break;
       case "error":
         appendLog("error", msg.message);
+        showToast(msg.message, "error");
+        // Reset UI if run hasn't actually started
+        if (running) {
+          running = false;
+          startBtn.disabled = false;
+          stopBtn.disabled = true;
+        }
         break;
       case "toast":
         showToast(msg.message, msg.level || "success");
@@ -433,10 +465,23 @@
   // ══════════════════════════════════════
 
   startBtn.addEventListener("click", () => {
-    const prompt = promptInput.value.trim();
-    if (!prompt) {
-      promptInput.focus();
-      return;
+    const isFileMode = promptMode === "file";
+    let singlePrompt = "";
+    let prompts = null;
+
+    if (isFileMode) {
+      if (!uploadedPrompts || uploadedPrompts.length === 0) {
+        showToast("Upload a file and select a column first", "warning");
+        return;
+      }
+      prompts = uploadedPrompts;
+      singlePrompt = prompts[0];
+    } else {
+      singlePrompt = promptInput.value.trim();
+      if (!singlePrompt) {
+        promptInput.focus();
+        return;
+      }
     }
 
     running = true;
@@ -473,11 +518,14 @@
 
     send({
       type: "start_run",
-      prompt: prompt,
+      prompt: singlePrompt,
+      prompts: isFileMode ? prompts : null,
+      system_prompt: systemPromptInput.value.trim() || "",
       window_count: windowCount,
       submission_gap_seconds: parseFloat(submissionGapInput.value) || null,
       model_a: modelAInput.value.trim() || null,
       model_b: modelBInput.value.trim() || null,
+      retain_output: retainOutputInput.value,
       clear_cookies: clearCookiesInput.checked,
       zoom_pct: parseInt(zoomInput.value, 10) || 100,
       monitor_count: parseInt(monitorCountInput.value, 10) || 1,
@@ -487,7 +535,18 @@
       margin: parseInt(tileMarginInput.value, 10) || 0,
     });
 
-    appendLog("info", `Starting run with ${windowCount} window(s)...`);
+    if (isFileMode) {
+      const batches = Math.ceil(prompts.length / windowCount);
+      if (systemPromptInput.value.trim()) {
+        appendLog("info", "System prompt will be sent first before each batch prompt.");
+      }
+      appendLog("info", `Starting run: ${prompts.length} prompt(s), ${windowCount} window(s), ${batches} batch(es)...`);
+    } else {
+      if (systemPromptInput.value.trim()) {
+        appendLog("info", "System prompt will be sent first before the manual prompt.");
+      }
+      appendLog("info", `Starting run with ${windowCount} window(s)...`);
+    }
   });
 
   stopBtn.addEventListener("click", () => {
@@ -513,10 +572,202 @@
     promptInput.focus();
   });
 
-  // Export button
+  // Export button — format depends on active tab
   exportBtn.addEventListener("click", () => {
-    window.location.href = "/export";
+    if (tabJson.classList.contains("active")) {
+      window.location.href = "/export-json";
+    } else {
+      window.location.href = "/export";
+    }
   });
+
+  // ══════════════════════════════════════
+  // Prompt Mode Toggle (Manual / File Upload)
+  // ══════════════════════════════════════
+
+  function setPromptMode(mode) {
+    promptMode = mode;
+    modeManualBtn.classList.toggle("active", mode === "manual");
+    modeFileBtn.classList.toggle("active", mode === "file");
+    manualSection.classList.toggle("hidden", mode !== "manual");
+    fileSection.classList.toggle("hidden", mode !== "file");
+    // Show/hide paste & clear buttons (only for manual mode)
+    pasteBtn.style.display = mode === "manual" ? "" : "none";
+    clearBtn.style.display = mode === "manual" ? "" : "none";
+    saveSettings();
+  }
+
+  modeManualBtn.addEventListener("click", () => setPromptMode("manual"));
+  modeFileBtn.addEventListener("click", () => setPromptMode("file"));
+
+  // ══════════════════════════════════════
+  // File Upload
+  // ══════════════════════════════════════
+
+  uploadArea.addEventListener("click", () => fileInput.click());
+
+  uploadArea.addEventListener("dragover", (e) => {
+    e.preventDefault();
+    uploadArea.classList.add("dragover");
+  });
+
+  uploadArea.addEventListener("dragleave", () => {
+    uploadArea.classList.remove("dragover");
+  });
+
+  uploadArea.addEventListener("drop", (e) => {
+    e.preventDefault();
+    uploadArea.classList.remove("dragover");
+    const file = e.dataTransfer.files[0];
+    if (file) handleFileUpload(file);
+  });
+
+  fileInput.addEventListener("change", () => {
+    const file = fileInput.files[0];
+    if (file) handleFileUpload(file);
+  });
+
+  removeFileBtn.addEventListener("click", () => {
+    clearFileUpload();
+  });
+
+  async function handleFileUpload(file) {
+    const formData = new FormData();
+    formData.append("file", file);
+
+    try {
+      const resp = await fetch("/upload-prompts", { method: "POST", body: formData });
+      const data = await resp.json();
+
+      if (data.error) {
+        appendLog("error", `Upload failed: ${data.error}`);
+        showToast(data.error, "error");
+        return;
+      }
+
+      uploadedRows = data.rows;
+
+      // Show file info
+      fileNameSpan.textContent = data.filename;
+      fileRowCountSpan.textContent = `${data.row_count} row(s)`;
+      uploadArea.classList.add("hidden");
+      fileInfoDiv.classList.remove("hidden");
+
+      // Reset row range to full file
+      rowStartInput.value = 1;
+      rowEndInput.value = "";
+      rowEndInput.placeholder = `${data.row_count} (all)`;
+      rowRangeInfo.textContent = "";
+
+      // Populate column checkboxes
+      columnCheckboxes.innerHTML = "";
+      data.columns.forEach((col, idx) => {
+        const label = document.createElement("label");
+        label.className = "column-chip";
+        const cb = document.createElement("input");
+        cb.type = "checkbox";
+        cb.value = col;
+        cb.addEventListener("change", () => {
+          label.classList.toggle("selected", cb.checked);
+          onColumnChange();
+        });
+        label.appendChild(cb);
+        label.appendChild(document.createTextNode(col));
+        columnCheckboxes.appendChild(label);
+      });
+
+      // Auto-select first column
+      if (data.columns.length > 0) {
+        const firstCb = columnCheckboxes.querySelector("input[type='checkbox']");
+        firstCb.checked = true;
+        firstCb.closest(".column-chip").classList.add("selected");
+        onColumnChange();
+      }
+
+      appendLog("info", `File loaded: ${data.filename} (${data.row_count} rows, ${data.columns.length} columns)`);
+    } catch (err) {
+      appendLog("error", `Upload error: ${err.message}`);
+      showToast("Failed to upload file", "error");
+    }
+  }
+
+  function clearFileUpload() {
+    uploadedRows = null;
+    uploadedPrompts = [];
+    fileInput.value = "";
+    uploadArea.classList.remove("hidden");
+    fileInfoDiv.classList.add("hidden");
+    columnCheckboxes.innerHTML = "";
+    rowStartInput.value = 1;
+    rowEndInput.value = "";
+    rowEndInput.placeholder = "End (all)";
+    rowRangeInfo.textContent = "";
+    filePreviewDiv.innerHTML = "";
+    batchInfoDiv.textContent = "";
+  }
+
+  function getSelectedColumns() {
+    return Array.from(columnCheckboxes.querySelectorAll("input[type='checkbox']:checked"))
+      .map((cb) => cb.value);
+  }
+
+  function onColumnChange() {
+    const cols = getSelectedColumns();
+    if (!uploadedRows || cols.length === 0) {
+      uploadedPrompts = [];
+      filePreviewDiv.innerHTML = "";
+      rowRangeInfo.textContent = "";
+      updateBatchInfo();
+      return;
+    }
+
+    // Combine selected columns into a single prompt per row.
+    const allPrompts = uploadedRows
+      .map((row) => cols.map((c) => (row[c] || "").trim()).filter((v) => v).join("\n"))
+      .filter((v) => v.length > 0);
+
+    // Apply row range (1-indexed for user)
+    const start = Math.max(1, parseInt(rowStartInput.value, 10) || 1);
+    const end = parseInt(rowEndInput.value, 10) || allPrompts.length;
+    const clampedEnd = Math.min(end, allPrompts.length);
+    uploadedPrompts = allPrompts.slice(start - 1, clampedEnd);
+
+    // Update range info
+    rowRangeInfo.textContent = `(using rows ${start}\u2013${clampedEnd} of ${allPrompts.length})`;
+
+    // Render preview (first 5 of the sliced range)
+    const preview = uploadedPrompts.slice(0, 5);
+    const colLabel = cols.length === 1 ? cols[0] : cols.join(" + ");
+    let html = `<table><thead><tr><th>#</th><th>${escapeHtml(colLabel)}</th></tr></thead><tbody>`;
+    preview.forEach((p, i) => {
+      html += `<tr><td>${start + i}</td><td>${escapeHtml(truncate(p, 120))}</td></tr>`;
+    });
+    if (uploadedPrompts.length > 5) {
+      html += `<tr><td colspan="2" style="color:var(--text-dim)">... and ${uploadedPrompts.length - 5} more</td></tr>`;
+    }
+    html += "</tbody></table>";
+    filePreviewDiv.innerHTML = html;
+
+    updateBatchInfo();
+  }
+
+  // Re-extract prompts when row range changes
+  rowStartInput.addEventListener("input", onColumnChange);
+  rowEndInput.addEventListener("input", onColumnChange);
+
+  function updateBatchInfo() {
+    const wc = parseInt(windowCountInput.value, 10) || 4;
+    const total = uploadedPrompts.length;
+    if (total === 0) {
+      batchInfoDiv.textContent = "";
+      return;
+    }
+    const batches = Math.ceil(total / wc);
+    batchInfoDiv.textContent = `${total} prompt(s) \u2192 ${batches} batch(es) of ${wc} window(s)`;
+  }
+
+  // Update batch info when window count changes
+  windowCountInput.addEventListener("input", updateBatchInfo);
 
   // ══════════════════════════════════════
   // Settings Modal
@@ -551,6 +802,7 @@
     tabJson.classList.remove("active");
     resultsTableWrap.classList.remove("hidden");
     resultsJsonPre.classList.add("hidden");
+    exportBtn.innerHTML = "&#128196; Export .xlsx";
   });
 
   tabJson.addEventListener("click", () => {
@@ -558,6 +810,7 @@
     tabTable.classList.remove("active");
     resultsJsonPre.classList.remove("hidden");
     resultsTableWrap.classList.add("hidden");
+    exportBtn.innerHTML = "&#128196; Export .json";
   });
 
   // ══════════════════════════════════════
@@ -707,6 +960,7 @@
     { el: arenaUrlInput,      key: "arena_url" },
     { el: modelAInput,        key: "model_a" },
     { el: modelBInput,        key: "model_b" },
+    { el: retainOutputInput,  key: "retain_output" },
     { el: zoomInput,          key: "zoom" },
     { el: clearCookiesInput,  key: "clear_cookies", checkbox: true },
     { el: monitorCountInput,  key: "monitor_count" },
@@ -714,7 +968,9 @@
     { el: monitorHeightInput, key: "monitor_height" },
     { el: taskbarHeightInput, key: "taskbar_height" },
     { el: tileMarginInput,    key: "tile_margin" },
+    { el: systemPromptInput,  key: "system_prompt" },
     { el: promptInput,        key: "prompt" },
+    // prompt_mode handled separately (not an input element)
   ];
 
   function saveSettings() {
@@ -722,6 +978,7 @@
     settingsFields.forEach((f) => {
       obj[f.key] = f.checkbox ? f.el.checked : f.el.value;
     });
+    obj.prompt_mode = promptMode;
     try { localStorage.setItem(STORAGE_KEY, JSON.stringify(obj)); } catch {}
   }
 
@@ -736,6 +993,9 @@
           else f.el.value = obj[f.key];
         }
       });
+      if (obj.prompt_mode) {
+        setPromptMode(obj.prompt_mode);
+      }
     } catch {}
   }
 
@@ -796,5 +1056,11 @@
 
   initScreenDefaults();
   updateTilePreview();
+
+  // Auto-expand system prompt if it has saved content
+  if (systemPromptInput.value.trim()) {
+    document.getElementById("system-prompt-details").open = true;
+  }
+
   connect();
 })();
