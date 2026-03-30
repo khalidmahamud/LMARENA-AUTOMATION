@@ -10,8 +10,10 @@ from src.models.messages import (
     ChallengeDetectedMessage,
     LogMessage,
     OutboundMessage,
+    RunCancelledMessage,
     RunCompleteMessage,
     RunProgressMessage,
+    ToastMessage,
     WindowResultPayload,
     WorkerUpdateMessage,
 )
@@ -99,14 +101,23 @@ class WsBroadcaster:
                 export_available=True,
             )
 
+        if event.type == EventType.RUN_CANCELLED:
+            return RunCancelledMessage()
+
         if event.type == EventType.CHALLENGE_DETECTED:
             return ChallengeDetectedMessage(
                 worker_id=event.worker_id or 0,
                 challenge_type=d.get("challenge_type", "unknown"),
                 message=(
                     f"Challenge detected on window {event.worker_id}. "
-                    "Please solve it manually."
+                    "Automatic recovery is in progress."
                 ),
+            )
+
+        if event.type == EventType.TOAST:
+            return ToastMessage(
+                message=d.get("message", ""),
+                level=d.get("level", "success"),
             )
 
         if event.type == EventType.LOG:

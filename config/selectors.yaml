@@ -1,19 +1,23 @@
-# LM Arena DOM Selectors — Direct Mode
-# Based on live site inspection of https://arena.ai/text/direct
+# LM Arena DOM Selectors — Side-by-Side Mode
+# Based on live site inspection of https://arena.ai/text/side-by-side
 
-prompt_textarea: "textarea[placeholder*='Ask anything'], textarea[placeholder*='Send a message'], textarea[placeholder*='Type your message']"
-submit_button: "button[data-testid='send-button'], button[aria-label='Send'], form button[type='submit']"
+prompt_textarea: "form textarea[name='message'], div.tiptap[contenteditable='true'], div.ProseMirror[contenteditable='true'], div[contenteditable='true'][role='textbox'], textarea[placeholder*='Ask anything'], textarea[placeholder*='Send a message'], textarea[placeholder*='Type your message']"
+submit_button: "form button[type='submit']:has(svg), form button[type='submit'], button[data-testid='send-button'], button[aria-label='Send']"
 
-# Single model picker — the model button contains a span.truncate with the model name
-model_dropdown: "button[aria-haspopup='dialog']:has(span.truncate)"
+# Model pickers — side-by-side has two model dropdown buttons
+model_dropdown: "button[aria-haspopup='dialog'][class*='max-w-']"
 model_search_input: "input[cmdk-input]"
 model_option: "[cmdk-item][role='option']"
 
-# Single response panel (direct mode produces one response)
-response_panel: ".chat-message .markdown-content, [data-testid='response-panel']"
+# Two response panels (side-by-side produces one prose response inside each slide)
+response_panel: "[role='group'][aria-roledescription='slide'] .prose"
+response_slide: "[role='group'][aria-roledescription='slide']"
 
-# Model name display (read from the dropdown button span after selection)
-model_name_label: "button[aria-haspopup='dialog'] span.truncate"
+# Copy buttons per response (index 0 = Model A, index 1 = Model B)
+copy_button: "button[data-slot='tooltip-trigger']"
+
+# Model name display (both model buttons have span.truncate)
+model_name_label: "button[aria-haspopup='dialog'][class*='max-w-'] span.truncate.text-left"
 
 # Terms of Use dialog
 tos_dialog: "[role='dialog']"

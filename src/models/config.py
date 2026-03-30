@@ -10,6 +10,16 @@ class WindowSize(BaseModel):
     height: int = Field(default=800, ge=300, le=2160)
 
 
+class DisplayConfig(BaseModel):
+    """Monitor and tiling configuration."""
+
+    monitor_count: int = Field(default=1, ge=1, le=8)
+    monitor_width: int = Field(default=1920, ge=800, le=7680)
+    monitor_height: int = Field(default=1080, ge=600, le=4320)
+    taskbar_height: int = Field(default=40, ge=0, le=200)
+    margin: int = Field(default=0, ge=0, le=50)
+
+
 class TimingConfig(BaseModel):
     submission_gap_seconds: float = Field(default=30.0, ge=5.0, le=300.0)
     jitter_pct: float = Field(default=0.30, ge=0.0, le=1.0)
@@ -33,7 +43,6 @@ class TypingConfig(BaseModel):
 class BrowserConfig(BaseModel):
     window_count: int = Field(default=2, ge=1, le=12)
     window_size: WindowSize = Field(default_factory=WindowSize)
-    profile_dir: str = Field(default="browser_profiles")
     headless: bool = Field(default=False)
 
 
@@ -41,6 +50,7 @@ class AppConfig(BaseModel):
     """Root configuration — validated from YAML at startup."""
 
     browser: BrowserConfig = Field(default_factory=BrowserConfig)
+    display: DisplayConfig = Field(default_factory=DisplayConfig)
     timing: TimingConfig = Field(default_factory=TimingConfig)
     typing: TypingConfig = Field(default_factory=TypingConfig)
     arena_url: str = Field(default="https://arena.ai/text/direct")

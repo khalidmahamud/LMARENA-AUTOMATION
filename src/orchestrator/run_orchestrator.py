@@ -10,7 +10,7 @@ from typing import List, Optional
 from src.browser.manager import BrowserManager
 from src.core.events import Event, EventBus, EventType
 from src.core.exceptions import AllWorkersFailedError, RunCancelledError
-from src.models.config import AppConfig
+from src.models.config import AppConfig, DisplayConfig
 from src.models.messages import StartRunRequest
 from src.models.results import RunResult, WindowResult
 from src.models.worker import WorkerState
@@ -63,8 +63,26 @@ class RunOrchestrator:
             )
         )
 
+        # Build display config from request overrides (fall back to YAML defaults)
+        base = self._config.display
+        display_override = DisplayConfig(
+            monitor_count=request.monitor_count or base.monitor_count,
+            monitor_width=request.monitor_width or base.monitor_width,
+            monitor_height=request.monitor_height or base.monitor_height,
+            taskbar_height=(
+                request.taskbar_height
+                if request.taskbar_height is not None
+                else base.taskbar_height
+            ),
+            margin=(
+                request.margin if request.margin is not None else base.margin
+            ),
+        )
+
         # Phase 1: Launch browsers
-        contexts = await self._browser_manager.create_contexts(count)
+        contexts = await self._browser_manager.create_contexts(
+            count, display_override=display_override
+        )
 
         # Phase 2: Create workers
         self._workers = [
@@ -73,18 +91,36 @@ class RunOrchestrator:
                 context=contexts[i],
                 config=self._config,
                 event_bus=self._event_bus,
+                context_recreator=self._browser_manager.recreate_context,
             )
             for i in range(count)
         ]
 
         # Phase 3: Navigate all to Arena (parallel)
         nav_results = await asyncio.gather(
-            *(w.navigate_to_arena() for w in self._workers),
+            *(w.navigate_to_arena(
+                clear_cookies=request.clear_cookies,
+                zoom_pct=request.zoom_pct,
+            ) for w in self._workers),
             return_exceptions=True,
         )
         for i, result in enumerate(nav_results):
             if isinstance(result, Exception):
                 logger.error("Worker %d navigation failed: %s", i, result)
+
+        if request.clear_cookies:
+            await self._event_bus.publish(
+                Event(
+                    type=EventType.TOAST,
+                    data={
+                        "message": "Cookies cleared successfully",
+                        "level": "success",
+                    },
+                )
+            )
+
+        if self._cancelled:
+            return await self._finish_cancelled(run_id, request, started_at, count)
 
         # Phase 4: Sequential submission with staggered gap
         gap = request.submission_gap_seconds or self._config.timing.submission_gap_seconds
@@ -100,7 +136,8 @@ class RunOrchestrator:
             try:
                 await worker.submit_prompt(
                     prompt=request.prompt,
-                    model=request.model,
+                    model_a=request.model_a,
+                    model_b=request.model_b,
                 )
                 submitted_workers.append(worker)
             except Exception as exc:
@@ -122,6 +159,9 @@ class RunOrchestrator:
                 jittered = self._apply_jitter(gap)
                 await asyncio.sleep(jittered)
 
+        if self._cancelled:
+            return await self._finish_cancelled(run_id, request, started_at, count)
+
         # Phase 5: Parallel polling
         poll_tasks = [
             asyncio.create_task(w.poll_for_completion())
@@ -130,6 +170,10 @@ class RunOrchestrator:
 
         if poll_tasks:
             await asyncio.gather(*poll_tasks, return_exceptions=True)
+
+        # Check cancellation after polling completes
+        if self._cancelled:
+            return await self._finish_cancelled(run_id, request, started_at, count)
 
         # Phase 6: Collect results
         window_results: List[WindowResult] = []
@@ -164,16 +208,46 @@ class RunOrchestrator:
 
         self._current_run = run_result
 
+        # Close browser windows after successful completion
+        await self._browser_manager.close_contexts()
+
         if successful == 0 and count > 0:
             raise AllWorkersFailedError(count)
 
         return run_result
 
+    async def _finish_cancelled(
+        self,
+        run_id: str,
+        request: StartRunRequest,
+        started_at: datetime,
+        count: int,
+    ) -> RunResult:
+        """Clean up after cancellation: close browsers, notify UI, return."""
+        await self._browser_manager.close_contexts()
+        completed_at = datetime.now(timezone.utc)
+        run_result = RunResult(
+            run_id=run_id,
+            prompt=request.prompt,
+            started_at=started_at,
+            completed_at=completed_at,
+            total_elapsed_seconds=(completed_at - started_at).total_seconds(),
+            window_results=[],
+            total_windows=count,
+            successful_windows=0,
+            failed_windows=0,
+        )
+        self._current_run = run_result
+        # RUN_CANCELLED already published by cancel()
+        return run_result
+
     async def cancel(self) -> None:
-        """Cancel the current run gracefully."""
+        """Signal cancellation: stop workers, close browsers, and notify UI."""
         self._cancelled = True
         for worker in self._workers:
             await worker.cancel()
+        # Close browsers immediately — don't wait for execute_run to detect the flag
+        await self._browser_manager.close_contexts()
         await self._event_bus.publish(Event(type=EventType.RUN_CANCELLED))
         logger.info("Run cancelled")
 

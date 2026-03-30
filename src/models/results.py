@@ -7,12 +7,14 @@ from pydantic import BaseModel, Field
 
 
 class WindowResult(BaseModel):
-    """Result from a single browser window."""
+    """Result from a single browser window (side-by-side: two models)."""
 
     worker_id: int
     prompt: str
-    model_name: Optional[str] = None
-    response: Optional[str] = None
+    model_a_name: Optional[str] = None
+    model_a_response: Optional[str] = None
+    model_b_name: Optional[str] = None
+    model_b_response: Optional[str] = None
     started_at: Optional[datetime] = None
     completed_at: Optional[datetime] = None
     elapsed_seconds: Optional[float] = None
@@ -39,8 +41,10 @@ class ExportableRow(BaseModel):
 
     window_number: int
     prompt: str
-    model: str
-    response: str
+    model_a: str
+    response_a: str
+    model_b: str
+    response_b: str
     elapsed_seconds: float
     status: str  # "success" | "error" | "timeout"
     error_detail: Optional[str] = None

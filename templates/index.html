@@ -3,91 +3,222 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>LM Arena Automation</title>
+  <title>Arena Runner</title>
   <link rel="stylesheet" href="/static/style.css" />
 </head>
 <body>
-  <div class="container">
 
-    <!-- Header -->
-    <header>
-      <h1>LM Arena — Direct Chat Automation</h1>
-      <div class="status-indicator">
-        <span class="dot disconnected" id="status-dot"></span>
+  <!-- Header -->
+  <header class="app-header">
+    <div class="header-left">
+      <span class="logo-icon">&#9889;</span>
+      <span class="logo-text">Arena Runner</span>
+      <span class="version">v1.9</span>
+    </div>
+    <div class="header-right">
+      <div class="status-badge" id="status-badge">
+        <span class="status-dot" id="status-dot"></span>
         <span id="status-text">Connecting...</span>
       </div>
-    </header>
+      <button class="btn-settings" id="btn-settings">&#9881; Settings</button>
+    </div>
+  </header>
 
-    <!-- Settings -->
-    <div class="panel">
-      <div class="panel-title">Settings</div>
-      <div class="settings-grid">
-        <div class="form-group">
-          <label for="window-count">Windows</label>
-          <input type="number" id="window-count" value="2" min="1" max="12" />
-        </div>
-        <div class="form-group">
-          <label for="submission-gap">Gap (seconds)</label>
-          <input type="number" id="submission-gap" value="30" min="5" max="300" />
-        </div>
-        <div class="form-group">
-          <label for="model">Model (optional)</label>
-          <input type="text" id="model" placeholder="e.g. claude-opus-4-6" />
-        </div>
+  <!-- Configuration Bar -->
+  <section class="config-bar">
+    <div class="config-label">&#9776; CONFIGURATION</div>
+    <div class="config-fields">
+      <div class="config-field">
+        <label>WINDOWS</label>
+        <input type="number" id="window-count" value="4" min="1" max="12" />
+      </div>
+      <div class="config-field">
+        <label>WINDOW SIZE</label>
+        <input type="text" id="window-size" value="— &times; —" readonly />
+      </div>
+      <div class="config-field">
+        <label>GAP (SEC)</label>
+        <input type="number" id="submission-gap" value="30" min="5" max="300" />
+      </div>
+      <div class="config-field wide">
+        <label>ARENA URL</label>
+        <input type="text" id="arena-url" value="https://arena.ai/" />
       </div>
     </div>
+  </section>
 
-    <!-- Prompt -->
-    <div class="panel">
-      <div class="panel-title">Prompt</div>
-      <textarea id="prompt" placeholder="Enter your prompt here..."></textarea>
-      <div class="btn-row">
-        <button class="btn-primary" id="btn-start">Start Run</button>
-        <button class="btn-danger" id="btn-stop" disabled>Stop</button>
-        <button class="btn-secondary" id="btn-export" disabled>Export to Excel</button>
-      </div>
-    </div>
+  <!-- Main Two-Column Layout -->
+  <div class="main-layout">
 
-    <!-- Progress -->
-    <div class="panel">
-      <div class="panel-title">Progress</div>
-      <div class="progress-container">
-        <div class="progress-bar">
-          <div class="progress-fill" id="progress-fill"></div>
+    <!-- Left Column -->
+    <div class="col-left">
+
+      <!-- Prompt -->
+      <section class="panel">
+        <div class="panel-header">
+          <span class="panel-title">&#9998; PROMPT</span>
+          <div class="panel-actions">
+            <button class="btn-icon" id="btn-paste">&#128203; Paste</button>
+            <button class="btn-icon" id="btn-clear">&#128465; Clear</button>
+          </div>
         </div>
-        <div class="progress-label" id="progress-text"></div>
-      </div>
+        <textarea id="prompt" rows="8" placeholder="Enter your prompt here..."></textarea>
+        <div class="prompt-controls">
+          <div class="prompt-buttons">
+            <button class="btn-start" id="btn-start">&#8853; Start Run</button>
+            <button class="btn-stop" id="btn-stop" disabled>&#8854; Stop</button>
+          </div>
+          <div class="progress-inline" id="progress-inline">
+            <span class="eta-label" id="eta-text">ETA: &mdash;</span>
+            <div class="progress-track">
+              <div class="progress-fill" id="progress-fill"></div>
+            </div>
+            <span class="progress-pct" id="progress-pct">0%</span>
+          </div>
+        </div>
+      </section>
 
-      <!-- Worker cards -->
-      <div class="workers-grid" id="workers"></div>
+      <!-- Results -->
+      <section class="panel" id="results-section">
+        <div class="panel-header">
+          <div class="panel-title-group">
+            <span class="panel-title">&#128196; RESULTS</span>
+            <div class="tab-group">
+              <button class="tab active" id="tab-table">Table View</button>
+              <button class="tab" id="tab-json">JSON</button>
+            </div>
+          </div>
+          <button class="btn-export" id="btn-export" disabled>&#128196; Export .xlsx</button>
+        </div>
+        <div id="results-table-wrap">
+          <table class="results-table">
+            <thead>
+              <tr>
+                <th>#</th>
+                <th>MODEL A</th>
+                <th>MODEL B</th>
+                <th>TIME</th>
+                <th>TOKENS</th>
+                <th>STATUS</th>
+              </tr>
+            </thead>
+            <tbody id="results-body"></tbody>
+          </table>
+        </div>
+        <pre class="results-json hidden" id="results-json"></pre>
+      </section>
+
     </div>
 
-    <!-- Log -->
-    <div class="panel">
-      <div class="panel-title">Log</div>
-      <div class="log-box" id="log-box"></div>
-    </div>
+    <!-- Right Column -->
+    <div class="col-right">
 
-    <!-- Results -->
-    <div class="panel" id="results-section">
-      <div class="panel-title">Results</div>
-      <div style="overflow-x: auto;">
-        <table class="results-table">
-          <thead>
-            <tr>
-              <th>#</th>
-              <th>Model</th>
-              <th>Response</th>
-              <th>Time</th>
-              <th>Status</th>
-            </tr>
-          </thead>
-          <tbody id="results-body"></tbody>
-        </table>
-      </div>
-    </div>
+      <!-- Windows -->
+      <section class="panel">
+        <div class="panel-header">
+          <span class="panel-title">&#128421; WINDOWS</span>
+        </div>
+        <div class="windows-list" id="workers"></div>
+      </section>
 
+      <!-- Live Log -->
+      <section class="panel">
+        <div class="panel-header">
+          <span class="panel-title">&#128203; LIVE LOG</span>
+          <span class="auto-scroll-label" id="auto-scroll-toggle">auto-scroll</span>
+        </div>
+        <div class="log-box" id="log-box"></div>
+      </section>
+
+    </div>
   </div>
+
+  <!-- Footer -->
+  <footer class="app-footer">
+    <div class="footer-stats">
+      <span>TOTAL RUNS <strong id="stat-runs">0</strong></span>
+      <span>|</span>
+      <span>AVG TIME <strong id="stat-avg-time">&mdash;</strong></span>
+      <span>|</span>
+      <span>SUCCESS RATE <strong id="stat-success-rate">&mdash;</strong></span>
+      <span>|</span>
+      <span>TOKENS USED <strong id="stat-tokens">0</strong></span>
+    </div>
+    <div class="footer-powered">Powered by Playwright + FastAPI</div>
+  </footer>
+
+  <!-- Settings Modal -->
+  <div class="modal-overlay hidden" id="settings-modal">
+    <div class="modal">
+      <div class="modal-header">
+        <h2>&#9881; Settings</h2>
+        <button class="modal-close" id="btn-close-settings">&times;</button>
+      </div>
+      <div class="modal-body">
+
+        <div class="settings-section">
+          <h3>Model Selection</h3>
+          <div class="settings-grid">
+            <div class="form-group">
+              <label for="model-a">Model A (optional)</label>
+              <input type="text" id="model-a" placeholder="e.g. claude-opus-4-5-20251101" />
+            </div>
+            <div class="form-group">
+              <label for="model-b">Model B (optional)</label>
+              <input type="text" id="model-b" placeholder="e.g. claude-opus-4-6" />
+            </div>
+          </div>
+        </div>
+
+        <div class="settings-section">
+          <h3>Browser</h3>
+          <div class="settings-grid">
+            <div class="form-group">
+              <label for="zoom">Zoom (%)</label>
+              <input type="number" id="zoom" value="100" min="25" max="200" step="5" />
+            </div>
+            <div class="form-group checkbox-group">
+              <label>
+                <input type="checkbox" id="clear-cookies" />
+                Clear cookies before run
+              </label>
+            </div>
+          </div>
+        </div>
+
+        <div class="settings-section">
+          <h3>Display &amp; Tiling</h3>
+          <div class="settings-grid">
+            <div class="form-group">
+              <label for="monitor-count">Monitors</label>
+              <input type="number" id="monitor-count" value="1" min="1" max="8" />
+            </div>
+            <div class="form-group">
+              <label for="monitor-width">Monitor Width</label>
+              <input type="number" id="monitor-width" value="1920" min="800" max="7680" />
+            </div>
+            <div class="form-group">
+              <label for="monitor-height">Monitor Height</label>
+              <input type="number" id="monitor-height" value="1080" min="600" max="4320" />
+            </div>
+            <div class="form-group">
+              <label for="taskbar-height">Taskbar Height</label>
+              <input type="number" id="taskbar-height" value="40" min="0" max="200" />
+            </div>
+            <div class="form-group">
+              <label for="tile-margin">Margin (px)</label>
+              <input type="number" id="tile-margin" value="0" min="0" max="50" />
+            </div>
+          </div>
+          <div class="tile-preview" id="tile-preview-label"></div>
+        </div>
+
+      </div>
+    </div>
+  </div>
+
+  <!-- Toast Container -->
+  <div class="toast-container" id="toast-container"></div>
 
   <script src="/static/app.js"></script>
 </body>

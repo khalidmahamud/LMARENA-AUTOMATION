@@ -31,6 +31,9 @@ class EventType(str, Enum):
     RUN_CANCELLED = "run.cancelled"
     RUN_ERROR = "run.error"
 
+    # Notifications
+    TOAST = "toast"
+
     # Logging
     LOG = "log"
 

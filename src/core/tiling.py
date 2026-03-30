@@ -1,35 +1,58 @@
 from __future__ import annotations
 
 import math
-from typing import List, Tuple
+from dataclasses import dataclass
+from typing import List
 
-from src.models.config import WindowSize
+
+@dataclass
+class TileLayout:
+    """Position and size for a single tiled window."""
+
+    x: int
+    y: int
+    width: int
+    height: int
 
 
 def compute_tile_positions(
     count: int,
-    window_size: WindowSize,
-    screen_width: int = 1920,
-    screen_height: int = 1080,
+    monitor_count: int = 1,
+    monitor_width: int = 1920,
+    monitor_height: int = 1080,
+    taskbar_height: int = 40,
     margin: int = 0,
-) -> List[Tuple[int, int]]:
-    """Compute (x, y) positions for tiling *count* windows in a grid.
+) -> List[TileLayout]:
+    """Compute position and size for *count* windows tiled across monitors.
 
-    Grid fills left-to-right, top-to-bottom. Returns one (x, y) tuple
-    per window.
+    Windows are auto-sized to perfectly fill the available screen area.
+    Multi-monitor assumes horizontal side-by-side arrangement.
+    Grid fills left-to-right, top-to-bottom.
     """
     if count <= 0:
         return []
 
+    total_width = monitor_count * monitor_width
+    total_height = monitor_height - taskbar_height
+
+    # Pick grid dimensions that best fill the available area
     cols = math.ceil(math.sqrt(count))
     rows = math.ceil(count / cols)
 
-    positions: List[Tuple[int, int]] = []
+    # Auto-compute window size to perfectly fill the screen
+    win_width = (total_width - (cols + 1) * margin) // cols
+    win_height = (total_height - (rows + 1) * margin) // rows
+
+    # Clamp to reasonable minimums
+    win_width = max(win_width, 400)
+    win_height = max(win_height, 300)
+
+    tiles: List[TileLayout] = []
     for idx in range(count):
         row = idx // cols
         col = idx % cols
-        x = margin + col * (window_size.width + margin)
-        y = margin + row * (window_size.height + margin)
-        positions.append((x, y))
+        x = margin + col * (win_width + margin)
+        y = margin + row * (win_height + margin)
+        tiles.append(TileLayout(x=x, y=y, width=win_width, height=win_height))
 
-    return positions
+    return tiles

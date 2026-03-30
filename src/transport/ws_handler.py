@@ -101,7 +101,13 @@ class WsHandler:
 
     async def _handle_stop_run(self) -> None:
         if self._orchestrator:
-            await self._orchestrator.cancel()
+            try:
+                await self._orchestrator.cancel()
+            except Exception as exc:
+                logger.error("Error during cancel: %s", exc)
+        # Kill the background task so it doesn't keep running after browsers close
+        if self._run_task and not self._run_task.done():
+            self._run_task.cancel()
 
     @property
     def orchestrator(self) -> Optional[RunOrchestrator]:

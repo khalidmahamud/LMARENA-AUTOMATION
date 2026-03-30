@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from typing import Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 from playwright.async_api import Page
 
@@ -15,7 +15,7 @@ logger = logging.getLogger(__name__)
 
 
 class ResponsePoller:
-    """Polls Arena DOM until both response panels are stable.
+    """Polls Arena DOM until both side-by-side response panels are stable.
 
     "Stable" means the text content has not changed for
     ``stable_polls_required`` consecutive checks at ``poll_interval_seconds``
@@ -30,24 +30,28 @@ class ResponsePoller:
         page: Page,
         selectors: SelectorRegistry,
         worker_id: int = -1,
-    ) -> Tuple[str, Optional[str]]:
-        """Poll until the response is stable.
+        cancel_event: Optional[asyncio.Event] = None,
+    ) -> Tuple[Tuple[str, str], Tuple[Optional[str], Optional[str]]]:
+        """Poll until both responses are stable.
 
-        Returns ``(response, model_name)``.
-        Raises ``PollingTimeoutError`` if response doesn't stabilise in time.
+        Returns ``((response_a, response_b), (model_a_name, model_b_name))``.
+        Raises ``PollingTimeoutError`` if responses don't stabilise in time.
         """
         deadline = time.monotonic() + self._config.response_timeout_seconds
         interval = self._config.poll_interval_seconds
         required = self._config.stable_polls_required
 
-        prev_text = ""
+        prev_text_a = ""
+        prev_text_b = ""
         stable_count = 0
 
-        sel_response = selectors.get("response_panel")
-
         login_close_sel = selectors.get("login_dialog_close")
+        slide_sel = selectors.get("response_slide")
 
         while time.monotonic() < deadline:
+            if cancel_event and cancel_event.is_set():
+                raise asyncio.CancelledError("Run cancelled")
+
             # Dismiss login dialog if it pops up during polling
             try:
                 btn = await page.query_selector(login_close_sel)
@@ -56,27 +60,70 @@ class ResponsePoller:
                     await asyncio.sleep(1)
                     logger.info("Worker %d: dismissed login dialog during polling", worker_id)
             except Exception:
-                pass
+                if cancel_event and cancel_event.is_set():
+                    raise asyncio.CancelledError("Run cancelled")
 
-            cur_text = await self._extract_text(page, sel_response)
+            slides = await self._extract_slide_payloads(page, slide_sel)
 
-            if cur_text and cur_text == prev_text:
+            if cancel_event and cancel_event.is_set():
+                raise asyncio.CancelledError("Run cancelled")
+
+            cur_a = (
+                self._normalize_text(slides[0]["response_text"])
+                if len(slides) > 0
+                else ""
+            )
+            cur_b = (
+                self._normalize_text(slides[1]["response_text"])
+                if len(slides) > 1
+                else ""
+            )
+            copy_ready = (
+                len(slides) >= 2
+                and slides[0]["has_copy_button"]
+                and slides[1]["has_copy_button"]
+            )
+            streaming_active = any(
+                slide["has_streaming_indicator"] for slide in slides[:2]
+            )
+
+            if (
+                cur_a
+                and cur_b
+                and cur_a == prev_text_a
+                and cur_b == prev_text_b
+                and (copy_ready or not streaming_active)
+            ):
                 stable_count += 1
             else:
                 stable_count = 0
 
-            prev_text = cur_text
+            prev_text_a = cur_a
+            prev_text_b = cur_b
 
             if stable_count >= required:
                 logger.info(
-                    "Worker %d: response stable after %d checks",
+                    "Worker %d: both responses stable after %d checks",
                     worker_id,
                     required,
                 )
-                model_name = await self._extract_model_name(page, selectors)
-                return cur_text, model_name
+                model_names = (
+                    slides[0]["model_name"] if len(slides) > 0 else None,
+                    slides[1]["model_name"] if len(slides) > 1 else None,
+                )
+                return (cur_a, cur_b), model_names
 
-            await asyncio.sleep(interval)
+            # Cancellation-aware sleep
+            if cancel_event:
+                try:
+                    await asyncio.wait_for(
+                        cancel_event.wait(), timeout=interval
+                    )
+                    raise asyncio.CancelledError("Run cancelled")
+                except asyncio.TimeoutError:
+                    pass
+            else:
+                await asyncio.sleep(interval)
 
         raise PollingTimeoutError(
             worker_id=worker_id,
@@ -84,26 +131,78 @@ class ResponsePoller:
         )
 
     @staticmethod
-    async def _extract_text(page: Page, selector: str) -> str:
-        """Read inner text from a selector. Returns empty string on failure."""
-        try:
-            el = await page.query_selector(selector)
-            if el:
-                return (await el.inner_text()).strip()
-        except Exception as exc:
-            logger.debug("Text extraction failed for %s: %s", selector, exc)
-        return ""
+    def _normalize_text(text: str) -> str:
+        return " ".join(
+            text.replace("\u200b", "").replace("\ufeff", "").split()
+        ).strip()
 
     @staticmethod
-    async def _extract_model_name(
-        page: Page, selectors: SelectorRegistry
-    ) -> Optional[str]:
-        """Try to read the selected model name."""
+    async def _extract_slide_payloads(
+        page: Page,
+        slide_selector: str,
+    ) -> List[Dict[str, object]]:
+        """Return visible slide payloads for the two model response cards."""
         try:
-            sel = selectors.get("model_name_label")
-            el = await page.query_selector(sel)
-            if el:
-                return (await el.inner_text()).strip()
-        except (KeyError, Exception) as exc:
-            logger.debug("Model name extraction failed: %s", exc)
-        return None
+            payloads = await page.evaluate(
+                """(selector) => {
+                    const isVisible = (el) => {
+                        if (!el) return false;
+                        const style = window.getComputedStyle(el);
+                        const rect = el.getBoundingClientRect();
+                        return (
+                            style.display !== "none" &&
+                            style.visibility !== "hidden" &&
+                            rect.width > 0 &&
+                            rect.height > 0
+                        );
+                    };
+
+                    const hasCopyIcon = (button) => {
+                        const paths = Array.from(
+                            button.querySelectorAll("svg path")
+                        ).map((path) => path.getAttribute("d") || "");
+                        return (
+                            paths.some((d) => d.includes("M19.4 20H9.6")) &&
+                            paths.some((d) => d.includes("M15 9V4.6"))
+                        );
+                    };
+
+                    return Array.from(document.querySelectorAll(selector))
+                        .filter(isVisible)
+                        .map((slide) => {
+                            const proseNodes = Array.from(
+                                slide.querySelectorAll(".prose")
+                            ).filter(isVisible);
+                            const responseNode = proseNodes.length
+                                ? proseNodes[proseNodes.length - 1]
+                                : null;
+                            const modelNode = slide.querySelector("span.truncate");
+                            const copyButton = Array.from(
+                                slide.querySelectorAll("button[type='button']")
+                            ).find((btn) => isVisible(btn) && hasCopyIcon(btn));
+                            const streamingNode = slide.querySelector(
+                                ".streaming, [data-streaming='true'], .animate-pulse"
+                            );
+
+                            return {
+                                model_name: modelNode
+                                    ? modelNode.textContent.trim()
+                                    : null,
+                                response_text: responseNode
+                                    ? responseNode.innerText.trim()
+                                    : "",
+                                has_copy_button: Boolean(copyButton),
+                                has_streaming_indicator: Boolean(
+                                    streamingNode && isVisible(streamingNode)
+                                ),
+                            };
+                        })
+                        .slice(0, 2);
+                }""",
+                slide_selector,
+            )
+            if isinstance(payloads, list):
+                return payloads
+        except Exception as exc:
+            logger.debug("Slide extraction failed for %s: %s", slide_selector, exc)
+        return []

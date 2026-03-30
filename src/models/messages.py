@@ -14,7 +14,16 @@ class StartRunRequest(BaseModel):
     prompt: str = Field(..., min_length=1, max_length=50_000)
     window_count: int = Field(default=2, ge=1, le=12)
     submission_gap_seconds: Optional[float] = Field(default=None, ge=5.0)
-    model: Optional[str] = None
+    model_a: Optional[str] = None
+    model_b: Optional[str] = None
+    clear_cookies: bool = False
+    zoom_pct: int = Field(default=100, ge=25, le=200)
+    # Display / tiling overrides (sent from UI, fall back to config defaults)
+    monitor_count: Optional[int] = Field(default=None, ge=1, le=8)
+    monitor_width: Optional[int] = Field(default=None, ge=800, le=7680)
+    monitor_height: Optional[int] = Field(default=None, ge=600, le=4320)
+    taskbar_height: Optional[int] = Field(default=None, ge=0, le=200)
+    margin: Optional[int] = Field(default=None, ge=0, le=50)
 
 
 class StopRunRequest(BaseModel):
@@ -59,8 +68,10 @@ class LogMessage(BaseModel):
 
 class WindowResultPayload(BaseModel):
     worker_id: int
-    model_name: Optional[str] = None
-    response: Optional[str] = None
+    model_a_name: Optional[str] = None
+    model_a_response: Optional[str] = None
+    model_b_name: Optional[str] = None
+    model_b_response: Optional[str] = None
     elapsed_seconds: Optional[float] = None
     error: Optional[str] = None
 
@@ -72,11 +83,21 @@ class RunCompleteMessage(BaseModel):
     export_available: bool
 
 
+class RunCancelledMessage(BaseModel):
+    type: Literal["run_cancelled"] = "run_cancelled"
+
+
 class ChallengeDetectedMessage(BaseModel):
     type: Literal["challenge_detected"] = "challenge_detected"
     worker_id: int
     challenge_type: str  # "turnstile", "recaptcha", "login_wall"
     message: str
+
+
+class ToastMessage(BaseModel):
+    type: Literal["toast"] = "toast"
+    message: str
+    level: str = "success"  # "success", "info", "warning", "error"
 
 
 class PongMessage(BaseModel):
@@ -94,7 +115,9 @@ OutboundMessage = Union[
     RunProgressMessage,
     LogMessage,
     RunCompleteMessage,
+    RunCancelledMessage,
     ChallengeDetectedMessage,
+    ToastMessage,
     PongMessage,
     ErrorMessage,
 ]
