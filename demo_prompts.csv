@@ -1,0 +1,9 @@
+id,topic,prompt
+1,Creative Writing,"Write a short poem about the ocean at midnight"
+2,Code Generation,"Write a Python function that checks if a string is a valid palindrome, ignoring spaces and punctuation"
+3,Reasoning,"A farmer has 17 sheep. All but 9 run away. How many sheep does he have left? Explain step by step."
+4,Translation,"Translate the following to French and Japanese: 'The early bird catches the worm, but the second mouse gets the cheese.'"
+5,Summarization,"Summarize the concept of quantum entanglement in exactly 3 sentences suitable for a 10-year-old."
+6,Math,"Solve: If f(x) = 2x^3 - 5x^2 + 3x - 7, find f'(x) and evaluate f'(2)."
+7,Debate,"Give me 3 arguments for and 3 arguments against universal basic income. Be concise."
+8,Roleplay,"You are a medieval blacksmith. A knight brings you a broken sword before a battle tomorrow. What do you say?"
