@@ -9,3 +9,4 @@ venv/
 .tmp_browser_profiles/
 .agents/
 data/
+.claude/
