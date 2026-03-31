@@ -236,7 +236,7 @@
             <span class="proxy-stat-value" id="plog-pool-count">--</span>
           </div>
           <div class="proxy-stat-row">
-            <span class="proxy-stat-label">Avg Latency</span>
+            <span class="proxy-stat-label">Healthy Avg</span>
             <span class="proxy-stat-value" id="plog-avg-latency">--</span>
           </div>
           <div class="proxy-stat-row">
@@ -387,7 +387,10 @@
               <button type="button" id="check-pool-btn" class="btn-pool">Health Check</button>
               <label class="auto-refresh-label">
                 <input type="checkbox" id="auto-refresh-toggle" />
-                Auto-refresh (5min)
+                Auto-refresh
+              </label>
+              <label class="pool-max-label">
+                Every <input type="number" id="pool-refresh-interval" value="5" min="1" max="60" /> min
               </label>
               <label class="pool-max-label">
                 Max <input type="number" id="pool-max-size" value="50" min="1" max="500" />

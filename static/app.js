@@ -57,6 +57,7 @@
   const poolRefreshDot      = document.getElementById("pool-refresh-dot");
   const poolMaxSizeInput    = document.getElementById("pool-max-size");
   const poolMaxLatencyInput = document.getElementById("pool-max-latency");
+  const poolRefreshIntervalInput = document.getElementById("pool-refresh-interval");
   // Log tabs
   const logTabProcessing  = document.getElementById("log-tab-processing");
   const logTabProxy       = document.getElementById("log-tab-proxy");
@@ -292,8 +293,9 @@
         return r.json();
       })
       .then(function (data) {
-        var h = typeof data.healthy === "number" ? data.healthy : 0;
-        var t = typeof data.total === "number" ? data.total : 0;
+        // Count from proxy list to stay in sync with what's rendered
+        var h = data.proxies ? data.proxies.filter(function (p) { return p.healthy; }).length : (typeof data.healthy === "number" ? data.healthy : 0);
+        var t = data.proxies ? data.proxies.length : (typeof data.total === "number" ? data.total : 0);
         var m = typeof data.max_healthy === "number" ? data.max_healthy : 50;
         var maxLat = typeof data.max_latency_ms === "number" ? data.max_latency_ms : 5000;
         var avgLat = data.avg_latency_ms;
@@ -310,6 +312,10 @@
         }
         if (poolMaxLatencyInput && poolMaxLatencyInput !== document.activeElement) {
           poolMaxLatencyInput.value = maxLat;
+        }
+        if (poolRefreshIntervalInput && poolRefreshIntervalInput !== document.activeElement) {
+          var intervalSec = typeof data.auto_refresh_interval === "number" ? data.auto_refresh_interval : 300;
+          poolRefreshIntervalInput.value = Math.round(intervalSec / 60);
         }
 
         // Update sidebar tracker — show healthy / max
@@ -328,7 +334,7 @@
         }
 
         // Update proxy log tab stats
-        if (plogPoolCount) plogPoolCount.textContent = h + " / " + m + " healthy";
+        if (plogPoolCount) plogPoolCount.textContent = h + " healthy / " + t + " total";
         if (plogAvgLatency) {
           plogAvgLatency.textContent = avgLat !== null ? Math.round(avgLat) + "ms" : "--";
           plogAvgLatency.style.color = avgLat !== null && avgLat < maxLat * 0.5 ? "var(--green)" : avgLat !== null && avgLat < maxLat ? "var(--orange)" : "var(--text-dim)";
@@ -357,6 +363,7 @@
         // Render per-proxy list
         if (proxyListEl && data.proxies) {
           var proxies = data.proxies.slice().sort(function (a, b) {
+            if (a.healthy !== b.healthy) return a.healthy ? -1 : 1;
             var la = a.latency_ms != null ? a.latency_ms : 99999;
             var lb = b.latency_ms != null ? b.latency_ms : 99999;
             return la - lb;
@@ -365,7 +372,7 @@
           for (var i = 0; i < proxies.length; i++) {
             var p = proxies[i];
             var addr = p.server.replace(/^https?:\/\//, "").replace(/^socks[45]:\/\//, "");
-            var lat = p.latency_ms != null ? Math.round(p.latency_ms) : null;
+            var lat = p.healthy && p.latency_ms != null ? Math.round(p.latency_ms) : null;
             var barPct = lat != null && maxLat > 0 ? Math.min(100, Math.round((lat / maxLat) * 100)) : 0;
             var barColor = !p.healthy ? "var(--red)" :
               lat != null && lat < maxLat * 0.3 ? "var(--green)" :
@@ -383,10 +390,16 @@
         }
 
         // Log pool changes
-        if (_lastPoolHealthy !== null && h !== _lastPoolHealthy) {
-          var diff = h - _lastPoolHealthy;
-          appendProxyLog(diff > 0 ? "info" : "warning",
-            "Pool: " + h + "/" + m + " healthy (" + (diff > 0 ? "+" : "") + diff + ")" +
+        if (_lastPoolHealthy !== null && (h !== _lastPoolHealthy || t !== _lastPoolTotal)) {
+          var healthyDiff = h - _lastPoolHealthy;
+          var totalDiff = t - _lastPoolTotal;
+          var diffParts = [];
+          if (healthyDiff !== 0) diffParts.push("healthy " + (healthyDiff > 0 ? "+" : "") + healthyDiff);
+          if (totalDiff !== 0) diffParts.push("total " + (totalDiff > 0 ? "+" : "") + totalDiff);
+          appendProxyLog(healthyDiff >= 0 ? "info" : "warning",
+            "Pool: " + h + " healthy / " + t + " total" +
+            (diffParts.length ? " (" + diffParts.join(", ") + ")" : "") +
+            " | target " + m +
             (avgLat !== null ? " | avg " + Math.round(avgLat) + "ms" : ""));
         }
         _lastPoolHealthy = h;
@@ -467,16 +480,21 @@
     autoRefreshToggle.addEventListener("change", function () {
       var endpoint = this.checked ? "start" : "stop";
       var protocol = proxyProtocolInput.value;
+      var intervalMin = parseInt(poolRefreshIntervalInput ? poolRefreshIntervalInput.value : "5", 10) || 5;
+      var intervalSec = Math.max(60, Math.min(3600, intervalMin * 60));
       var qs = this.checked
-        ? "?protocol=" + encodeURIComponent(protocol) + "&limit=20&interval=300"
+        ? "?protocol=" + encodeURIComponent(protocol) + "&limit=20&interval=" + intervalSec
         : "";
       fetch("/api/proxy-pool/auto-refresh/" + endpoint + qs, { method: "POST" })
         .then(function (r) { return r.json(); })
         .then(function () {
           proxyPoolStatusEl.textContent = autoRefreshToggle.checked
-            ? "Auto-refresh started"
+            ? "Auto-refresh started (" + intervalMin + "min)"
             : "Auto-refresh stopped";
           proxyPoolStatusEl.style.color = "var(--green)";
+          appendProxyLog("info", autoRefreshToggle.checked
+            ? "Auto-refresh started (" + intervalMin + "min interval)"
+            : "Auto-refresh stopped");
           refreshPoolStatus();
         })
         .catch(function (err) {

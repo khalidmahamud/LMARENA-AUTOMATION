@@ -734,14 +734,15 @@ body {
 }
 
 .proxy-row-dot {
-  width: 5px;
-  height: 5px;
+  width: 7px;
+  height: 7px;
   border-radius: 50%;
   flex-shrink: 0;
+  box-shadow: 0 0 3px currentColor;
 }
 
-.proxy-row-dot.green { background: var(--green); }
-.proxy-row-dot.red { background: var(--red); }
+.proxy-row-dot.green { background: var(--green); color: var(--green); }
+.proxy-row-dot.red { background: var(--red); color: var(--red); }
 
 .proxy-row-addr {
   color: var(--text-dim);

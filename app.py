@@ -68,8 +68,8 @@ async def lifespan(application: FastAPI):
     # Resume auto-refresh if it was enabled before shutdown
     ar = proxy_pool.auto_refresh_settings
     if ar["enabled"]:
-        await proxy_pool.start_auto_refresh(protocol=ar["protocol"])
-        logger.info("Auto-refresh resumed from saved settings (protocol=%s)", ar["protocol"])
+        await proxy_pool.start_auto_refresh(protocol=ar["protocol"], interval=ar["interval"])
+        logger.info("Auto-refresh resumed (protocol=%s, interval=%.0fs)", ar["protocol"], ar["interval"])
     elif proxy_pool.total_count > 0:
         # Not auto-refreshing, but have loaded proxies — health-check them in background
         asyncio.create_task(proxy_pool.maintain_pool(protocol=ar["protocol"]))

@@ -67,6 +67,7 @@ class ProxyPool:
         # Persisted auto-refresh settings
         self._auto_refresh_protocol: str = "http"
         self._auto_refresh_enabled: bool = False
+        self._auto_refresh_interval: float = 300.0
 
     # ── Core API ──
 
@@ -187,6 +188,7 @@ class ProxyPool:
             "max_latency_ms": self._max_latency_ms,
             "auto_refresh_enabled": self._auto_refresh_enabled,
             "auto_refresh_protocol": self._auto_refresh_protocol,
+            "auto_refresh_interval": self._auto_refresh_interval,
             "proxies": [asdict(e) for e in capped_healthy + unhealthy],
         }
         path.write_text(json.dumps(data, indent=2))
@@ -210,6 +212,8 @@ class ProxyPool:
                 self._auto_refresh_enabled = data["auto_refresh_enabled"]
             if "auto_refresh_protocol" in data:
                 self._auto_refresh_protocol = data["auto_refresh_protocol"]
+            if "auto_refresh_interval" in data:
+                self._auto_refresh_interval = max(60.0, float(data["auto_refresh_interval"]))
 
             loaded = 0
             for p in data.get("proxies", []):
@@ -246,6 +250,7 @@ class ProxyPool:
         self._running = True
         self._auto_refresh_enabled = True
         self._auto_refresh_protocol = protocol
+        self._auto_refresh_interval = interval
         self._refresh_task = asyncio.create_task(
             self._refresh_loop(protocol, fetch_limit, interval)
         )
@@ -314,6 +319,8 @@ class ProxyPool:
                     entry.latency_ms = round(latency, 1)
                     latencies.append(latency)
                 else:
+                    # Do not keep showing a stale "good" latency after a failed check.
+                    entry.latency_ms = None
                     entry.fail_count += 1
                     was_healthy = entry.healthy
                     if entry.fail_count >= MAX_FAIL_COUNT:
@@ -409,6 +416,7 @@ class ProxyPool:
             "max_latency_ms": self._max_latency_ms,
             "avg_latency_ms": avg_latency,
             "auto_refresh_active": self._running,
+            "auto_refresh_interval": self._auto_refresh_interval,
             "last_refresh": self._last_refresh,
             "proxies": [
                 {
@@ -429,6 +437,7 @@ class ProxyPool:
         return {
             "enabled": self._auto_refresh_enabled,
             "protocol": self._auto_refresh_protocol,
+            "interval": self._auto_refresh_interval,
         }
 
     @property
