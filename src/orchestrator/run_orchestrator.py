@@ -193,6 +193,7 @@ class RunOrchestrator:
                 event_bus=self._event_bus,
                 context_recreator=self._browser_manager.recreate_context,
                 proxy_getter=self._browser_manager.get_context_proxy,
+                proxy_success_reporter=self._browser_manager.report_proxy_success,
             )
             for i in range(count)
         ]

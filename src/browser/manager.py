@@ -10,6 +10,7 @@ from playwright.async_api import BrowserContext, Playwright, async_playwright
 
 from src.core.tiling import TileLayout, compute_tile_positions
 from src.models.config import AppConfig, DisplayConfig
+from src.proxy.pool import ProxyPool
 
 logger = logging.getLogger(__name__)
 
@@ -22,8 +23,9 @@ class BrowserManager:
     a temporary per-run directory that is deleted when the run ends.
     """
 
-    def __init__(self, config: AppConfig) -> None:
+    def __init__(self, config: AppConfig, proxy_pool: Optional[ProxyPool] = None) -> None:
         self._config = config
+        self._proxy_pool = proxy_pool
         self._playwright: Optional[Playwright] = None
         self._contexts: List[BrowserContext] = []
         self._tiles: List[TileLayout] = []
@@ -80,6 +82,10 @@ class BrowserManager:
         self._proxy_on_challenge = proxy_on_challenge
         self._proxy_assign_counter = 0
         self._context_proxies.clear()
+
+        # Seed the pool with manually provided proxies
+        if self._proxies and self._proxy_pool:
+            self._proxy_pool.add_proxies(self._proxies, source="manual")
 
         self._tmp_root.mkdir(parents=True, exist_ok=True)
         self._run_profile_base = Path(
@@ -173,8 +179,19 @@ class BrowserManager:
 
         # Launch new context at the same tile position
         tile = self._tiles[index]
-        if self._proxy_on_challenge and self._proxies:
-            # Assign next proxy from the pool (round-robin)
+        if self._proxy_on_challenge and self._proxy_pool and self._proxy_pool.healthy_count > 0:
+            # Mark old proxy as problematic
+            old_proxy = self._context_proxies.get(index)
+            if old_proxy:
+                self._proxy_pool.mark_unhealthy(old_proxy)
+            # Get next healthy proxy from pool
+            proxy = self._proxy_pool.get_next_healthy()
+            if proxy:
+                logger.info("Pool mode: assigning healthy proxy %s to context %d", proxy.get("server", "???"), index)
+            else:
+                logger.warning("No healthy proxies in pool for context %d", index)
+        elif self._proxy_on_challenge and self._proxies:
+            # Fallback to round-robin if no pool
             proxy = self._proxies[self._proxy_assign_counter % len(self._proxies)]
             self._proxy_assign_counter += 1
             logger.info("Challenge mode: assigning proxy %s to context %d", proxy.get("server", "???"), index)
@@ -195,6 +212,12 @@ class BrowserManager:
     def get_context_proxy(self, index: int) -> Optional[str]:
         """Return the proxy server string for context *index*, or None."""
         return self._context_proxies.get(index)
+
+    def report_proxy_success(self, index: int) -> None:
+        """Mark the proxy used by context *index* as healthy in the pool."""
+        server = self._context_proxies.get(index)
+        if server and self._proxy_pool:
+            self._proxy_pool.mark_healthy(server)
 
     def _launch_args(self, tile: TileLayout) -> List[str]:
         args = [

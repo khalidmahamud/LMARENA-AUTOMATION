@@ -54,6 +54,21 @@
         </div>
       </details>
 
+      <!-- Proxy Pool Tracker -->
+      <div class="pool-tracker">
+        <div class="pool-tracker-header">
+          <span class="pool-tracker-title">Proxy Pool</span>
+          <span class="pool-tracker-refresh-dot" id="pool-refresh-dot" title="Auto-refresh inactive"></span>
+        </div>
+        <div class="pool-tracker-bar">
+          <div class="pool-tracker-bar-fill" id="pool-bar-fill"></div>
+        </div>
+        <div class="pool-tracker-stats">
+          <span id="pool-tracker-counts">0 / 0</span>
+          <span class="pool-tracker-label">healthy</span>
+        </div>
+      </div>
+
       <!-- Windows -->
       <div class="windows-section">
         <div class="section-header">Windows</div>
@@ -234,8 +249,8 @@
       </div>
       <div class="modal-body">
 
-        <div class="settings-section">
-          <h3>Model Selection</h3>
+        <details class="settings-section" open>
+          <summary>Model Selection</summary>
           <div class="settings-grid">
             <div class="form-group">
               <label for="model-a">Model A (optional)</label>
@@ -254,10 +269,10 @@
               </select>
             </div>
           </div>
-        </div>
+        </details>
 
-        <div class="settings-section">
-          <h3>Browser</h3>
+        <details class="settings-section">
+          <summary>Browser</summary>
           <div class="settings-grid">
             <div class="form-group">
               <label for="zoom">Zoom (%)</label>
@@ -282,10 +297,10 @@
               </label>
             </div>
           </div>
-        </div>
+        </details>
 
-        <div class="settings-section">
-          <h3>Proxies</h3>
+        <details class="settings-section">
+          <summary>Proxies</summary>
           <div class="settings-grid">
             <div class="form-group">
               <label for="proxy-list">Proxy List <span class="label-hint">one per line: server,user,pass</span></label>
@@ -323,10 +338,30 @@
               </label>
             </div>
           </div>
-        </div>
+          <!-- Proxy Pool Status -->
+          <div class="proxy-pool-section">
+            <div class="proxy-pool-header">
+              <span class="proxy-pool-title">Proxy Pool</span>
+              <span id="proxy-pool-counts" class="proxy-pool-counts">-- / --</span>
+            </div>
+            <div class="proxy-pool-controls">
+              <button type="button" id="save-pool-btn" class="btn-pool">Save Pool</button>
+              <button type="button" id="load-pool-btn" class="btn-pool">Load Pool</button>
+              <button type="button" id="check-pool-btn" class="btn-pool">Health Check</button>
+              <label class="auto-refresh-label">
+                <input type="checkbox" id="auto-refresh-toggle" />
+                Auto-refresh (5min)
+              </label>
+              <label class="pool-max-label">
+                Max <input type="number" id="pool-max-size" value="50" min="1" max="500" />
+              </label>
+            </div>
+            <span id="proxy-pool-status" class="proxy-status"></span>
+          </div>
+        </details>
 
-        <div class="settings-section">
-          <h3>Display &amp; Tiling</h3>
+        <details class="settings-section">
+          <summary>Display &amp; Tiling</summary>
           <div class="settings-grid">
             <div class="form-group">
               <label for="monitor-count">Monitors</label>
@@ -350,7 +385,7 @@
             </div>
           </div>
           <div class="tile-preview" id="tile-preview-label"></div>
-        </div>
+        </details>
 
       </div>
     </div>
@@ -397,7 +432,6 @@
           <button class="btn-zoom" data-zoom="0.75">75%</button>
           <button class="btn-zoom" data-zoom="0.5">50%</button>
         </div>
-        <button class="btn-modal-action" id="html-copy-code" title="Copy HTML source">&#128203; Copy HTML</button>
         <button class="modal-close" id="html-preview-close">&times;</button>
       </div>
     </div>

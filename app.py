@@ -29,6 +29,7 @@ from src.core.events import EventBus
 from src.export.excel_exporter import export_to_csv, export_to_excel, export_to_json
 from src.models.config import AppConfig
 from src.orchestrator.run_orchestrator import RunOrchestrator
+from src.proxy.pool import ProxyPool
 from src.transport.ws_broadcaster import WsBroadcaster
 from src.transport.ws_handler import WsHandler
 
@@ -49,19 +50,30 @@ broadcaster: WsBroadcaster
 browser_manager: BrowserManager
 checkpoint_manager: CheckpointManager
 ws_handler: WsHandler
+proxy_pool: ProxyPool
 
 
 @asynccontextmanager
 async def lifespan(application: FastAPI):
     """Startup / shutdown lifecycle."""
-    global config, event_bus, broadcaster, browser_manager, checkpoint_manager, ws_handler
+    global config, event_bus, broadcaster, browser_manager, checkpoint_manager, ws_handler, proxy_pool
 
     config = AppConfig.from_yaml("config/default_config.yaml")
     SelectorRegistry.load("config/selectors.yaml")
 
+    # Initialize proxy pool (load persisted proxies and settings)
+    proxy_pool = ProxyPool(check_fn=_check_proxy)
+    proxy_pool.load_from_file()
+
+    # Resume auto-refresh if it was enabled before shutdown
+    ar = proxy_pool.auto_refresh_settings
+    if ar["enabled"]:
+        await proxy_pool.start_auto_refresh(protocol=ar["protocol"])
+        logger.info("Auto-refresh resumed from saved settings (protocol=%s)", ar["protocol"])
+
     event_bus = EventBus()
     broadcaster = WsBroadcaster(event_bus)
-    browser_manager = BrowserManager(config)
+    browser_manager = BrowserManager(config, proxy_pool=proxy_pool)
     checkpoint_manager = CheckpointManager(config.output_dir)
     await browser_manager.start()
 
@@ -75,6 +87,9 @@ async def lifespan(application: FastAPI):
     logger.info("Server ready — open http://localhost:8000")
     yield
 
+    # Shutdown: stop auto-refresh and save proxy pool
+    await proxy_pool.stop_auto_refresh()
+    proxy_pool.save_to_file()
     await browser_manager.close_all()
     logger.info("Shutdown complete")
 
@@ -302,7 +317,82 @@ async def fetch_free_proxies(
     alive = [{"server": proxy} for proxy, ok in zip(candidates, results) if ok]
     alive = alive[:limit]
     logger.info("Found %d working proxies out of %d tested", len(alive), len(candidates))
+
+    # Also add to proxy pool
+    if alive:
+        proxy_pool.add_proxies(alive, source="auto_fetch")
+
     return {"proxies": alive, "count": len(alive), "protocol": protocol, "tested": True, "total_tested": len(candidates)}
+
+
+# ── Proxy pool endpoints ──
+
+
+@app.get("/api/proxy-pool/status")
+async def proxy_pool_status():
+    """Return current pool status for UI display."""
+    try:
+        return proxy_pool.get_status()
+    except Exception as exc:
+        logger.error("proxy_pool_status error: %s", exc)
+        return {"total": 0, "healthy": 0, "unhealthy": 0, "auto_refresh_active": False, "proxies": []}
+
+
+@app.post("/api/proxy-pool/save")
+async def save_proxy_pool():
+    """Persist current pool to disk."""
+    path = proxy_pool.save_to_file()
+    return {"saved": True, "path": str(path), "count": proxy_pool.total_count}
+
+
+@app.post("/api/proxy-pool/load")
+async def load_proxy_pool():
+    """Load pool from disk."""
+    count = proxy_pool.load_from_file()
+    return {"loaded": True, "count": count}
+
+
+@app.post("/api/proxy-pool/add")
+async def add_to_proxy_pool(request: dict):
+    """Manually add proxies to the pool. Body: {"proxies": [...]}"""
+    proxies = request.get("proxies", [])
+    added = proxy_pool.add_proxies(proxies, source="manual")
+    return {"added": added, "total": proxy_pool.total_count}
+
+
+@app.post("/api/proxy-pool/auto-refresh/start")
+async def start_auto_refresh(
+    protocol: str = "http", limit: int = 20, interval: int = 300
+):
+    """Start the background auto-refresh task and persist the preference."""
+    await proxy_pool.start_auto_refresh(
+        protocol=protocol, fetch_limit=limit, interval=float(interval)
+    )
+    proxy_pool.save_to_file()
+    return {"started": True, "interval": interval}
+
+
+@app.post("/api/proxy-pool/auto-refresh/stop")
+async def stop_auto_refresh():
+    """Stop the background auto-refresh task and persist the preference."""
+    await proxy_pool.stop_auto_refresh()
+    proxy_pool.save_to_file()
+    return {"stopped": True}
+
+
+@app.post("/api/proxy-pool/max-size")
+async def set_pool_max_size(limit: int = 50):
+    """Update the max healthy proxies cap."""
+    proxy_pool.set_max_healthy(limit)
+    proxy_pool.save_to_file()
+    return {"max_healthy": limit}
+
+
+@app.post("/api/proxy-pool/health-check")
+async def health_check_pool():
+    """Trigger an immediate health check of all proxies in the pool."""
+    stats = await proxy_pool.health_check_all()
+    return stats
 
 
 # ── Checkpoint endpoints ──

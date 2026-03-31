@@ -46,6 +46,16 @@
   const proxyTestInput    = document.getElementById("proxy-test");
   const proxyFetchStatus  = document.getElementById("proxy-fetch-status");
   const proxyOnChallengeInput = document.getElementById("proxy-on-challenge");
+  const savePoolBtn         = document.getElementById("save-pool-btn");
+  const loadPoolBtn         = document.getElementById("load-pool-btn");
+  const checkPoolBtn        = document.getElementById("check-pool-btn");
+  const autoRefreshToggle   = document.getElementById("auto-refresh-toggle");
+  const proxyPoolCounts     = document.getElementById("proxy-pool-counts");
+  const proxyPoolStatusEl   = document.getElementById("proxy-pool-status");
+  const poolTrackerCounts   = document.getElementById("pool-tracker-counts");
+  const poolBarFill         = document.getElementById("pool-bar-fill");
+  const poolRefreshDot      = document.getElementById("pool-refresh-dot");
+  const poolMaxSizeInput    = document.getElementById("pool-max-size");
   const systemPromptInput = document.getElementById("system-prompt");
   const combineWithFirstInput = document.getElementById("combine-with-first");
   const promptInput       = document.getElementById("prompt");
@@ -211,7 +221,167 @@
         })
         .finally(function () {
           fetchProxiesBtn.disabled = false;
+          refreshPoolStatus();
         });
+    });
+  }
+
+  // ── Proxy Pool Controls ──
+
+  function refreshPoolStatus() {
+    fetch("/api/proxy-pool/status")
+      .then(function (r) {
+        if (!r.ok) throw new Error("status " + r.status);
+        return r.json();
+      })
+      .then(function (data) {
+        var h = typeof data.healthy === "number" ? data.healthy : 0;
+        var t = typeof data.total === "number" ? data.total : 0;
+        var m = typeof data.max_healthy === "number" ? data.max_healthy : 50;
+
+        // Update settings modal
+        proxyPoolCounts.textContent = h + " healthy / " + t + " total";
+        proxyPoolCounts.style.color = h > 0 ? "var(--green)" : "var(--text-dim)";
+        if (autoRefreshToggle) {
+          autoRefreshToggle.checked = data.auto_refresh_active || false;
+        }
+        if (poolMaxSizeInput && poolMaxSizeInput !== document.activeElement) {
+          poolMaxSizeInput.value = m;
+        }
+
+        // Update sidebar tracker — show healthy / max
+        if (poolTrackerCounts) {
+          poolTrackerCounts.textContent = h + " / " + m;
+        }
+        if (poolBarFill) {
+          var pct = m > 0 ? Math.round((h / m) * 100) : 0;
+          poolBarFill.style.width = Math.min(pct, 100) + "%";
+          poolBarFill.className = "pool-tracker-bar-fill" +
+            (t === 0 ? " empty" : pct < 50 ? " warning" : "");
+        }
+        if (poolRefreshDot) {
+          var isActive = data.auto_refresh_active || false;
+          poolRefreshDot.className = "pool-tracker-refresh-dot" + (isActive ? " active" : "");
+          poolRefreshDot.title = isActive ? "Auto-refresh active" : "Auto-refresh inactive";
+        }
+      })
+      .catch(function () {
+        proxyPoolCounts.textContent = "-- / --";
+        proxyPoolCounts.style.color = "var(--text-dim)";
+        if (poolTrackerCounts) poolTrackerCounts.textContent = "-- / --";
+        if (poolBarFill) {
+          poolBarFill.style.width = "0%";
+          poolBarFill.className = "pool-tracker-bar-fill empty";
+        }
+      });
+  }
+
+  // Poll pool status every 30 seconds
+  setInterval(refreshPoolStatus, 30000);
+  refreshPoolStatus();
+
+  if (savePoolBtn) {
+    savePoolBtn.addEventListener("click", function () {
+      fetch("/api/proxy-pool/save", { method: "POST" })
+        .then(function (r) { return r.json(); })
+        .then(function (data) {
+          proxyPoolStatusEl.textContent = "Saved " + data.count + " proxies";
+          proxyPoolStatusEl.style.color = "var(--green)";
+        })
+        .catch(function (err) {
+          proxyPoolStatusEl.textContent = "Save failed: " + err.message;
+          proxyPoolStatusEl.style.color = "var(--red)";
+        });
+    });
+  }
+
+  if (loadPoolBtn) {
+    loadPoolBtn.addEventListener("click", function () {
+      fetch("/api/proxy-pool/load", { method: "POST" })
+        .then(function (r) { return r.json(); })
+        .then(function (data) {
+          proxyPoolStatusEl.textContent = "Loaded " + data.count + " proxies";
+          proxyPoolStatusEl.style.color = "var(--green)";
+          refreshPoolStatus();
+        })
+        .catch(function (err) {
+          proxyPoolStatusEl.textContent = "Load failed: " + err.message;
+          proxyPoolStatusEl.style.color = "var(--red)";
+        });
+    });
+  }
+
+  if (checkPoolBtn) {
+    checkPoolBtn.addEventListener("click", function () {
+      proxyPoolStatusEl.textContent = "Checking...";
+      proxyPoolStatusEl.style.color = "var(--text-dim)";
+      checkPoolBtn.disabled = true;
+      fetch("/api/proxy-pool/health-check", { method: "POST" })
+        .then(function (r) { return r.json(); })
+        .then(function (data) {
+          proxyPoolStatusEl.textContent =
+            data.healthy + " healthy, " + data.unhealthy + " unhealthy, " + data.recovered + " recovered";
+          proxyPoolStatusEl.style.color = data.healthy > 0 ? "var(--green)" : "var(--orange)";
+          refreshPoolStatus();
+        })
+        .catch(function (err) {
+          proxyPoolStatusEl.textContent = "Check failed: " + err.message;
+          proxyPoolStatusEl.style.color = "var(--red)";
+        })
+        .finally(function () {
+          checkPoolBtn.disabled = false;
+        });
+    });
+  }
+
+  if (autoRefreshToggle) {
+    autoRefreshToggle.addEventListener("change", function () {
+      var endpoint = this.checked ? "start" : "stop";
+      var protocol = proxyProtocolInput.value;
+      var qs = this.checked
+        ? "?protocol=" + encodeURIComponent(protocol) + "&limit=20&interval=300"
+        : "";
+      fetch("/api/proxy-pool/auto-refresh/" + endpoint + qs, { method: "POST" })
+        .then(function (r) { return r.json(); })
+        .then(function () {
+          proxyPoolStatusEl.textContent = autoRefreshToggle.checked
+            ? "Auto-refresh started"
+            : "Auto-refresh stopped";
+          proxyPoolStatusEl.style.color = "var(--green)";
+          refreshPoolStatus();
+        })
+        .catch(function (err) {
+          proxyPoolStatusEl.textContent = "Error: " + err.message;
+          proxyPoolStatusEl.style.color = "var(--red)";
+        });
+    });
+  }
+
+  if (poolMaxSizeInput) {
+    var _maxSizeTimer = null;
+    poolMaxSizeInput.addEventListener("input", function () {
+      var el = this;
+      clearTimeout(_maxSizeTimer);
+      _maxSizeTimer = setTimeout(function () {
+        var limit = parseInt(el.value, 10);
+        if (!limit || limit < 1) return;
+        limit = Math.min(500, limit);
+        el.value = limit;
+        fetch("/api/proxy-pool/max-size?limit=" + limit, { method: "POST" })
+          .then(function (r) {
+            if (!r.ok) throw new Error("status " + r.status);
+            return r.json();
+          })
+          .then(function () {
+            proxyPoolStatusEl.textContent = "Max pool size set to " + limit;
+            proxyPoolStatusEl.style.color = "var(--green)";
+            refreshPoolStatus();
+          })
+          .catch(function (err) {
+            proxyPoolStatusEl.textContent = "Error: " + err.message;
+            proxyPoolStatusEl.style.color = "var(--red)";
+          });
+      }, 600);
     });
   }
 
@@ -439,6 +609,9 @@
         <td class="col-status"><span class="badge badge-queued">&#9201; Queued</span></td>
       `;
       resultsBody.appendChild(row);
+      if (autoScroll) {
+        row.scrollIntoView({ behavior: "smooth", block: "end" });
+      }
     }
     return row;
   }
@@ -540,6 +713,10 @@
     colStatus.innerHTML = result.error
       ? '<span class="badge badge-error">&#10007; Error</span>'
       : '<span class="badge badge-done">&#10003; Done</span>';
+
+    if (autoScroll) {
+      row.scrollIntoView({ behavior: "smooth", block: "end" });
+    }
   }
 
   function onWorkerResult(result) {
@@ -672,7 +849,7 @@
     }
 
     if (autoScroll) {
-      logBox.scrollTop = logBox.scrollHeight;
+      logBox.scrollTo({ top: logBox.scrollHeight, behavior: "smooth" });
     }
   }
 
@@ -1600,14 +1777,24 @@
     htmlModeBoth.textContent = "Compare";
     htmlModeA.classList.toggle("active", previewMode === "a");
     htmlModeB.classList.toggle("active", previewMode === "b");
+
     htmlModeBoth.classList.toggle("active", previewMode === "both");
 
     // Render content
     htmlPreviewContent.innerHTML = "";
 
+    function buildFloatingCopyBtn(side, label) {
+      const btn = document.createElement("button");
+      btn.className = "btn-copy-floating";
+      btn.title = `Copy ${label} HTML`;
+      btn.textContent = `\u{1F4CB} Copy HTML`;
+      btn.addEventListener("click", () => copyModelHtml(side));
+      return btn;
+    }
+
     if (previewMode === "both") {
       htmlPreviewContent.className = "html-preview-content html-preview-split";
-      [cache.a, cache.b].forEach((blocks) => {
+      [["a", cache.nameA, cache.a], ["b", cache.nameB, cache.b]].forEach(([side, name, blocks]) => {
         const col = document.createElement("div");
         col.className = "html-preview-col";
         if (blocks.length === 0) {
@@ -1617,11 +1804,14 @@
           col.appendChild(empty);
         } else {
           col.appendChild(buildPreviewIframe(blocks));
+          col.appendChild(buildFloatingCopyBtn(side, name));
         }
         htmlPreviewContent.appendChild(col);
       });
     } else {
       htmlPreviewContent.className = "html-preview-content html-preview-single";
+      const side = previewMode;
+      const name = previewMode === "a" ? cache.nameA : cache.nameB;
       const blocks = previewMode === "a" ? cache.a : cache.b;
       if (blocks.length === 0) {
         const empty = document.createElement("div");
@@ -1630,6 +1820,7 @@
         htmlPreviewContent.appendChild(empty);
       } else {
         htmlPreviewContent.appendChild(buildPreviewIframe(blocks));
+        htmlPreviewContent.appendChild(buildFloatingCopyBtn(side, name));
       }
     }
 
@@ -1754,25 +1945,24 @@ html, body { margin: 0; padding: 0; background: #fff; color: #111;
     applyPreviewZoom();
   });
 
-  // Copy HTML source
-  document.getElementById("html-copy-code").addEventListener("click", async () => {
+  // Copy HTML source — called by floating buttons inside preview panes
+  async function copyModelHtml(side) {
     const wid = previewWorkerIds[previewIndex];
     const cache = htmlBlocksCache[wid];
     if (!cache) return;
-    let text = "";
-    if (previewMode === "both") {
-      text = `<!-- ${cache.nameA} -->\n${cache.a.join("\n\n")}\n\n<!-- ${cache.nameB} -->\n${cache.b.join("\n\n")}`;
-    } else {
-      const blocks = previewMode === "a" ? cache.a : cache.b;
-      text = blocks.join("\n\n");
+    const blocks = side === "a" ? cache.a : cache.b;
+    const name = side === "a" ? cache.nameA : cache.nameB;
+    if (!blocks || blocks.length === 0) {
+      showToast(`No HTML blocks for ${name}`, "warning");
+      return;
     }
     try {
-      await navigator.clipboard.writeText(text);
-      showToast("HTML copied to clipboard", "success");
+      await navigator.clipboard.writeText(blocks.join("\n\n"));
+      showToast(`${name} HTML copied`, "success");
     } catch {
       showToast("Clipboard access denied", "warning");
     }
-  });
+  }
 
   // Close
   document.getElementById("html-preview-close").addEventListener("click", () => {

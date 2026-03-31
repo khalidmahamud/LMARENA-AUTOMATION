@@ -38,6 +38,8 @@ class ArenaWorker:
     ContextRecreator = Callable[[int], Coroutine[None, None, BrowserContext]]
     # Callback type: (worker_index) -> proxy server string or None
     ProxyGetter = Callable[[int], Optional[str]]
+    # Callback type: (worker_index) -> None
+    ProxySuccessReporter = Callable[[int], None]
 
     def __init__(
         self,
@@ -47,6 +49,7 @@ class ArenaWorker:
         event_bus: EventBus,
         context_recreator: Optional[ContextRecreator] = None,
         proxy_getter: Optional[ProxyGetter] = None,
+        proxy_success_reporter: Optional[ProxySuccessReporter] = None,
     ) -> None:
         self._id = worker_id
         self._context = context
@@ -54,6 +57,7 @@ class ArenaWorker:
         self._event_bus = event_bus
         self._context_recreator = context_recreator
         self._proxy_getter = proxy_getter
+        self._proxy_success_reporter = proxy_success_reporter
         self._page: Optional[Page] = None
         self._result: Optional[WindowResult] = None
         self._started_at: Optional[datetime] = None
@@ -452,6 +456,10 @@ class ArenaWorker:
                 challenge,
                 pause_event=pause_event,
             )
+        else:
+            # No challenge — proxy worked, report success
+            if self._proxy_success_reporter:
+                self._proxy_success_reporter(self._id)
 
         await self.state_machine.transition(WorkerState.READY)
         await self._log("info", "Ready")
@@ -709,6 +717,8 @@ class ArenaWorker:
             await self._ensure_active(pause_event)
             challenge = await detect_challenge(self._page)
             if challenge == ChallengeType.NONE:
+                if self._proxy_success_reporter:
+                    self._proxy_success_reporter(self._id)
                 await self._event_bus.publish(
                     Event(type=EventType.CHALLENGE_RESOLVED, worker_id=self._id)
                 )
