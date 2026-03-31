@@ -17,6 +17,7 @@ class EventType(str, Enum):
     # Worker lifecycle
     WORKER_STATE_CHANGED = "worker.state_changed"
     WORKER_PROGRESS = "worker.progress"
+    WORKER_PARTIAL_RESULT = "worker.partial_result"
     WORKER_ERROR = "worker.error"
     WORKER_COMPLETE = "worker.complete"
 

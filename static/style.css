@@ -1460,6 +1460,10 @@ textarea::placeholder {
   color: var(--orange);
   background: var(--orange-bg);
 }
+.badge-partial {
+  color: var(--blue);
+  background: rgba(91, 156, 245, 0.08);
+}
 
 .badge-done {
   color: var(--green);

@@ -17,6 +17,8 @@ from src.models.messages import (
     RunResumedMessage,
     ToastMessage,
     WindowResultPayload,
+    WorkerPartialResultMessage,
+    WorkerPartialResultPayload,
     WorkerResultMessage,
     WorkerUpdateMessage,
 )
@@ -80,6 +82,17 @@ class WsBroadcaster:
                 progress_pct=100.0,
                 message="Error occurred",
                 error=d.get("error"),
+            )
+
+        if event.type == EventType.WORKER_PARTIAL_RESULT:
+            return WorkerPartialResultMessage(
+                result=WorkerPartialResultPayload(
+                    worker_id=event.worker_id or 0,
+                    slide=d.get("slide", "a"),
+                    model_name=d.get("model_name"),
+                    response=d.get("response"),
+                    response_html=d.get("response_html"),
+                ),
             )
 
         if event.type == EventType.WORKER_COMPLETE:

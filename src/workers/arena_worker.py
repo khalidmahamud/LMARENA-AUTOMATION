@@ -1575,6 +1575,26 @@ class ArenaWorker:
         """Poll DOM until both responses are stable. Returns result."""
         assert self._page is not None
 
+        async def _on_slide_stable(
+            slide_index: int,
+            text: str,
+            html: str,
+            model_name: Optional[str],
+        ) -> None:
+            slide = "a" if slide_index == 0 else "b"
+            await self._event_bus.publish(
+                Event(
+                    type=EventType.WORKER_PARTIAL_RESULT,
+                    worker_id=self._id,
+                    data={
+                        "slide": slide,
+                        "model_name": model_name,
+                        "response": text,
+                        "response_html": html,
+                    },
+                )
+            )
+
         try:
             (resp_a, resp_b), (name_a, name_b), (html_a, html_b) = await self._poller.poll(
                 page=self._page,
@@ -1583,6 +1603,7 @@ class ArenaWorker:
                 cancel_event=self._cancel_event,
                 pause_event=pause_event,
                 baseline_responses=baseline_responses,
+                on_slide_stable=_on_slide_stable,
             )
 
             # Stay DOM-only here so Chromium never shows a clipboard

@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Callable, Coroutine, Dict, List, Optional, Tuple
 
 from playwright.async_api import Page
 
@@ -34,6 +34,9 @@ class ResponsePoller:
         cancel_event: Optional[asyncio.Event] = None,
         pause_event: Optional[asyncio.Event] = None,
         baseline_responses: Optional[Tuple[str, str]] = None,
+        on_slide_stable: Optional[
+            Callable[[int, str, str, Optional[str]], Coroutine[Any, Any, None]]
+        ] = None,
     ) -> Tuple[Tuple[str, str], Tuple[Optional[str], Optional[str]], Tuple[str, str]]:
         """Poll until both responses are stable.
 
@@ -47,6 +50,10 @@ class ResponsePoller:
         prev_text_a = ""
         prev_text_b = ""
         stable_count = 0
+        stable_count_a = 0
+        stable_count_b = 0
+        emitted_a = False
+        emitted_b = False
         retry_counts = [0, 0]
         baseline_a = (
             self._normalize_text(baseline_responses[0])
@@ -123,6 +130,10 @@ class ResponsePoller:
                             retry_counts[idx],
                         )
                 stable_count = 0
+                stable_count_a = 0
+                stable_count_b = 0
+                emitted_a = False
+                emitted_b = False
                 prev_text_a = ""
                 prev_text_b = ""
                 await self._sleep_with_controls(
@@ -157,26 +168,88 @@ class ResponsePoller:
                 and slides[0]["has_copy_button"]
                 and slides[1]["has_copy_button"]
             )
-            slide_streaming_active = any(
-                slide["has_streaming_indicator"] for slide in slides[:2]
-            )
             stop_generation_active = await self._has_visible_element(
                 page,
                 stop_generation_sel,
             )
+
+            # Per-slide streaming indicators
+            streaming_a = (
+                slides[0]["has_streaming_indicator"]
+                if len(slides) > 0
+                else False
+            )
+            streaming_b = (
+                slides[1]["has_streaming_indicator"]
+                if len(slides) > 1
+                else False
+            )
             streaming_active = (
-                slide_streaming_active or stop_generation_active
+                streaming_a or streaming_b or stop_generation_active
+            )
+
+            # Per-slide stability: track each model independently
+            baseline_ok_a = (
+                baseline_responses is None or cur_a != baseline_a
+            )
+            baseline_ok_b = (
+                baseline_responses is None or cur_b != baseline_b
+            )
+
+            copy_ready_a = (
+                len(slides) > 0 and slides[0]["has_copy_button"]
+            )
+            copy_ready_b = (
+                len(slides) > 1 and slides[1]["has_copy_button"]
             )
 
             if (
                 cur_a
-                and cur_b
-                and (
-                    baseline_responses is None
-                    or (cur_a != baseline_a and cur_b != baseline_b)
-                )
+                and baseline_ok_a
                 and cur_a == prev_text_a
+                and (copy_ready_a or not streaming_a)
+            ):
+                stable_count_a += 1
+            else:
+                stable_count_a = 0
+
+            if (
+                cur_b
+                and baseline_ok_b
                 and cur_b == prev_text_b
+                and (copy_ready_b or not streaming_b)
+            ):
+                stable_count_b += 1
+            else:
+                stable_count_b = 0
+
+            # Emit partial result as soon as each model stabilises
+            if (
+                on_slide_stable
+                and stable_count_a >= required
+                and not emitted_a
+            ):
+                emitted_a = True
+                model_name_a = (
+                    slides[0]["model_name"] if len(slides) > 0 else None
+                )
+                await on_slide_stable(0, cur_a, cur_html_a, model_name_a)
+
+            if (
+                on_slide_stable
+                and stable_count_b >= required
+                and not emitted_b
+            ):
+                emitted_b = True
+                model_name_b = (
+                    slides[1]["model_name"] if len(slides) > 1 else None
+                )
+                await on_slide_stable(1, cur_b, cur_html_b, model_name_b)
+
+            # Overall stability: both models stable + global indicators clear
+            if (
+                stable_count_a >= required
+                and stable_count_b >= required
                 and (copy_ready or not streaming_active)
             ):
                 stable_count += 1

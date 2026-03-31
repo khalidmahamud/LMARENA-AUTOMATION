@@ -154,6 +154,19 @@ class WindowResultPayload(BaseModel):
     error: Optional[str] = None
 
 
+class WorkerPartialResultPayload(BaseModel):
+    worker_id: int
+    slide: str  # "a" or "b"
+    model_name: Optional[str] = None
+    response: Optional[str] = None
+    response_html: Optional[str] = None
+
+
+class WorkerPartialResultMessage(BaseModel):
+    type: Literal["worker_partial_result"] = "worker_partial_result"
+    result: WorkerPartialResultPayload
+
+
 class WorkerResultMessage(BaseModel):
     type: Literal["worker_result"] = "worker_result"
     result: WindowResultPayload
@@ -203,6 +216,7 @@ class ErrorMessage(BaseModel):
 
 OutboundMessage = Union[
     WorkerUpdateMessage,
+    WorkerPartialResultMessage,
     WorkerResultMessage,
     RunProgressMessage,
     LogMessage,

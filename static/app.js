@@ -398,6 +398,9 @@
       case "worker_result":
         onWorkerResult(msg.result);
         break;
+      case "worker_partial_result":
+        onWorkerPartialResult(msg.result);
+        break;
       case "run_progress":
         updateProgress(msg);
         break;
@@ -723,6 +726,43 @@
     incrementalResults[result.worker_id] = result;
     updateResultRowWithData(result);
     if (tabHtml.classList.contains("active")) renderHtmlPreviews();
+  }
+
+  function onWorkerPartialResult(partial) {
+    var row = ensureResultRow(partial.worker_id);
+    var side = partial.slide;
+    var col = row.querySelector(side === "a" ? ".col-model-a" : ".col-model-b");
+    var colStatus = row.querySelector(".col-status");
+
+    col.className = side === "a" ? "col-model-a" : "col-model-b";
+    col.innerHTML = buildResultCellHTML(
+      partial.model_name,
+      partial.response,
+      partial.worker_id,
+      side
+    );
+
+    if (!colStatus.querySelector(".badge-done")) {
+      colStatus.innerHTML = '<span class="badge badge-partial">&#189; Partial</span>';
+    }
+
+    if (!incrementalResults[partial.worker_id]) {
+      incrementalResults[partial.worker_id] = { worker_id: partial.worker_id };
+    }
+    var ir = incrementalResults[partial.worker_id];
+    if (side === "a") {
+      ir.model_a_name = partial.model_name;
+      ir.model_a_response = partial.response;
+      ir.model_a_response_html = partial.response_html;
+    } else {
+      ir.model_b_name = partial.model_name;
+      ir.model_b_response = partial.response;
+      ir.model_b_response_html = partial.response_html;
+    }
+
+    if (autoScroll) {
+      row.scrollIntoView({ behavior: "smooth", block: "end" });
+    }
   }
 
   function populateFinalResults(results) {
