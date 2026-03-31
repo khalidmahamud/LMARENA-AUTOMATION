@@ -907,6 +907,7 @@ class ArenaWorker:
                 details = (
                     f" prompt_matches={last_snapshot.get('prompt_matches_expected')}"
                     f", textarea_visible={last_snapshot.get('textarea_visible')}"
+                    f", submit_in_viewport={last_snapshot.get('submit_in_viewport')}"
                     f", submit_enabled={last_snapshot.get('submit_enabled')}"
                     f", stop_visible={last_snapshot.get('stop_visible')}"
                 )
@@ -1043,7 +1044,8 @@ class ArenaWorker:
         Arena can keep other submit buttons mounted in dialogs, so clicking the
         first ``button[type='submit']`` in the DOM is unreliable. Prefer the
         submit button in the same form as the prompt, ignore dialog buttons,
-        and fall back to Enter if the button is still not clickable.
+        scroll it into view when needed, and fall back to submitting the form
+        directly before trying Enter on the editor.
         """
         assert self._page is not None
 
@@ -1096,6 +1098,8 @@ class ArenaWorker:
         if submit_button is not None:
             try:
                 await self._ensure_active(pause_event)
+                await submit_button.scroll_into_view_if_needed(timeout=2_000)
+                await self._sleep_with_controls(0.1, pause_event)
                 await self._human.click_element(self._page, submit_button)
                 return
             except Exception as exc:
@@ -1105,6 +1109,7 @@ class ArenaWorker:
                 )
             try:
                 await self._ensure_active(pause_event)
+                await submit_button.scroll_into_view_if_needed(timeout=2_000)
                 await submit_button.click(force=True, timeout=2_000)
                 return
             except Exception as exc:
@@ -1113,9 +1118,74 @@ class ArenaWorker:
                     f"Forced submit button click failed: {exc}",
                 )
 
+        try:
+            await self._ensure_active(pause_event)
+            submitted_via_form = await prompt_element.evaluate(
+                """(promptEl, selector) => {
+                    const isVisible = (el) => {
+                        if (!el) return false;
+                        const style = window.getComputedStyle(el);
+                        const rect = el.getBoundingClientRect();
+                        return (
+                            style.display !== "none" &&
+                            style.visibility !== "hidden" &&
+                            rect.width > 0 &&
+                            rect.height > 0
+                        );
+                    };
+
+                    const isEnabled = (el) => {
+                        if (!el) return false;
+                        if (el.disabled) return false;
+                        if (el.getAttribute("aria-disabled") === "true") return false;
+                        return window.getComputedStyle(el).pointerEvents !== "none";
+                    };
+
+                    const findButton = (root) => {
+                        const buttons = Array.from(root.querySelectorAll(selector))
+                            .filter((btn) => !btn.closest('[role="dialog"]'))
+                            .filter(isVisible);
+                        return [...buttons].reverse().find(isEnabled)
+                            ?? [...buttons].reverse()[0]
+                            ?? null;
+                    };
+
+                    const form = promptEl.closest("form");
+                    if (!form || typeof form.requestSubmit !== "function") {
+                        return false;
+                    }
+
+                    const submitButton = findButton(form);
+                    if (submitButton) {
+                        submitButton.scrollIntoView({
+                            block: "center",
+                            inline: "nearest",
+                            behavior: "auto",
+                        });
+                        form.requestSubmit(submitButton);
+                        return true;
+                    }
+
+                    form.requestSubmit();
+                    return true;
+                }""",
+                submit_sel,
+            )
+            if submitted_via_form:
+                await self._log(
+                    "info",
+                    "Submit button click failed; submitted via form.requestSubmit()",
+                )
+                return
+        except Exception as exc:
+            await self._log(
+                "debug",
+                f"Form requestSubmit fallback failed: {exc}",
+            )
+
         await self._log(
             "warning",
-            "Submit button was not clickable; retrying with Enter on the prompt editor",
+            "Submit button was not clickable; form submit failed; retrying with Enter on the prompt editor",
         )
         await self._ensure_active(pause_event)
         await prompt_element.click()
@@ -1151,6 +1221,17 @@ class ArenaWorker:
                         style.visibility !== "hidden" &&
                         rect.width > 0 &&
                         rect.height > 0
+                    );
+                };
+
+                const isInViewport = (el) => {
+                    if (!el) return false;
+                    const rect = el.getBoundingClientRect();
+                    return (
+                        rect.bottom > 0 &&
+                        rect.right > 0 &&
+                        rect.top < window.innerHeight &&
+                        rect.left < window.innerWidth
                     );
                 };
 
@@ -1205,6 +1286,7 @@ class ArenaWorker:
                     textarea_visible: Boolean(textarea),
                     prompt_cleared: promptCleared,
                     submit_visible: Boolean(submitButton),
+                    submit_in_viewport: submitButton ? isInViewport(submitButton) : false,
                     submit_enabled: submitButton ? isEnabled(submitButton) : false,
                     stop_visible: stopVisible,
                     response_slide_count: visibleSlides.length,
