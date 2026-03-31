@@ -31,6 +31,10 @@ class BrowserManager:
         self._tmp_root = Path(".tmp_browser_profiles")
         self._context_dirs: Dict[int, Path] = {}
         self._incognito_mode = self._config.browser.incognito
+        self._proxies: List[dict] = []
+        self._proxy_on_challenge: bool = False
+        self._proxy_assign_counter: int = 0
+        self._context_proxies: Dict[int, Optional[str]] = {}
 
     async def start(self) -> None:
         """Initialise the Playwright engine (call once at server startup)."""
@@ -44,6 +48,8 @@ class BrowserManager:
         count: int,
         display_override: Optional[DisplayConfig] = None,
         incognito: Optional[bool] = None,
+        proxies: Optional[List[dict]] = None,
+        proxy_on_challenge: bool = False,
     ) -> List[BrowserContext]:
         """Launch *count* isolated persistent browser contexts.
 
@@ -67,7 +73,13 @@ class BrowserManager:
             monitor_height=disp.monitor_height,
             taskbar_height=disp.taskbar_height,
             margin=disp.margin,
+            border_offset=disp.border_offset,
         )
+
+        self._proxies = proxies or []
+        self._proxy_on_challenge = proxy_on_challenge
+        self._proxy_assign_counter = 0
+        self._context_proxies.clear()
 
         self._tmp_root.mkdir(parents=True, exist_ok=True)
         self._run_profile_base = Path(
@@ -83,10 +95,16 @@ class BrowserManager:
                     dir=str(self._run_profile_base),
                 )
             )
-            ctx = await self._launch_context(profile_dir, tile)
+            # If proxy_on_challenge, launch without proxy — proxy assigned on recreate
+            if self._proxy_on_challenge:
+                proxy = None
+            else:
+                proxy = self._proxies[i % len(self._proxies)] if self._proxies else None
+            ctx = await self._launch_context(profile_dir, tile, proxy=proxy)
 
             self._contexts.append(ctx)
             self._context_dirs[i] = profile_dir
+            self._context_proxies[i] = proxy.get("server") if proxy else None
             logger.info(
                 "Context %d launched at (%d, %d) size %dx%d",
                 i,
@@ -155,16 +173,28 @@ class BrowserManager:
 
         # Launch new context at the same tile position
         tile = self._tiles[index]
-        ctx = await self._launch_context(profile_dir, tile)
+        if self._proxy_on_challenge and self._proxies:
+            # Assign next proxy from the pool (round-robin)
+            proxy = self._proxies[self._proxy_assign_counter % len(self._proxies)]
+            self._proxy_assign_counter += 1
+            logger.info("Challenge mode: assigning proxy %s to context %d", proxy.get("server", "???"), index)
+        else:
+            proxy = self._proxies[index % len(self._proxies)] if self._proxies else None
+        ctx = await self._launch_context(profile_dir, tile, proxy=proxy)
 
         self._contexts[index] = ctx
         self._context_dirs[index] = profile_dir
+        self._context_proxies[index] = proxy.get("server") if proxy else None
         logger.info("Context %d recreated at (%d, %d)", index, tile.x, tile.y)
         return ctx
 
     @property
     def contexts(self) -> List[BrowserContext]:
         return list(self._contexts)
+
+    def get_context_proxy(self, index: int) -> Optional[str]:
+        """Return the proxy server string for context *index*, or None."""
+        return self._context_proxies.get(index)
 
     def _launch_args(self, tile: TileLayout) -> List[str]:
         args = [
@@ -182,14 +212,20 @@ class BrowserManager:
         self,
         profile_dir: Path,
         tile: TileLayout,
+        proxy: Optional[dict] = None,
     ) -> BrowserContext:
-        ctx = await self._playwright.chromium.launch_persistent_context(
+        launch_kwargs = dict(
             user_data_dir=str(profile_dir),
             headless=self._config.browser.headless,
             no_viewport=True,
             args=self._launch_args(tile),
             ignore_default_args=["--enable-automation"],
         )
+        if proxy:
+            launch_kwargs["proxy"] = proxy
+            logger.info("Launching context with proxy: %s", proxy.get("server", "???"))
+
+        ctx = await self._playwright.chromium.launch_persistent_context(**launch_kwargs)
 
         # Apply stealth to existing and future pages
         from src.browser.stealth import apply_stealth

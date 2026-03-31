@@ -55,6 +55,10 @@ class StartRunRequest(BaseModel):
     monitor_height: Optional[int] = Field(default=None, ge=600, le=4320)
     taskbar_height: Optional[int] = Field(default=None, ge=0, le=200)
     margin: Optional[int] = Field(default=None, ge=0, le=50)
+    border_offset: Optional[int] = Field(default=None, ge=0, le=20)
+    # Proxy list — each dict: {"server": "http://host:port", "username": "...", "password": "..."}
+    proxies: Optional[List[dict]] = Field(default=None)
+    proxy_on_challenge: bool = False
 
     @model_validator(mode="after")
     def validate_has_prompt(self):
@@ -113,6 +117,7 @@ class WorkerUpdateMessage(BaseModel):
     progress_pct: float
     message: str
     error: Optional[str] = None
+    proxy: Optional[str] = None
 
 
 class RunProgressMessage(BaseModel):

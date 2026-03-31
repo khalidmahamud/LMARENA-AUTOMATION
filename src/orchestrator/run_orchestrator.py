@@ -158,13 +158,30 @@ class RunOrchestrator:
             margin=(
                 request.margin if request.margin is not None else base.margin
             ),
+            border_offset=(
+                request.border_offset
+                if request.border_offset is not None
+                else base.border_offset
+            ),
         )
+
+        # Merge proxy list: UI overrides take precedence, fall back to YAML config
+        proxy_list = None
+        if request.proxies:
+            proxy_list = request.proxies
+        elif self._config.browser.proxies:
+            proxy_list = [
+                p.model_dump(exclude_none=True)
+                for p in self._config.browser.proxies
+            ]
 
         # Phase 1: Launch browsers
         contexts = await self._browser_manager.create_contexts(
             count,
             display_override=display_override,
             incognito=request.incognito,
+            proxies=proxy_list,
+            proxy_on_challenge=request.proxy_on_challenge,
         )
 
         # Phase 2: Create workers
@@ -175,6 +192,7 @@ class RunOrchestrator:
                 config=self._config,
                 event_bus=self._event_bus,
                 context_recreator=self._browser_manager.recreate_context,
+                proxy_getter=self._browser_manager.get_context_proxy,
             )
             for i in range(count)
         ]

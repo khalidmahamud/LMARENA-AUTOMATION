@@ -6,10 +6,15 @@ Open: http://localhost:8000
 
 from __future__ import annotations
 
+import asyncio
 import csv
 import io
+import json as json_mod
 import logging
+import random
+import urllib.request
 from contextlib import asynccontextmanager
+from functools import partial
 from pathlib import Path
 
 from fastapi import FastAPI, UploadFile, WebSocket
@@ -182,6 +187,122 @@ async def get_run_state():
     if state:
         return state
     return {"running": False}
+
+
+# ── Free proxy endpoint ──
+
+PROXIFLY_URL = (
+    "https://cdn.jsdelivr.net/gh/proxifly/free-proxy-list@main"
+    "/proxies/protocols/{protocol}/data.json"
+)
+
+
+TEST_URL = "https://arena.ai/"
+
+
+def _check_proxy(proxy_server: str, timeout: int = 8) -> bool:
+    """Test if a proxy can HTTPS-tunnel to arena.ai (what Chromium actually does)."""
+    import socket
+    import ssl
+
+    try:
+        # Parse proxy host:port
+        stripped = proxy_server.split("://")[-1]
+        proxy_host, proxy_port = stripped.rsplit(":", 1)
+        proxy_port = int(proxy_port)
+
+        if proxy_server.startswith("socks"):
+            # SOCKS: try PySocks, fall back to TCP connect
+            try:
+                import socks as pysocks
+                proto = pysocks.SOCKS5 if "socks5" in proxy_server else pysocks.SOCKS4
+                s = pysocks.socksocket(socket.AF_INET, socket.SOCK_STREAM)
+                s.set_proxy(proto, proxy_host, proxy_port)
+                s.settimeout(timeout)
+                s.connect(("arena.ai", 443))
+                # Try TLS handshake
+                ctx = ssl.create_default_context()
+                ss = ctx.wrap_socket(s, server_hostname="arena.ai")
+                ss.close()
+                return True
+            except ImportError:
+                sock = socket.create_connection((proxy_host, proxy_port), timeout=timeout)
+                sock.close()
+                return True
+        else:
+            # HTTP proxy: send CONNECT request (this is exactly what Chromium does)
+            sock = socket.create_connection((proxy_host, proxy_port), timeout=timeout)
+            connect_req = f"CONNECT arena.ai:443 HTTP/1.1\r\nHost: arena.ai:443\r\n\r\n"
+            sock.sendall(connect_req.encode())
+
+            response = b""
+            while b"\r\n\r\n" not in response:
+                chunk = sock.recv(4096)
+                if not chunk:
+                    sock.close()
+                    return False
+                response += chunk
+
+            # Check for 200 Connection established
+            status_line = response.split(b"\r\n")[0].decode(errors="ignore")
+            if "200" not in status_line:
+                sock.close()
+                return False
+
+            # TLS handshake through the tunnel — proves it actually works
+            ctx = ssl.create_default_context()
+            ss = ctx.wrap_socket(sock, server_hostname="arena.ai")
+            ss.close()
+            return True
+    except Exception:
+        return False
+
+
+@app.get("/api/free-proxies")
+async def fetch_free_proxies(
+    protocol: str = "http", limit: int = 10, test: bool = False
+):
+    """Fetch free proxies from proxifly. If test=true, health-check each proxy."""
+    allowed = {"http", "https", "socks4", "socks5"}
+    if protocol not in allowed:
+        return JSONResponse(
+            {"error": f"Invalid protocol. Choose from: {', '.join(sorted(allowed))}"},
+            status_code=400,
+        )
+    limit = max(1, min(limit, 100))
+
+    url = PROXIFLY_URL.format(protocol=protocol)
+    try:
+        def _fetch():
+            req = urllib.request.Request(url, headers={"User-Agent": "LMArenaAutomation/1.0"})
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                return json_mod.loads(resp.read().decode())
+
+        data = await asyncio.get_event_loop().run_in_executor(None, _fetch)
+    except Exception as exc:
+        logger.error("Failed to fetch proxies from proxifly: %s", exc)
+        return JSONResponse({"error": f"Failed to fetch proxies: {exc}"}, status_code=502)
+
+    random.shuffle(data)
+
+    if not test:
+        proxies = [{"server": entry["proxy"]} for entry in data[:limit] if "proxy" in entry]
+        return {"proxies": proxies, "count": len(proxies), "protocol": protocol, "tested": False}
+
+    # Health-check mode: test a larger pool to find enough working proxies
+    pool_size = min(len(data), limit * 10)
+    candidates = [entry["proxy"] for entry in data[:pool_size] if "proxy" in entry]
+    logger.info("Testing %d proxies to find %d working ones...", len(candidates), limit)
+
+    loop = asyncio.get_event_loop()
+    results = await asyncio.gather(
+        *(loop.run_in_executor(None, _check_proxy, proxy) for proxy in candidates)
+    )
+
+    alive = [{"server": proxy} for proxy, ok in zip(candidates, results) if ok]
+    alive = alive[:limit]
+    logger.info("Found %d working proxies out of %d tested", len(alive), len(candidates))
+    return {"proxies": alive, "count": len(alive), "protocol": protocol, "tested": True, "total_tested": len(candidates)}
 
 
 # ── Checkpoint endpoints ──

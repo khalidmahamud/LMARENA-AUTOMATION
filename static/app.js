@@ -39,6 +39,13 @@
   const clearCookiesInput = document.getElementById("clear-cookies");
   const incognitoModeInput = document.getElementById("incognito-mode");
   const simultaneousStartInput = document.getElementById("simultaneous-start");
+  const proxyListInput    = document.getElementById("proxy-list");
+  const proxyProtocolInput = document.getElementById("proxy-protocol");
+  const proxyLimitInput   = document.getElementById("proxy-limit");
+  const fetchProxiesBtn   = document.getElementById("fetch-proxies-btn");
+  const proxyTestInput    = document.getElementById("proxy-test");
+  const proxyFetchStatus  = document.getElementById("proxy-fetch-status");
+  const proxyOnChallengeInput = document.getElementById("proxy-on-challenge");
   const systemPromptInput = document.getElementById("system-prompt");
   const combineWithFirstInput = document.getElementById("combine-with-first");
   const promptInput       = document.getElementById("prompt");
@@ -153,6 +160,61 @@
     }
   }
 
+  function parseProxyList(text) {
+    if (!text || !text.trim()) return null;
+    return text.trim().split("\n").filter(function (l) { return l.trim(); }).map(function (line) {
+      var parts = line.trim().split(",");
+      var entry = { server: parts[0].trim() };
+      if (parts[1]) entry.username = parts[1].trim();
+      if (parts[2]) entry.password = parts[2].trim();
+      return entry;
+    });
+  }
+
+  if (fetchProxiesBtn) {
+    fetchProxiesBtn.addEventListener("click", function () {
+      var protocol = proxyProtocolInput.value;
+      var limit = parseInt(proxyLimitInput.value, 10) || 10;
+      var test = proxyTestInput.checked;
+      proxyFetchStatus.style.color = "var(--text-dim)";
+      proxyFetchStatus.textContent = test ? "Fetching & testing..." : "Fetching...";
+      fetchProxiesBtn.disabled = true;
+
+      var qs = "protocol=" + encodeURIComponent(protocol) + "&limit=" + limit;
+      if (test) qs += "&test=true";
+
+      fetch("/api/free-proxies?" + qs)
+        .then(function (res) { return res.json(); })
+        .then(function (data) {
+          if (data.error) {
+            proxyFetchStatus.style.color = "var(--red)";
+            proxyFetchStatus.textContent = data.error;
+            return;
+          }
+          if (!data.proxies || !data.proxies.length) {
+            proxyFetchStatus.style.color = "var(--orange)";
+            proxyFetchStatus.textContent = data.tested
+              ? "0 alive out of " + (data.total_tested || 0) + " tested"
+              : "No proxies found";
+            return;
+          }
+          var lines = data.proxies.map(function (p) { return p.server; });
+          proxyListInput.value = lines.join("\n");
+          proxyFetchStatus.style.color = "var(--green)";
+          proxyFetchStatus.textContent = data.tested
+            ? data.count + " alive out of " + data.total_tested + " tested"
+            : data.count + " proxies loaded";
+        })
+        .catch(function (err) {
+          proxyFetchStatus.style.color = "var(--red)";
+          proxyFetchStatus.textContent = "Failed: " + err.message;
+        })
+        .finally(function () {
+          fetchProxiesBtn.disabled = false;
+        });
+    });
+  }
+
   // ══════════════════════════════════════
   // Message Handlers
   // ══════════════════════════════════════
@@ -252,6 +314,7 @@
           <div class="window-card-left">
             <span class="window-dot"></span>
             <span class="window-title">Window #${id + 1}</span>
+            <span class="window-proxy-badge hidden"></span>
           </div>
           <span class="window-card-badge queued">&#9201; Queued</span>
         </div>
@@ -271,6 +334,13 @@
     const badge = card.querySelector(".window-card-badge");
     const fill = card.querySelector(".window-progress-fill");
     const info = card.querySelector(".window-info");
+    const proxyBadge = card.querySelector(".window-proxy-badge");
+
+    // Update proxy badge
+    if (msg.proxy) {
+      proxyBadge.textContent = msg.proxy.replace(/^https?:\/\//, "").replace(/^socks[45]:\/\//, "");
+      proxyBadge.classList.remove("hidden");
+    }
 
     // Track start times
     if (!workerStartTimes[msg.worker_id] && msg.state !== "idle") {
@@ -700,6 +770,8 @@
       monitor_height: monH,
       taskbar_height: parseInt(taskbarHeightInput.value, 10) || 0,
       margin: parseInt(tileMarginInput.value, 10) || 0,
+      proxies: parseProxyList(proxyListInput.value),
+      proxy_on_challenge: proxyOnChallengeInput.checked,
     });
 
     if (isFileMode) {

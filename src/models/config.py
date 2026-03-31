@@ -1,8 +1,17 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import List, Optional
 
 from pydantic import BaseModel, Field, field_validator
+
+
+class ProxyConfig(BaseModel):
+    """Single proxy entry — maps directly to Playwright's proxy dict."""
+
+    server: str  # e.g. "http://host:port" or "socks5://host:port"
+    username: Optional[str] = None
+    password: Optional[str] = None
 
 
 class WindowSize(BaseModel):
@@ -18,6 +27,7 @@ class DisplayConfig(BaseModel):
     monitor_height: int = Field(default=1080, ge=600, le=4320)
     taskbar_height: int = Field(default=40, ge=0, le=200)
     margin: int = Field(default=0, ge=0, le=50)
+    border_offset: int = Field(default=7, ge=0, le=20)
 
 
 class TimingConfig(BaseModel):
@@ -45,6 +55,7 @@ class BrowserConfig(BaseModel):
     window_size: WindowSize = Field(default_factory=WindowSize)
     headless: bool = Field(default=False)
     incognito: bool = Field(default=False)
+    proxies: List[ProxyConfig] = Field(default_factory=list)
 
 
 class AppConfig(BaseModel):

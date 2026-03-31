@@ -36,6 +36,8 @@ class ArenaWorker:
 
     # Callback type: async (worker_index) -> new BrowserContext
     ContextRecreator = Callable[[int], Coroutine[None, None, BrowserContext]]
+    # Callback type: (worker_index) -> proxy server string or None
+    ProxyGetter = Callable[[int], Optional[str]]
 
     def __init__(
         self,
@@ -44,12 +46,14 @@ class ArenaWorker:
         config: AppConfig,
         event_bus: EventBus,
         context_recreator: Optional[ContextRecreator] = None,
+        proxy_getter: Optional[ProxyGetter] = None,
     ) -> None:
         self._id = worker_id
         self._context = context
         self._config = config
         self._event_bus = event_bus
         self._context_recreator = context_recreator
+        self._proxy_getter = proxy_getter
         self._page: Optional[Page] = None
         self._result: Optional[WindowResult] = None
         self._started_at: Optional[datetime] = None
@@ -73,6 +77,7 @@ class ArenaWorker:
     async def _on_state_transition(
         self, old: WorkerState, new: WorkerState, wid: int
     ) -> None:
+        proxy = self._proxy_getter(self._id) if self._proxy_getter else None
         await self._event_bus.publish(
             Event(
                 type=EventType.WORKER_STATE_CHANGED,
@@ -81,6 +86,7 @@ class ArenaWorker:
                     "old_state": old.value,
                     "new_state": new.value,
                     "progress": self.state_machine.progress,
+                    "proxy": proxy,
                 },
             )
         )

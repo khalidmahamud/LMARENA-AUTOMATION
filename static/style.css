@@ -443,6 +443,20 @@ body {
   white-space: nowrap;
 }
 
+.window-proxy-badge {
+  font-family: var(--mono);
+  font-size: 0.55rem;
+  color: var(--blue);
+  background: rgba(91, 156, 245, 0.1);
+  border: 1px solid rgba(91, 156, 245, 0.25);
+  padding: 0.1rem 0.35rem;
+  border-radius: 3px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 120px;
+}
+
 .window-card-badge {
   font-family: var(--display);
   font-size: 0.6rem;
@@ -2072,6 +2086,62 @@ textarea::placeholder {
   accent-color: var(--accent);
   width: 14px;
   height: 14px;
+}
+
+/* Proxy fetch controls */
+.label-hint {
+  font-weight: 400;
+  text-transform: none;
+  letter-spacing: normal;
+  color: var(--text-dim);
+  font-size: 0.6rem;
+}
+
+.proxy-fetch-controls {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.proxy-fetch-inputs {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr;
+  gap: 0.5rem;
+  align-items: end;
+}
+
+.btn-fetch-proxies {
+  font-family: var(--display);
+  font-size: 0.68rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--accent);
+  background: var(--accent-muted);
+  border: 1px solid rgba(229, 160, 60, 0.25);
+  padding: 0.45rem 0.75rem;
+  border-radius: var(--radius);
+  cursor: pointer;
+  transition: all 0.2s;
+  width: 100%;
+}
+
+.btn-fetch-proxies:hover:not(:disabled) {
+  background: rgba(229, 160, 60, 0.18);
+  border-color: var(--accent);
+  color: var(--accent-hover);
+}
+
+.btn-fetch-proxies:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.proxy-status {
+  font-family: var(--mono);
+  font-size: 0.7rem;
+  color: var(--text-dim);
+  text-align: center;
 }
 
 .tile-preview {

@@ -7,6 +7,12 @@ browser:
     height: 800
   headless: false
   incognito: false
+  # proxies:
+  #   - server: "http://proxy1.example.com:8080"
+  #     username: "user1"
+  #     password: "pass1"
+  #   - server: "http://proxy2.example.com:8080"
+  #   - server: "socks5://proxy3.example.com:1080"
 
 display:
   monitor_count: 1
@@ -14,6 +20,7 @@ display:
   monitor_height: 1080
   taskbar_height: 40
   margin: 0
+  border_offset: 7    # Windows invisible shadow (set 0 for Linux/macOS)
 
 timing:
   submission_gap_seconds: 30.0

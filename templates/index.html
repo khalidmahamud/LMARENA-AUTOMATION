@@ -285,6 +285,47 @@
         </div>
 
         <div class="settings-section">
+          <h3>Proxies</h3>
+          <div class="settings-grid">
+            <div class="form-group">
+              <label for="proxy-list">Proxy List <span class="label-hint">one per line: server,user,pass</span></label>
+              <textarea id="proxy-list" rows="3" placeholder="http://1.2.3.4:8080&#10;socks5://5.6.7.8:1080,user,pass"></textarea>
+            </div>
+            <div class="proxy-fetch-controls">
+              <div class="proxy-fetch-inputs">
+                <div class="form-group">
+                  <label for="proxy-protocol">Protocol</label>
+                  <select id="proxy-protocol">
+                    <option value="http">HTTP</option>
+                    <option value="https">HTTPS</option>
+                    <option value="socks4">SOCKS4</option>
+                    <option value="socks5">SOCKS5</option>
+                  </select>
+                </div>
+                <div class="form-group">
+                  <label for="proxy-limit">Count</label>
+                  <input type="number" id="proxy-limit" value="10" min="1" max="100" />
+                </div>
+                <div class="form-group checkbox-group">
+                  <label>
+                    <input type="checkbox" id="proxy-test" checked />
+                    Health check
+                  </label>
+                </div>
+              </div>
+              <button type="button" id="fetch-proxies-btn" class="btn-fetch-proxies">Fetch Free Proxies</button>
+              <span id="proxy-fetch-status" class="proxy-status"></span>
+            </div>
+            <div class="form-group checkbox-group">
+              <label>
+                <input type="checkbox" id="proxy-on-challenge" checked />
+                Use proxies only when challenged (recommended)
+              </label>
+            </div>
+          </div>
+        </div>
+
+        <div class="settings-section">
           <h3>Display &amp; Tiling</h3>
           <div class="settings-grid">
             <div class="form-group">

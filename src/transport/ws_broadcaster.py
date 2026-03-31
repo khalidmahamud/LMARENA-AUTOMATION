@@ -70,6 +70,7 @@ class WsBroadcaster:
                 state=d.get("new_state", ""),
                 progress_pct=d.get("progress", 0),
                 message=f"State: {d.get('new_state', '')}",
+                proxy=d.get("proxy"),
             )
 
         if event.type == EventType.WORKER_ERROR:
