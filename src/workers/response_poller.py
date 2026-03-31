@@ -47,6 +47,7 @@ class ResponsePoller:
         prev_text_a = ""
         prev_text_b = ""
         stable_count = 0
+        retry_counts = [0, 0]
         baseline_a = (
             self._normalize_text(baseline_responses[0])
             if baseline_responses
@@ -104,6 +105,32 @@ class ResponsePoller:
 
             if cancel_event and cancel_event.is_set():
                 raise asyncio.CancelledError("Run cancelled")
+
+            errored_indices = [
+                idx for idx, slide in enumerate(slides[:2])
+                if slide.get("has_error")
+            ]
+            if errored_indices:
+                for idx in errored_indices:
+                    if retry_counts[idx] >= 2:
+                        continue
+                    if await self._click_retry_button(page, slide_sel, idx):
+                        retry_counts[idx] += 1
+                        logger.warning(
+                            "Worker %d: response %d failed; clicked retry button (attempt %d)",
+                            worker_id,
+                            idx + 1,
+                            retry_counts[idx],
+                        )
+                stable_count = 0
+                prev_text_a = ""
+                prev_text_b = ""
+                await self._sleep_with_controls(
+                    interval,
+                    cancel_event=cancel_event,
+                    pause_event=pause_event,
+                )
+                continue
 
             cur_a = (
                 self._normalize_text(slides[0]["response_text"])
@@ -321,6 +348,16 @@ class ResponsePoller:
                         );
                     };
 
+                    const hasRetryIcon = (button) => {
+                        const paths = Array.from(
+                            button.querySelectorAll("svg path")
+                        ).map((path) => path.getAttribute("d") || "");
+                        return paths.some((d) =>
+                            d.includes("M21.8883 13.5") ||
+                            d.includes("M17 8H21.4")
+                        );
+                    };
+
                     return Array.from(document.querySelectorAll(slideSelector))
                         .filter(isVisible)
                         .map((slide) => {
@@ -334,9 +371,21 @@ class ResponsePoller:
                             const copyButton = Array.from(
                                 slide.querySelectorAll("button[type='button']")
                             ).find((btn) => isVisible(btn) && hasCopyIcon(btn));
+                            const retryButton = Array.from(
+                                slide.querySelectorAll("button[type='button']")
+                            ).find((btn) => isVisible(btn) && hasRetryIcon(btn));
                             const streamingNode = slide.querySelector(
                                 streamingSelector
                             );
+                            const errorNode = Array.from(
+                                slide.querySelectorAll("p, span, div")
+                            ).find((node) => {
+                                if (!isVisible(node)) return false;
+                                const text = (node.textContent || "").trim();
+                                return text.includes(
+                                    "Something went wrong with this response, please try again."
+                                );
+                            });
 
                             // Strip code-block language labels (e.g. "HTML")
                             // that appear at the start of innerText before an HTML tag
@@ -355,6 +404,8 @@ class ResponsePoller:
                                 response_text: cleanText,
                                 response_html: rawHtml,
                                 has_copy_button: Boolean(copyButton),
+                                has_error: Boolean(errorNode),
+                                has_retry_button: Boolean(retryButton),
                                 has_streaming_indicator: Boolean(
                                     streamingNode && isVisible(streamingNode)
                                 ),
@@ -372,3 +423,62 @@ class ResponsePoller:
         except Exception as exc:
             logger.debug("Slide extraction failed for %s: %s", slide_selector, exc)
         return []
+
+    @staticmethod
+    async def _click_retry_button(
+        page: Page,
+        slide_selector: str,
+        slide_index: int,
+    ) -> bool:
+        try:
+            return bool(
+                await page.evaluate(
+                    """({ slideSelector, slideIndex }) => {
+                        const isVisible = (el) => {
+                            if (!el) return false;
+                            const style = window.getComputedStyle(el);
+                            const rect = el.getBoundingClientRect();
+                            return (
+                                style.display !== "none" &&
+                                style.visibility !== "hidden" &&
+                                rect.width > 0 &&
+                                rect.height > 0
+                            );
+                        };
+
+                        const hasRetryIcon = (button) => {
+                            const paths = Array.from(
+                                button.querySelectorAll("svg path")
+                            ).map((path) => path.getAttribute("d") || "");
+                            return paths.some((d) =>
+                                d.includes("M21.8883 13.5") ||
+                                d.includes("M17 8H21.4")
+                            );
+                        };
+
+                        const slides = Array.from(
+                            document.querySelectorAll(slideSelector)
+                        ).filter(isVisible);
+                        const slide = slides[slideIndex];
+                        if (!slide) return false;
+
+                        const retryButton = Array.from(
+                            slide.querySelectorAll("button[type='button']")
+                        ).find((btn) => isVisible(btn) && hasRetryIcon(btn));
+                        if (!retryButton) return false;
+                        retryButton.click();
+                        return true;
+                    }""",
+                    {
+                        "slideSelector": slide_selector,
+                        "slideIndex": slide_index,
+                    },
+                )
+            )
+        except Exception as exc:
+            logger.debug(
+                "Retry button click failed for slide %d: %s",
+                slide_index,
+                exc,
+            )
+            return False

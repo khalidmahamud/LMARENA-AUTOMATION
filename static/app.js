@@ -593,6 +593,7 @@
     line.innerHTML = `<span class="log-timestamp">${time}</span>` +
       (prefix ? `<span class="log-worker-id">${prefix}</span>` : "") +
       escapeHtml(text);
+    line.style.animation = "fade-in-up 0.15s ease-out";
     logBox.appendChild(line);
 
     // Limit log lines
@@ -648,7 +649,6 @@
     stopBtn.disabled = false;
     exportBtn.disabled = true;
     workersContainer.innerHTML = "";
-    workersContainer.style.gridTemplateColumns = ""; // reset
     resultsBody.innerHTML = "";
     logBox.innerHTML = "";
     progressFill.style.width = "0%";
@@ -906,8 +906,10 @@
   const MAX_IMAGES = 10;
   const MAX_IMAGE_DIM = 2048;
 
-  imageUploadArea.addEventListener("click", () => imageFileInput.click());
+  // Attach button opens file picker (not the whole area)
+  document.getElementById("btn-attach").addEventListener("click", () => imageFileInput.click());
 
+  // Drag-drop images onto the prompt input area
   imageUploadArea.addEventListener("dragover", (e) => {
     e.preventDefault();
     imageUploadArea.classList.add("dragover");
@@ -920,7 +922,11 @@
   imageUploadArea.addEventListener("drop", (e) => {
     e.preventDefault();
     imageUploadArea.classList.remove("dragover");
-    handleImageFiles(e.dataTransfer.files);
+    // Only handle image files from the drop
+    const imageFiles = Array.from(e.dataTransfer.files).filter(f => f.type.startsWith("image/"));
+    if (imageFiles.length > 0) {
+      handleImageFiles(imageFiles);
+    }
   });
 
   imageFileInput.addEventListener("change", () => {
@@ -1011,6 +1017,14 @@
         removeImage(idx);
       });
     });
+
+    // Update attach hint
+    const hint = document.getElementById("attach-hint");
+    if (hint) {
+      hint.textContent = uploadedImages.length > 0
+        ? `${uploadedImages.length} image${uploadedImages.length > 1 ? "s" : ""} attached`
+        : "";
+    }
   }
 
   function removeImage(idx) {
@@ -1184,6 +1198,18 @@
   });
 
   document.addEventListener("keydown", (e) => {
+    // HTML preview carousel keyboard nav
+    if (!htmlPreviewModal.classList.contains("hidden")) {
+      if (e.key === "Escape") { htmlPreviewModal.classList.add("hidden"); return; }
+      if (e.key === "ArrowLeft") { htmlPrevBtn.click(); e.preventDefault(); return; }
+      if (e.key === "ArrowRight") { htmlNextBtn.click(); e.preventDefault(); return; }
+      if (e.key === "1") { previewMode = "a"; renderPreview(); return; }
+      if (e.key === "2") { previewMode = "b"; renderPreview(); return; }
+      if (e.key === "3") { previewMode = "both"; renderPreview(); return; }
+      if (e.key === "f") { previewZoom = "fit"; applyPreviewZoom(); return; }
+      if (e.key === "0") { previewZoom = "1"; applyPreviewZoom(); return; }
+      return;
+    }
     if (e.key === "Escape") {
       if (!responseModal.classList.contains("hidden")) {
         responseModal.classList.add("hidden");
@@ -1286,12 +1312,10 @@
 
   tabTable.addEventListener("click", () => {
     setResultsTab("table");
-    exportBtn.innerHTML = "&#128196; Export .xlsx";
   });
 
   tabJson.addEventListener("click", () => {
     setResultsTab("json");
-    exportBtn.innerHTML = "&#128196; Export .json";
   });
 
   tabHtml.addEventListener("click", () => {
@@ -1329,16 +1353,7 @@
   }
 
   function layoutWindowsGrid(count) {
-    // 1-2: single column, 3-4: 2 columns, 5-6: 2 columns, 7-9: 3 columns, 10+: 3-4 columns
-    let cols;
-    if (count <= 2) cols = 1;
-    else if (count <= 6) cols = 2;
-    else if (count <= 9) cols = 3;
-    else cols = 4;
-
-    workersContainer.style.display = "grid";
-    workersContainer.style.gridTemplateColumns = `repeat(${cols}, 1fr)`;
-    workersContainer.style.alignContent = "start";
+    // Workers are stacked vertically in the sidebar — no grid needed
   }
 
   function escapeHtml(str) {
@@ -1410,8 +1425,25 @@
     return blocks;
   }
 
+  // ── HTML Preview Modal — Carousel ──
+  let htmlBlocksCache = {};
+  let previewWorkerIds = [];
+  let previewIndex = 0;
+  let previewMode = "both"; // "a" | "b" | "both"
+  let previewZoom = "fit";  // "fit" | "1" | "0.75" | "0.5"
+
+  const htmlPreviewModal = document.getElementById("html-preview-modal");
+  const htmlPreviewContent = document.getElementById("html-preview-content");
+  const htmlPageInfo = document.getElementById("html-page-info");
+  const htmlPrevBtn = document.getElementById("html-prev");
+  const htmlNextBtn = document.getElementById("html-next");
+  const htmlModeA = document.getElementById("html-mode-a");
+  const htmlModeB = document.getElementById("html-mode-b");
+  const htmlModeBoth = document.getElementById("html-mode-both");
+
   function renderHtmlPreviews() {
     htmlResultsList.innerHTML = "";
+    htmlBlocksCache = {};
     const results = runResults || Object.values(incrementalResults);
     if (!results || results.length === 0) {
       htmlResultsList.innerHTML = '<div class="html-empty">No results yet</div>';
@@ -1425,26 +1457,33 @@
       if (blocksA.length === 0 && blocksB.length === 0) return;
       hasAnyHtml = true;
 
+      htmlBlocksCache[r.worker_id] = { a: blocksA, b: blocksB,
+        nameA: r.model_a_name || "Model A", nameB: r.model_b_name || "Model B" };
+
       const card = document.createElement("div");
       card.className = "html-result-card";
-
-      const header = document.createElement("div");
-      header.className = "html-result-header";
-      header.textContent = `Window #${r.worker_id + 1}`;
-      card.appendChild(header);
-
-      const panels = document.createElement("div");
-      panels.className = "html-result-panels";
-
-      // Model A
-      const panelA = buildHtmlPanel(r.model_a_name || "Model A", blocksA);
-      panels.appendChild(panelA);
-
-      // Model B
-      const panelB = buildHtmlPanel(r.model_b_name || "Model B", blocksB);
-      panels.appendChild(panelB);
-
-      card.appendChild(panels);
+      const row = document.createElement("div");
+      row.className = "html-result-row";
+      row.innerHTML = `
+        <span class="html-result-window">Window #${r.worker_id + 1}</span>
+        <div class="html-result-models">
+          <button class="btn-html-preview" data-worker="${r.worker_id}" data-side="a"
+            ${blocksA.length === 0 ? "disabled" : ""}>
+            ${escapeHtml(r.model_a_name || "Model A")}
+            ${blocksA.length > 0 ? "&#8212; " + blocksA.length + " block(s)" : "&#8212; no HTML"}
+          </button>
+          <button class="btn-html-preview" data-worker="${r.worker_id}" data-side="b"
+            ${blocksB.length === 0 ? "disabled" : ""}>
+            ${escapeHtml(r.model_b_name || "Model B")}
+            ${blocksB.length > 0 ? "&#8212; " + blocksB.length + " block(s)" : "&#8212; no HTML"}
+          </button>
+          <button class="btn-html-preview btn-html-compare" data-worker="${r.worker_id}" data-side="both"
+            ${blocksA.length === 0 && blocksB.length === 0 ? "disabled" : ""}>
+            &#9881; Compare
+          </button>
+        </div>
+      `;
+      card.appendChild(row);
       htmlResultsList.appendChild(card);
     });
 
@@ -1453,40 +1492,195 @@
     }
   }
 
-  function buildHtmlPanel(modelName, blocks) {
-    const panel = document.createElement("div");
-    panel.className = "html-result-panel";
+  // Open modal from button list
+  htmlResultsList.addEventListener("click", (e) => {
+    const btn = e.target.closest(".btn-html-preview");
+    if (!btn || btn.disabled) return;
+    const workerId = parseInt(btn.dataset.worker, 10);
+    const side = btn.dataset.side;
+    openHtmlPreviewModal(workerId, side);
+  });
 
-    const panelHeader = document.createElement("div");
-    panelHeader.className = "html-panel-header";
-    panelHeader.textContent = modelName;
-    panel.appendChild(panelHeader);
-
-    if (blocks.length === 0) {
-      const empty = document.createElement("div");
-      empty.className = "html-panel-empty";
-      empty.textContent = "No HTML code blocks";
-      panel.appendChild(empty);
-    } else {
-      blocks.forEach((html, idx) => {
-        const wrap = document.createElement("div");
-        wrap.className = "html-iframe-wrap";
-        if (blocks.length > 1) {
-          const label = document.createElement("div");
-          label.className = "html-block-label";
-          label.textContent = `Block ${idx + 1}`;
-          wrap.appendChild(label);
-        }
-        const iframe = document.createElement("iframe");
-        iframe.className = "html-preview-iframe";
-        iframe.sandbox = "allow-scripts";
-        iframe.srcdoc = html;
-        wrap.appendChild(iframe);
-        panel.appendChild(wrap);
-      });
-    }
-    return panel;
+  function openHtmlPreviewModal(workerId, side) {
+    // Build ordered list of worker IDs that have HTML
+    previewWorkerIds = Object.keys(htmlBlocksCache).map(Number).sort((a, b) => a - b);
+    previewIndex = Math.max(0, previewWorkerIds.indexOf(workerId));
+    previewMode = side;
+    renderPreview();
+    htmlPreviewModal.classList.remove("hidden");
   }
+
+  function renderPreview() {
+    const wid = previewWorkerIds[previewIndex];
+    const cache = htmlBlocksCache[wid];
+    if (!cache) return;
+
+    // Update page info
+    htmlPageInfo.textContent = `Window ${previewIndex + 1} / ${previewWorkerIds.length}`;
+
+    // Update nav button states
+    htmlPrevBtn.disabled = previewIndex === 0;
+    htmlNextBtn.disabled = previewIndex === previewWorkerIds.length - 1;
+
+    // Update mode button labels + active state
+    htmlModeA.textContent = cache.nameA;
+    htmlModeB.textContent = cache.nameB;
+    htmlModeBoth.textContent = "Compare";
+    htmlModeA.classList.toggle("active", previewMode === "a");
+    htmlModeB.classList.toggle("active", previewMode === "b");
+    htmlModeBoth.classList.toggle("active", previewMode === "both");
+
+    // Render content
+    htmlPreviewContent.innerHTML = "";
+
+    if (previewMode === "both") {
+      htmlPreviewContent.className = "html-preview-content html-preview-split";
+      [cache.a, cache.b].forEach((blocks) => {
+        const col = document.createElement("div");
+        col.className = "html-preview-col";
+        if (blocks.length === 0) {
+          const empty = document.createElement("div");
+          empty.className = "html-panel-empty";
+          empty.textContent = "No HTML code blocks";
+          col.appendChild(empty);
+        } else {
+          col.appendChild(buildPreviewIframe(blocks));
+        }
+        htmlPreviewContent.appendChild(col);
+      });
+    } else {
+      htmlPreviewContent.className = "html-preview-content html-preview-single";
+      const blocks = previewMode === "a" ? cache.a : cache.b;
+      if (blocks.length === 0) {
+        const empty = document.createElement("div");
+        empty.className = "html-panel-empty";
+        empty.textContent = "No HTML code blocks";
+        htmlPreviewContent.appendChild(empty);
+      } else {
+        htmlPreviewContent.appendChild(buildPreviewIframe(blocks));
+      }
+    }
+
+    // Update side arrow visibility
+    const sideLeft = document.getElementById("html-side-prev");
+    const sideRight = document.getElementById("html-side-next");
+    sideLeft.classList.toggle("hidden", previewIndex === 0);
+    sideRight.classList.toggle("hidden", previewIndex === previewWorkerIds.length - 1);
+  }
+
+  function buildPreviewIframe(blocks) {
+    const html = blocks.join("\n<hr style='margin:2rem 0;border:1px dashed #ccc'>\n");
+    const wrap = document.createElement("div");
+    wrap.className = "html-iframe-scaled";
+    const iframe = document.createElement("iframe");
+    iframe.className = "html-preview-iframe-full";
+    iframe.sandbox = "allow-scripts";
+    iframe.srcdoc = `<!DOCTYPE html>
+<html><head><meta charset="utf-8"><style>
+*, *::before, *::after { box-sizing: border-box; }
+html, body { margin: 0; padding: 16px; background: #fff; color: #111;
+  font-family: system-ui, -apple-system, sans-serif; font-size: 14px;
+  overflow: auto; line-height: 1.5; min-height: 100%; }
+</style></head><body>${html}</body></html>`;
+    iframe.onload = () => applyPreviewZoom();
+    wrap.appendChild(iframe);
+    return wrap;
+  }
+
+  function applyPreviewZoom() {
+    // Update active button
+    document.querySelectorAll("#html-zoom-group .btn-zoom").forEach((b) => {
+      b.classList.toggle("active", b.dataset.zoom === previewZoom);
+    });
+
+    const iframes = htmlPreviewContent.querySelectorAll(".html-preview-iframe-full");
+    iframes.forEach((iframe) => {
+      const container = iframe.parentElement;
+      if (!container) return;
+
+      if (previewZoom === "1") {
+        // 1:1 — actual size, scrollable
+        iframe.style.transform = "none";
+        iframe.style.width = "100%";
+        iframe.style.height = "100%";
+        container.style.overflow = "auto";
+        try { iframe.contentDocument.documentElement.style.overflow = ""; } catch {}
+        return;
+      }
+
+      let scale;
+      if (previewZoom === "fit") {
+        try {
+          const cw = iframe.contentDocument.body.scrollWidth || 1;
+          const ch = iframe.contentDocument.body.scrollHeight || 1;
+          const bw = container.clientWidth || 1;
+          const bh = container.clientHeight || 1;
+          scale = Math.min(bw / cw, bh / ch, 1);
+        } catch {
+          scale = 1;
+        }
+      } else {
+        scale = parseFloat(previewZoom) || 1;
+      }
+
+      container.style.overflow = "hidden";
+      iframe.style.width = (100 / scale) + "%";
+      iframe.style.height = (100 / scale) + "%";
+      iframe.style.transform = `scale(${scale})`;
+      // Hide scrollbars inside the iframe content when scaled
+      try { iframe.contentDocument.documentElement.style.overflow = "hidden"; } catch {}
+    });
+  }
+
+  // Navigation buttons (top bar + side arrows)
+  function prevWindow() { if (previewIndex > 0) { previewIndex--; renderPreview(); } }
+  function nextWindow() { if (previewIndex < previewWorkerIds.length - 1) { previewIndex++; renderPreview(); } }
+
+  htmlPrevBtn.addEventListener("click", prevWindow);
+  htmlNextBtn.addEventListener("click", nextWindow);
+  document.getElementById("html-side-prev").addEventListener("click", prevWindow);
+  document.getElementById("html-side-next").addEventListener("click", nextWindow);
+
+  // Mode toggle buttons
+  [htmlModeA, htmlModeB, htmlModeBoth].forEach((btn) => {
+    btn.addEventListener("click", () => {
+      previewMode = btn.dataset.mode;
+      renderPreview();
+    });
+  });
+
+  // Zoom buttons
+  document.getElementById("html-zoom-group").addEventListener("click", (e) => {
+    const btn = e.target.closest(".btn-zoom");
+    if (!btn) return;
+    previewZoom = btn.dataset.zoom;
+    applyPreviewZoom();
+  });
+
+  // Copy HTML source
+  document.getElementById("html-copy-code").addEventListener("click", async () => {
+    const wid = previewWorkerIds[previewIndex];
+    const cache = htmlBlocksCache[wid];
+    if (!cache) return;
+    let text = "";
+    if (previewMode === "both") {
+      text = `<!-- ${cache.nameA} -->\n${cache.a.join("\n\n")}\n\n<!-- ${cache.nameB} -->\n${cache.b.join("\n\n")}`;
+    } else {
+      const blocks = previewMode === "a" ? cache.a : cache.b;
+      text = blocks.join("\n\n");
+    }
+    try {
+      await navigator.clipboard.writeText(text);
+      showToast("HTML copied to clipboard", "success");
+    } catch {
+      showToast("Clipboard access denied", "warning");
+    }
+  });
+
+  // Close
+  document.getElementById("html-preview-close").addEventListener("click", () => {
+    htmlPreviewModal.classList.add("hidden");
+  });
 
   // ══════════════════════════════════════
   // Footer Stats (persisted in localStorage)
@@ -1713,7 +1907,6 @@
       stopBtn.disabled = false;
       exportBtn.disabled = true;
       workersContainer.innerHTML = "";
-      workersContainer.style.gridTemplateColumns = "";
       resultsBody.innerHTML = "";
       logBox.innerHTML = "";
       progressFill.style.width = "0%";

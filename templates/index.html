@@ -3,6 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="theme-color" content="#08090d" />
   <title>Arena Runner</title>
   <link rel="stylesheet" href="/static/style.css" />
 </head>
@@ -24,34 +25,45 @@
     </div>
   </header>
 
-  <!-- Configuration Bar -->
-  <section class="config-bar">
-    <div class="config-label">&#9776; CONFIGURATION</div>
-    <div class="config-fields">
-      <div class="config-field">
-        <label>WINDOWS</label>
-        <input type="number" id="window-count" value="4" min="1" max="12" />
-      </div>
-      <div class="config-field">
-        <label>WINDOW SIZE</label>
-        <input type="text" id="window-size" value="— &times; —" readonly />
-      </div>
-      <div class="config-field">
-        <label>GAP (SEC)</label>
-        <input type="number" id="submission-gap" value="30" min="5" max="300" />
-      </div>
-      <div class="config-field wide">
-        <label>ARENA URL</label>
-        <input type="text" id="arena-url" value="https://arena.ai/" />
-      </div>
-    </div>
-  </section>
-
-  <!-- Main Two-Column Layout -->
+  <!-- Three-Zone Layout -->
   <div class="main-layout">
 
-    <!-- Left Column -->
-    <div class="col-left">
+    <!-- LEFT SIDEBAR -->
+    <aside class="zone zone-left">
+
+      <!-- Config (collapsible) -->
+      <details class="config-section" open>
+        <summary>Configuration</summary>
+        <div class="config-fields">
+          <div class="config-field">
+            <label>WINDOWS</label>
+            <input type="number" id="window-count" value="4" min="1" max="12" />
+          </div>
+          <div class="config-field">
+            <label>WINDOW SIZE</label>
+            <input type="text" id="window-size" value="&#8212; &times; &#8212;" readonly />
+          </div>
+          <div class="config-field">
+            <label>GAP (SEC)</label>
+            <input type="number" id="submission-gap" value="30" min="5" max="300" />
+          </div>
+          <div class="config-field">
+            <label>ARENA URL</label>
+            <input type="text" id="arena-url" value="https://arena.ai/" />
+          </div>
+        </div>
+      </details>
+
+      <!-- Windows -->
+      <div class="windows-section">
+        <div class="section-header">Windows</div>
+        <div class="windows-list" id="workers"></div>
+      </div>
+
+    </aside>
+
+    <!-- CENTER ZONE -->
+    <main class="zone zone-center">
 
       <!-- Resume Banner -->
       <div id="resume-banner" class="resume-banner hidden">
@@ -76,7 +88,7 @@
           </div>
         </div>
 
-        <!-- System prompt (first input before the actual prompt) -->
+        <!-- System prompt -->
         <details class="system-prompt-details" id="system-prompt-details">
           <summary class="system-prompt-toggle">System Prompt <span class="system-prompt-hint">&#8212; sent first before each actual prompt run</span></summary>
           <label class="combine-prompt-option">
@@ -89,16 +101,15 @@
 
         <!-- Manual mode (default) -->
         <div id="manual-prompt-section">
-          <textarea id="prompt" rows="8" placeholder="Enter your prompt here..."></textarea>
-          <div class="image-upload-section" id="image-upload-section">
-            <div class="image-upload-area" id="image-upload-area">
-              <span class="upload-icon">&#128247;</span>
-              <span>Drop images here, or <strong>click to browse</strong></span>
-              <span class="upload-hint">.png, .jpg, .webp, .gif &mdash; max 5 MB each, max 10</span>
-              <input type="file" id="image-file-input" accept="image/png,image/jpeg,image/webp,image/gif" multiple hidden />
+          <div class="prompt-input-wrap" id="image-upload-area">
+            <textarea id="prompt" rows="6" placeholder="Enter your prompt here... (drag images onto this box)"></textarea>
+            <div class="prompt-input-toolbar">
+              <button type="button" class="btn-attach" id="btn-attach" title="Attach images">&#128206;</button>
+              <span class="attach-hint" id="attach-hint"></span>
             </div>
-            <div class="image-thumbnails" id="image-thumbnails"></div>
+            <input type="file" id="image-file-input" accept="image/png,image/jpeg,image/webp,image/gif" multiple hidden />
           </div>
+          <div class="image-thumbnails" id="image-thumbnails"></div>
         </div>
 
         <!-- File upload mode -->
@@ -160,7 +171,7 @@
             </div>
           </div>
           <div class="export-group">
-            <button class="btn-export" id="btn-export" disabled>&#11015; Export</button>
+            <button class="btn-export" id="btn-export" disabled>Export</button>
             <div class="export-dropdown hidden" id="export-dropdown">
               <a href="/export" class="export-option" download>Excel (.xlsx)</a>
               <a href="/export-csv" class="export-option" download>CSV (.csv)</a>
@@ -189,44 +200,29 @@
         </div>
       </section>
 
-    </div>
+    </main>
 
-    <!-- Right Column -->
-    <div class="col-right">
+    <!-- RIGHT SIDEBAR -->
+    <aside class="zone zone-right">
+      <div class="section-header">
+        Live Log
+        <span class="auto-scroll-label" id="auto-scroll-toggle">auto-scroll</span>
+      </div>
+      <div class="log-box" id="log-box"></div>
+    </aside>
 
-      <!-- Windows -->
-      <section class="panel">
-        <div class="panel-header">
-          <span class="panel-title">&#128421; WINDOWS</span>
-        </div>
-        <div class="windows-list" id="workers"></div>
-      </section>
-
-      <!-- Live Log -->
-      <section class="panel">
-        <div class="panel-header">
-          <span class="panel-title">&#128203; LIVE LOG</span>
-          <span class="auto-scroll-label" id="auto-scroll-toggle">auto-scroll</span>
-        </div>
-        <div class="log-box" id="log-box"></div>
-      </section>
-
-    </div>
   </div>
 
-  <!-- Footer -->
+  <!-- Status Bar (Footer) -->
   <footer class="app-footer">
     <div class="footer-stats">
       <span>TOTAL RUNS <strong id="stat-runs">0</strong></span>
-      <span>|</span>
       <span>AVG TIME <strong id="stat-avg-time">&mdash;</strong></span>
-      <span>|</span>
       <span>SUCCESS RATE <strong id="stat-success-rate">&mdash;</strong></span>
-      <span>|</span>
       <span>TOKENS USED <strong id="stat-tokens">0</strong></span>
       <button id="reset-stats-btn" title="Reset stats">&#x21bb;</button>
     </div>
-    <div class="footer-powered">Powered by Playwright + FastAPI</div>
+    <div class="footer-powered">Playwright + FastAPI</div>
   </footer>
 
   <!-- Settings Modal -->
@@ -333,6 +329,41 @@
       <div class="modal-body">
         <pre class="response-full-text" id="response-full-text"></pre>
       </div>
+    </div>
+  </div>
+
+  <!-- HTML Preview Modal (full-screen carousel) -->
+  <div class="html-preview-modal hidden" id="html-preview-modal">
+    <div class="html-preview-modal-bar">
+      <div class="html-bar-left">
+        <div class="html-preview-nav">
+          <button id="html-prev" class="btn-nav" title="Previous window (&#8592;)">&#9664;</button>
+          <span id="html-page-info" class="html-page-info">1 / 1</span>
+          <button id="html-next" class="btn-nav" title="Next window (&#8594;)">&#9654;</button>
+        </div>
+      </div>
+      <div class="html-bar-center">
+        <div class="html-preview-modes">
+          <button class="btn-mode" data-mode="a" id="html-mode-a">Model A</button>
+          <button class="btn-mode" data-mode="b" id="html-mode-b">Model B</button>
+          <button class="btn-mode active" data-mode="both" id="html-mode-both">Compare</button>
+        </div>
+      </div>
+      <div class="html-bar-right">
+        <div class="html-preview-zoom" id="html-zoom-group">
+          <button class="btn-zoom active" data-zoom="fit">Fit</button>
+          <button class="btn-zoom" data-zoom="1">1:1</button>
+          <button class="btn-zoom" data-zoom="0.75">75%</button>
+          <button class="btn-zoom" data-zoom="0.5">50%</button>
+        </div>
+        <button class="btn-modal-action" id="html-copy-code" title="Copy HTML source">&#128203; Copy HTML</button>
+        <button class="modal-close" id="html-preview-close">&times;</button>
+      </div>
+    </div>
+    <div class="html-preview-body">
+      <button class="btn-side-arrow btn-side-left" id="html-side-prev" title="Previous window">&#9664;</button>
+      <div class="html-preview-content" id="html-preview-content"></div>
+      <button class="btn-side-arrow btn-side-right" id="html-side-next" title="Next window">&#9654;</button>
     </div>
   </div>
 
