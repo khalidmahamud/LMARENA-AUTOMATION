@@ -29,6 +29,8 @@ class EventType(str, Enum):
     RUN_PROGRESS = "run.progress"
     RUN_COMPLETE = "run.complete"
     RUN_CANCELLED = "run.cancelled"
+    RUN_PAUSED = "run.paused"
+    RUN_RESUMED = "run.resumed"
     RUN_ERROR = "run.error"
 
     # Notifications

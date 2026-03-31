@@ -26,7 +26,17 @@ TRANSITION_TABLE: Dict[WorkerState, Set[WorkerState]] = {
         WorkerState.CANCELLED,
     },
     WorkerState.SELECTING_MODEL: {WorkerState.PASTING, WorkerState.ERROR, WorkerState.CANCELLED},
-    WorkerState.PASTING: {WorkerState.SUBMITTING, WorkerState.ERROR, WorkerState.CANCELLED},
+    WorkerState.PASTING: {
+        WorkerState.PREPARED,
+        WorkerState.SUBMITTING,
+        WorkerState.ERROR,
+        WorkerState.CANCELLED,
+    },
+    WorkerState.PREPARED: {
+        WorkerState.SUBMITTING,
+        WorkerState.ERROR,
+        WorkerState.CANCELLED,
+    },
     WorkerState.SUBMITTING: {
         WorkerState.WAITING_FOR_CHALLENGE,
         WorkerState.POLLING,
@@ -53,6 +63,7 @@ STATE_PROGRESS: Dict[WorkerState, float] = {
     WorkerState.READY: 20.0,
     WorkerState.SELECTING_MODEL: 30.0,
     WorkerState.PASTING: 40.0,
+    WorkerState.PREPARED: 45.0,
     WorkerState.SUBMITTING: 50.0,
     WorkerState.POLLING: 65.0,
     WorkerState.COMPLETE: 100.0,

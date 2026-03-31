@@ -7,6 +7,8 @@
   let ws = null;
   let connected = false;
   let running = false;
+  let paused = false;
+  let pauseTransitionPending = false;
   let autoScroll = true;
   let runStartTime = null;
   let runResults = null; // last run results for JSON view
@@ -18,6 +20,9 @@
   let promptMode = "manual"; // "manual" | "file"
   let uploadedRows = null;   // raw parsed rows from backend
   let uploadedPrompts = [];  // combined prompts built per row from selected columns
+
+  // Image upload state
+  let uploadedImages = [];   // Array of { data: base64, mime_type, filename, objectUrl }
 
   // ── DOM refs ──
   const statusBadge       = document.getElementById("status-badge");
@@ -32,6 +37,8 @@
   const retainOutputInput = document.getElementById("retain-output");
   const zoomInput         = document.getElementById("zoom");
   const clearCookiesInput = document.getElementById("clear-cookies");
+  const incognitoModeInput = document.getElementById("incognito-mode");
+  const simultaneousStartInput = document.getElementById("simultaneous-start");
   const systemPromptInput = document.getElementById("system-prompt");
   const combineWithFirstInput = document.getElementById("combine-with-first");
   const promptInput       = document.getElementById("prompt");
@@ -60,6 +67,9 @@
   const resultsJsonPre    = document.getElementById("results-json");
   const tabTable          = document.getElementById("tab-table");
   const tabJson           = document.getElementById("tab-json");
+  const tabHtml           = document.getElementById("tab-html");
+  const resultsHtmlWrap   = document.getElementById("results-html-wrap");
+  const htmlResultsList   = document.getElementById("html-results-list");
   const autoScrollToggle  = document.getElementById("auto-scroll-toggle");
 
   const toastContainer    = document.getElementById("toast-container");
@@ -90,6 +100,16 @@
   const filePreviewDiv    = document.getElementById("file-preview");
   const batchInfoDiv      = document.getElementById("batch-info");
 
+  // Image upload DOM refs
+  const imageUploadArea  = document.getElementById("image-upload-area");
+  const imageFileInput   = document.getElementById("image-file-input");
+  const imageThumbnails  = document.getElementById("image-thumbnails");
+
+  // Resume banner DOM refs
+  const resumeBanner    = document.getElementById("resume-banner");
+  const resumeList      = document.getElementById("resume-list");
+  const dismissResumeBtn = document.getElementById("dismiss-resume");
+
   // Footer stats
   const statRuns        = document.getElementById("stat-runs");
   const statAvgTime     = document.getElementById("stat-avg-time");
@@ -107,6 +127,8 @@
     ws.onopen = () => {
       connected = true;
       setStatus(true);
+      fetchCheckpoints();
+      syncRunState();
     };
 
     ws.onclose = () => {
@@ -153,6 +175,12 @@
       case "run_cancelled":
         onRunCancelled();
         break;
+      case "run_paused":
+        onRunPaused();
+        break;
+      case "run_resumed":
+        onRunResumed();
+        break;
       case "challenge_detected":
         appendLog("warning", msg.message, msg.worker_id);
         highlightWorker(msg.worker_id, "challenge");
@@ -165,9 +193,7 @@
         showToast(msg.message, "error");
         // Reset UI if run hasn't actually started
         if (running) {
-          running = false;
-          startBtn.disabled = false;
-          stopBtn.disabled = true;
+          resetRunControlState();
         }
         break;
       case "toast":
@@ -190,6 +216,25 @@
       statusBadge.className = "status-badge disconnected";
       statusText.textContent = "Disconnected";
     }
+  }
+
+  function updateStartButton() {
+    if (!running) {
+      startBtn.innerHTML = "&#8853; Start Run";
+      startBtn.disabled = false;
+      return;
+    }
+
+    startBtn.disabled = pauseTransitionPending;
+    startBtn.innerHTML = paused ? "&#9654; Resume" : "&#9208; Pause";
+  }
+
+  function resetRunControlState() {
+    running = false;
+    paused = false;
+    pauseTransitionPending = false;
+    updateStartButton();
+    stopBtn.disabled = true;
   }
 
   // ══════════════════════════════════════
@@ -260,6 +305,12 @@
       badge.classList.add("done");
       badge.innerHTML = "&#10003; Done";
       info.textContent = `${elapsed}s`;
+    } else if (msg.state === "prepared") {
+      dot.classList.add("orange");
+      fill.classList.add("orange");
+      badge.classList.add("active");
+      badge.innerHTML = "&#9201; Prepared";
+      info.textContent = "Waiting to submit";
     } else if (msg.state === "error") {
       card.classList.add("state-error");
       dot.classList.add("red");
@@ -337,6 +388,14 @@
     if (msg.state === "complete") {
       colStatus.innerHTML = '<span class="badge badge-done">&#10003; Done</span>';
       colTime.textContent = `${elapsed}s`;
+    } else if (msg.state === "prepared") {
+      colStatus.innerHTML = '<span class="badge badge-active">&#9201; Prepared</span>';
+      colA.className = "col-model-a text-queued";
+      colA.textContent = "Prepared \u2014 waiting to submit";
+      colB.className = "col-model-b text-queued";
+      colB.textContent = "";
+      colTime.textContent = "\u2014";
+      colTokens.textContent = "\u2014";
     } else if (msg.state === "error") {
       colStatus.innerHTML = '<span class="badge badge-error">&#10007; Error</span>';
       colA.className = "col-model-a";
@@ -354,9 +413,13 @@
     } else if (msg.state === "idle") {
       // Calculate estimated start time based on gap
       const gap = parseFloat(submissionGapInput.value) || 30;
-      const startsIn = gap * msg.worker_id;
       colA.className = "col-model-a text-queued";
-      colA.textContent = startsIn > 0 ? `Queued \u2014 starts in ~${startsIn}s` : "Queued";
+      if (simultaneousStartInput.checked) {
+        colA.textContent = "Queued \u2014 prepares with the batch";
+      } else {
+        const startsIn = gap * msg.worker_id;
+        colA.textContent = startsIn > 0 ? `Queued \u2014 starts in ~${startsIn}s` : "Queued";
+      }
       colB.className = "col-model-b text-queued";
       colB.textContent = "";
       colStatus.innerHTML = '<span class="badge badge-queued">&#9201; Queued</span>';
@@ -412,6 +475,7 @@
   function onWorkerResult(result) {
     incrementalResults[result.worker_id] = result;
     updateResultRowWithData(result);
+    if (tabHtml.classList.contains("active")) renderHtmlPreviews();
   }
 
   function populateFinalResults(results) {
@@ -437,6 +501,11 @@
       exportBtn.disabled = false;
     }
 
+    if (paused) {
+      etaText.textContent = "Paused";
+      return;
+    }
+
     // Show batch progress in ETA label
     if (msg.batch && msg.total_batches && msg.total_batches > 1) {
       const batchLabel = `Batch ${msg.batch}/${msg.total_batches}`;
@@ -460,9 +529,7 @@
   // ══════════════════════════════════════
 
   function onRunComplete(msg) {
-    running = false;
-    startBtn.disabled = false;
-    stopBtn.disabled = true;
+    resetRunControlState();
     exportBtn.disabled = false;
     progressFill.style.width = "100%";
     progressPct.textContent = "100%";
@@ -480,6 +547,9 @@
     // Update footer stats
     updateStats(msg);
 
+    // Refresh HTML previews if HTML tab is active
+    if (tabHtml.classList.contains("active")) renderHtmlPreviews();
+
     appendLog("info", `Run complete \u2014 ${msg.results.length} window(s) finished in ${msg.total_elapsed_seconds.toFixed(1)}s`);
   }
 
@@ -488,13 +558,27 @@
   // ══════════════════════════════════════
 
   function onRunCancelled() {
-    running = false;
-    startBtn.disabled = false;
-    stopBtn.disabled = true;
+    resetRunControlState();
     progressFill.style.width = "0%";
     progressPct.textContent = "0%";
     etaText.textContent = "Cancelled";
     appendLog("warning", "Run cancelled \u2014 all windows closed");
+  }
+
+  function onRunPaused() {
+    if (!running) return;
+    paused = true;
+    pauseTransitionPending = false;
+    updateStartButton();
+    etaText.textContent = "Paused";
+  }
+
+  function onRunResumed() {
+    if (!running) return;
+    paused = false;
+    pauseTransitionPending = false;
+    updateStartButton();
+    etaText.textContent = "Resuming...";
   }
 
   // ══════════════════════════════════════
@@ -509,6 +593,7 @@
     line.innerHTML = `<span class="log-timestamp">${time}</span>` +
       (prefix ? `<span class="log-worker-id">${prefix}</span>` : "") +
       escapeHtml(text);
+    line.style.animation = "fade-in-up 0.15s ease-out";
     logBox.appendChild(line);
 
     // Limit log lines
@@ -526,6 +611,15 @@
   // ══════════════════════════════════════
 
   startBtn.addEventListener("click", () => {
+    if (running) {
+      if (pauseTransitionPending) return;
+      pauseTransitionPending = true;
+      updateStartButton();
+      etaText.textContent = paused ? "Resuming..." : "Pausing...";
+      send({ type: paused ? "resume_run" : "pause_run" });
+      return;
+    }
+
     const isFileMode = promptMode === "file";
     let singlePrompt = "";
     let prompts = null;
@@ -546,14 +640,15 @@
     }
 
     running = true;
+    paused = false;
+    pauseTransitionPending = false;
     runStartTime = Date.now();
     workerStartTimes = {};
     workerData = {};
-    startBtn.disabled = true;
+    updateStartButton();
     stopBtn.disabled = false;
     exportBtn.disabled = true;
     workersContainer.innerHTML = "";
-    workersContainer.style.gridTemplateColumns = ""; // reset
     resultsBody.innerHTML = "";
     logBox.innerHTML = "";
     progressFill.style.width = "0%";
@@ -590,6 +685,15 @@
       model_b: modelBInput.value.trim() || null,
       retain_output: retainOutputInput.value,
       clear_cookies: clearCookiesInput.checked,
+      incognito: incognitoModeInput.checked,
+      images: (!isFileMode && uploadedImages.length > 0)
+        ? uploadedImages.map((img) => ({
+            data: img.data,
+            mime_type: img.mime_type,
+            filename: img.filename,
+          }))
+        : null,
+      simultaneous_start: simultaneousStartInput.checked,
       zoom_pct: parseInt(zoomInput.value, 10) || 100,
       monitor_count: parseInt(monitorCountInput.value, 10) || 1,
       monitor_width: monW,
@@ -607,6 +711,9 @@
           appendLog("info", "System prompt will be sent first before each batch prompt.");
         }
       }
+      if (simultaneousStartInput.checked) {
+        appendLog("info", "All windows will prepare in parallel, then submit one by one using the configured gap.");
+      }
       appendLog("info", `Starting run: ${prompts.length} prompt(s), ${windowCount} window(s), ${batches} batch(es)...`);
     } else {
       if (systemPromptInput.value.trim()) {
@@ -615,6 +722,9 @@
         } else {
           appendLog("info", "System prompt will be sent first before the manual prompt.");
         }
+      }
+      if (simultaneousStartInput.checked) {
+        appendLog("info", "All windows will prepare in parallel, then submit one by one using the configured gap.");
       }
       appendLog("info", `Starting run with ${windowCount} window(s)...`);
     }
@@ -640,6 +750,7 @@
   clearBtn.addEventListener("click", () => {
     promptInput.value = "";
     promptInput.dispatchEvent(new Event("input"));
+    clearImages();
     promptInput.focus();
   });
 
@@ -764,6 +875,7 @@
       }
 
       appendLog("info", `File loaded: ${data.filename} (${data.row_count} rows, ${data.columns.length} columns)`);
+      saveFileState();
     } catch (err) {
       appendLog("error", `Upload error: ${err.message}`);
       showToast("Failed to upload file", "error");
@@ -783,6 +895,224 @@
     rowRangeInfo.textContent = "";
     filePreviewDiv.innerHTML = "";
     batchInfoDiv.textContent = "";
+    clearSavedFileState();
+  }
+
+  // ══════════════════════════════════════
+  // Image Upload (Manual Mode)
+  // ══════════════════════════════════════
+
+  const MAX_IMAGE_SIZE = 5 * 1024 * 1024; // 5 MB
+  const MAX_IMAGES = 10;
+  const MAX_IMAGE_DIM = 2048;
+
+  // Attach button opens file picker (not the whole area)
+  document.getElementById("btn-attach").addEventListener("click", () => imageFileInput.click());
+
+  // Drag-drop images onto the prompt input area
+  imageUploadArea.addEventListener("dragover", (e) => {
+    e.preventDefault();
+    imageUploadArea.classList.add("dragover");
+  });
+
+  imageUploadArea.addEventListener("dragleave", () => {
+    imageUploadArea.classList.remove("dragover");
+  });
+
+  imageUploadArea.addEventListener("drop", (e) => {
+    e.preventDefault();
+    imageUploadArea.classList.remove("dragover");
+    // Only handle image files from the drop
+    const imageFiles = Array.from(e.dataTransfer.files).filter(f => f.type.startsWith("image/"));
+    if (imageFiles.length > 0) {
+      handleImageFiles(imageFiles);
+    }
+  });
+
+  imageFileInput.addEventListener("change", () => {
+    handleImageFiles(imageFileInput.files);
+    imageFileInput.value = "";
+  });
+
+  function handleImageFiles(fileList) {
+    const files = Array.from(fileList);
+    const remaining = MAX_IMAGES - uploadedImages.length;
+    if (remaining <= 0) {
+      showToast(`Maximum ${MAX_IMAGES} images allowed`, "warning");
+      return;
+    }
+    const toProcess = files.slice(0, remaining);
+
+    toProcess.forEach((file) => {
+      if (!file.type.match(/^image\/(png|jpeg|webp|gif)$/)) {
+        showToast(`Unsupported format: ${file.name}`, "warning");
+        return;
+      }
+      if (file.size > MAX_IMAGE_SIZE) {
+        showToast(`${file.name} exceeds 5 MB limit`, "warning");
+        return;
+      }
+      processImage(file);
+    });
+  }
+
+  function processImage(file) {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const img = new Image();
+      img.onload = () => {
+        let { width, height } = img;
+
+        // Resize if too large
+        if (width > MAX_IMAGE_DIM || height > MAX_IMAGE_DIM) {
+          const scale = MAX_IMAGE_DIM / Math.max(width, height);
+          width = Math.round(width * scale);
+          height = Math.round(height * scale);
+        }
+
+        const canvas = document.createElement("canvas");
+        canvas.width = width;
+        canvas.height = height;
+        const ctx = canvas.getContext("2d");
+        ctx.drawImage(img, 0, 0, width, height);
+
+        // Determine output format
+        const outputType = file.type === "image/png" ? "image/png" : "image/jpeg";
+        const quality = outputType === "image/jpeg" ? 0.85 : undefined;
+        const dataUrl = canvas.toDataURL(outputType, quality);
+        const base64 = dataUrl.split(",")[1];
+
+        const objectUrl = URL.createObjectURL(file);
+        uploadedImages.push({
+          data: base64,
+          mime_type: outputType,
+          filename: file.name,
+          objectUrl: objectUrl,
+        });
+        renderImageThumbnails();
+      };
+      img.src = reader.result;
+    };
+    reader.readAsDataURL(file);
+  }
+
+  function renderImageThumbnails() {
+    imageThumbnails.innerHTML = "";
+    uploadedImages.forEach((img, idx) => {
+      const thumb = document.createElement("div");
+      thumb.className = "image-thumb";
+      thumb.innerHTML = `
+        <img src="${img.objectUrl}" alt="${escapeAttr(img.filename)}" />
+        <button class="image-thumb-remove" data-idx="${idx}">&times;</button>
+        <span class="image-thumb-name">${escapeHtml(truncate(img.filename, 12))}</span>
+      `;
+      imageThumbnails.appendChild(thumb);
+    });
+
+    // Bind remove buttons
+    imageThumbnails.querySelectorAll(".image-thumb-remove").forEach((btn) => {
+      btn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        const idx = parseInt(btn.dataset.idx, 10);
+        removeImage(idx);
+      });
+    });
+
+    // Update attach hint
+    const hint = document.getElementById("attach-hint");
+    if (hint) {
+      hint.textContent = uploadedImages.length > 0
+        ? `${uploadedImages.length} image${uploadedImages.length > 1 ? "s" : ""} attached`
+        : "";
+    }
+  }
+
+  function removeImage(idx) {
+    if (uploadedImages[idx] && uploadedImages[idx].objectUrl) {
+      URL.revokeObjectURL(uploadedImages[idx].objectUrl);
+    }
+    uploadedImages.splice(idx, 1);
+    renderImageThumbnails();
+  }
+
+  function clearImages() {
+    uploadedImages.forEach((img) => {
+      if (img.objectUrl) URL.revokeObjectURL(img.objectUrl);
+    });
+    uploadedImages = [];
+    renderImageThumbnails();
+  }
+
+  // ── File state persistence ──
+
+  const FILE_STATE_KEY = "lmarena_file_state";
+
+  function saveFileState() {
+    if (!uploadedRows || uploadedRows.length === 0) return;
+    try {
+      const cols = getSelectedColumns();
+      const state = {
+        rows: uploadedRows,
+        filename: fileNameSpan.textContent,
+        rowCount: uploadedRows.length,
+        columns: Array.from(columnCheckboxes.querySelectorAll("input[type='checkbox']"))
+          .map(cb => cb.value),
+        selectedColumns: cols,
+        rowStart: rowStartInput.value,
+        rowEnd: rowEndInput.value,
+      };
+      localStorage.setItem(FILE_STATE_KEY, JSON.stringify(state));
+    } catch {}
+  }
+
+  function clearSavedFileState() {
+    try { localStorage.removeItem(FILE_STATE_KEY); } catch {}
+  }
+
+  function restoreFileState() {
+    try {
+      const raw = localStorage.getItem(FILE_STATE_KEY);
+      if (!raw) return;
+      const state = JSON.parse(raw);
+      if (!state.rows || state.rows.length === 0) return;
+
+      uploadedRows = state.rows;
+
+      // Restore file info display
+      fileNameSpan.textContent = state.filename || "Restored file";
+      fileRowCountSpan.textContent = `${state.rowCount || state.rows.length} row(s)`;
+      uploadArea.classList.add("hidden");
+      fileInfoDiv.classList.remove("hidden");
+
+      // Restore row range
+      rowStartInput.value = state.rowStart || 1;
+      rowEndInput.value = state.rowEnd || "";
+      rowEndInput.placeholder = `${state.rowCount || state.rows.length} (all)`;
+
+      // Restore column checkboxes
+      columnCheckboxes.innerHTML = "";
+      (state.columns || []).forEach(col => {
+        const label = document.createElement("label");
+        label.className = "column-chip";
+        const cb = document.createElement("input");
+        cb.type = "checkbox";
+        cb.value = col;
+        const isSelected = (state.selectedColumns || []).includes(col);
+        cb.checked = isSelected;
+        if (isSelected) label.classList.add("selected");
+        cb.addEventListener("change", () => {
+          label.classList.toggle("selected", cb.checked);
+          onColumnChange();
+          saveFileState();
+        });
+        label.appendChild(cb);
+        label.appendChild(document.createTextNode(col));
+        columnCheckboxes.appendChild(label);
+      });
+
+      // Rebuild prompts
+      onColumnChange();
+    } catch {}
   }
 
   function getSelectedColumns() {
@@ -828,6 +1158,7 @@
     filePreviewDiv.innerHTML = html;
 
     updateBatchInfo();
+    saveFileState();
   }
 
   // Re-extract prompts when row range changes
@@ -867,6 +1198,18 @@
   });
 
   document.addEventListener("keydown", (e) => {
+    // HTML preview carousel keyboard nav
+    if (!htmlPreviewModal.classList.contains("hidden")) {
+      if (e.key === "Escape") { htmlPreviewModal.classList.add("hidden"); return; }
+      if (e.key === "ArrowLeft") { htmlPrevBtn.click(); e.preventDefault(); return; }
+      if (e.key === "ArrowRight") { htmlNextBtn.click(); e.preventDefault(); return; }
+      if (e.key === "1") { previewMode = "a"; renderPreview(); return; }
+      if (e.key === "2") { previewMode = "b"; renderPreview(); return; }
+      if (e.key === "3") { previewMode = "both"; renderPreview(); return; }
+      if (e.key === "f") { previewZoom = "fit"; applyPreviewZoom(); return; }
+      if (e.key === "0") { previewZoom = "1"; applyPreviewZoom(); return; }
+      return;
+    }
     if (e.key === "Escape") {
       if (!responseModal.classList.contains("hidden")) {
         responseModal.classList.add("hidden");
@@ -955,23 +1298,29 @@
   });
 
   // ══════════════════════════════════════
-  // Tabs (Table View / JSON)
+  // Tabs (Table View / JSON / HTML)
   // ══════════════════════════════════════
 
+  function setResultsTab(active) {
+    tabTable.classList.toggle("active", active === "table");
+    tabJson.classList.toggle("active", active === "json");
+    tabHtml.classList.toggle("active", active === "html");
+    resultsTableWrap.classList.toggle("hidden", active !== "table");
+    resultsJsonPre.classList.toggle("hidden", active !== "json");
+    resultsHtmlWrap.classList.toggle("hidden", active !== "html");
+  }
+
   tabTable.addEventListener("click", () => {
-    tabTable.classList.add("active");
-    tabJson.classList.remove("active");
-    resultsTableWrap.classList.remove("hidden");
-    resultsJsonPre.classList.add("hidden");
-    exportBtn.innerHTML = "&#128196; Export .xlsx";
+    setResultsTab("table");
   });
 
   tabJson.addEventListener("click", () => {
-    tabJson.classList.add("active");
-    tabTable.classList.remove("active");
-    resultsJsonPre.classList.remove("hidden");
-    resultsTableWrap.classList.add("hidden");
-    exportBtn.innerHTML = "&#128196; Export .json";
+    setResultsTab("json");
+  });
+
+  tabHtml.addEventListener("click", () => {
+    setResultsTab("html");
+    renderHtmlPreviews();
   });
 
   // ══════════════════════════════════════
@@ -1004,16 +1353,7 @@
   }
 
   function layoutWindowsGrid(count) {
-    // 1-2: single column, 3-4: 2 columns, 5-6: 2 columns, 7-9: 3 columns, 10+: 3-4 columns
-    let cols;
-    if (count <= 2) cols = 1;
-    else if (count <= 6) cols = 2;
-    else if (count <= 9) cols = 3;
-    else cols = 4;
-
-    workersContainer.style.display = "grid";
-    workersContainer.style.gridTemplateColumns = `repeat(${cols}, 1fr)`;
-    workersContainer.style.alignContent = "start";
+    // Workers are stacked vertically in the sidebar — no grid needed
   }
 
   function escapeHtml(str) {
@@ -1050,6 +1390,322 @@
     // Rough estimation: ~4 chars per token for English
     return Math.round(text.length / 4);
   }
+
+  // ══════════════════════════════════════
+  // HTML Preview (extract code blocks & render)
+  // ══════════════════════════════════════
+
+  function extractHtmlBlocks(responseHtml) {
+    if (!responseHtml) return [];
+    const container = document.createElement("div");
+    container.innerHTML = responseHtml;
+    const blocks = [];
+    // Look for <pre><code> blocks that contain HTML
+    container.querySelectorAll("pre code").forEach((codeEl) => {
+      // Strip leading language label (e.g. "HTML", "html", "css") injected by code block renderers
+      const text = (codeEl.textContent || "")
+        .replace(/^(html|css|javascript|js|typescript|ts|xml|json|jsx|tsx)\s*(?=<)/i, "")
+        .trim();
+      // Check if it looks like HTML
+      if (/<(!DOCTYPE|html|head|body|div|span|p |h[1-6]|section|article|nav|main|form|table|ul|ol|li|a |img |style|script|link|meta|button|input|header|footer)/i.test(text)) {
+        blocks.push(text);
+      }
+    });
+    // Also check standalone <code> blocks (not inside <pre>) in case of inline code fences
+    if (blocks.length === 0) {
+      container.querySelectorAll("code").forEach((codeEl) => {
+        const text = (codeEl.textContent || "")
+          .replace(/^(html|css|javascript|js|typescript|ts|xml|json)\s*(?=<)/i, "")
+          .trim();
+        if (text.length > 50 && /<(!DOCTYPE|html|head|body|div)/i.test(text)) {
+          blocks.push(text);
+        }
+      });
+    }
+    return blocks;
+  }
+
+  // ── HTML Preview Modal — Carousel ──
+  let htmlBlocksCache = {};
+  let previewWorkerIds = [];
+  let previewIndex = 0;
+  let previewMode = "both"; // "a" | "b" | "both"
+  let previewZoom = "fit";  // "fit" | "1" | "0.75" | "0.5"
+
+  const htmlPreviewModal = document.getElementById("html-preview-modal");
+  const htmlPreviewContent = document.getElementById("html-preview-content");
+  const htmlPageInfo = document.getElementById("html-page-info");
+  const htmlPrevBtn = document.getElementById("html-prev");
+  const htmlNextBtn = document.getElementById("html-next");
+  const htmlModeA = document.getElementById("html-mode-a");
+  const htmlModeB = document.getElementById("html-mode-b");
+  const htmlModeBoth = document.getElementById("html-mode-both");
+
+  function renderHtmlPreviews() {
+    htmlResultsList.innerHTML = "";
+    htmlBlocksCache = {};
+    const results = runResults || Object.values(incrementalResults);
+    if (!results || results.length === 0) {
+      htmlResultsList.innerHTML = '<div class="html-empty">No results yet</div>';
+      return;
+    }
+
+    let hasAnyHtml = false;
+    results.forEach((r) => {
+      const blocksA = extractHtmlBlocks(r.model_a_response_html);
+      const blocksB = extractHtmlBlocks(r.model_b_response_html);
+      if (blocksA.length === 0 && blocksB.length === 0) return;
+      hasAnyHtml = true;
+
+      htmlBlocksCache[r.worker_id] = { a: blocksA, b: blocksB,
+        nameA: r.model_a_name || "Model A", nameB: r.model_b_name || "Model B" };
+
+      const card = document.createElement("div");
+      card.className = "html-result-card";
+      const row = document.createElement("div");
+      row.className = "html-result-row";
+      row.innerHTML = `
+        <span class="html-result-window">Window #${r.worker_id + 1}</span>
+        <div class="html-result-models">
+          <button class="btn-html-preview" data-worker="${r.worker_id}" data-side="a"
+            ${blocksA.length === 0 ? "disabled" : ""}>
+            ${escapeHtml(r.model_a_name || "Model A")}
+            ${blocksA.length > 0 ? "&#8212; " + blocksA.length + " block(s)" : "&#8212; no HTML"}
+          </button>
+          <button class="btn-html-preview" data-worker="${r.worker_id}" data-side="b"
+            ${blocksB.length === 0 ? "disabled" : ""}>
+            ${escapeHtml(r.model_b_name || "Model B")}
+            ${blocksB.length > 0 ? "&#8212; " + blocksB.length + " block(s)" : "&#8212; no HTML"}
+          </button>
+          <button class="btn-html-preview btn-html-compare" data-worker="${r.worker_id}" data-side="both"
+            ${blocksA.length === 0 && blocksB.length === 0 ? "disabled" : ""}>
+            &#9881; Compare
+          </button>
+        </div>
+      `;
+      card.appendChild(row);
+      htmlResultsList.appendChild(card);
+    });
+
+    if (!hasAnyHtml) {
+      htmlResultsList.innerHTML = '<div class="html-empty">No HTML code blocks found in responses</div>';
+    }
+  }
+
+  // Open modal from button list
+  htmlResultsList.addEventListener("click", (e) => {
+    const btn = e.target.closest(".btn-html-preview");
+    if (!btn || btn.disabled) return;
+    const workerId = parseInt(btn.dataset.worker, 10);
+    const side = btn.dataset.side;
+    openHtmlPreviewModal(workerId, side);
+  });
+
+  function openHtmlPreviewModal(workerId, side) {
+    // Build ordered list of worker IDs that have HTML
+    previewWorkerIds = Object.keys(htmlBlocksCache).map(Number).sort((a, b) => a - b);
+    previewIndex = Math.max(0, previewWorkerIds.indexOf(workerId));
+    previewMode = side;
+    renderPreview();
+    htmlPreviewModal.classList.remove("hidden");
+  }
+
+  function renderPreview() {
+    const wid = previewWorkerIds[previewIndex];
+    const cache = htmlBlocksCache[wid];
+    if (!cache) return;
+
+    // Update page info
+    htmlPageInfo.textContent = `Window ${previewIndex + 1} / ${previewWorkerIds.length}`;
+
+    // Update nav button states
+    htmlPrevBtn.disabled = previewIndex === 0;
+    htmlNextBtn.disabled = previewIndex === previewWorkerIds.length - 1;
+
+    // Update mode button labels + active state
+    htmlModeA.textContent = cache.nameA;
+    htmlModeB.textContent = cache.nameB;
+    htmlModeBoth.textContent = "Compare";
+    htmlModeA.classList.toggle("active", previewMode === "a");
+    htmlModeB.classList.toggle("active", previewMode === "b");
+    htmlModeBoth.classList.toggle("active", previewMode === "both");
+
+    // Render content
+    htmlPreviewContent.innerHTML = "";
+
+    if (previewMode === "both") {
+      htmlPreviewContent.className = "html-preview-content html-preview-split";
+      [cache.a, cache.b].forEach((blocks) => {
+        const col = document.createElement("div");
+        col.className = "html-preview-col";
+        if (blocks.length === 0) {
+          const empty = document.createElement("div");
+          empty.className = "html-panel-empty";
+          empty.textContent = "No HTML code blocks";
+          col.appendChild(empty);
+        } else {
+          col.appendChild(buildPreviewIframe(blocks));
+        }
+        htmlPreviewContent.appendChild(col);
+      });
+    } else {
+      htmlPreviewContent.className = "html-preview-content html-preview-single";
+      const blocks = previewMode === "a" ? cache.a : cache.b;
+      if (blocks.length === 0) {
+        const empty = document.createElement("div");
+        empty.className = "html-panel-empty";
+        empty.textContent = "No HTML code blocks";
+        htmlPreviewContent.appendChild(empty);
+      } else {
+        htmlPreviewContent.appendChild(buildPreviewIframe(blocks));
+      }
+    }
+
+    // Update side arrow visibility
+    const sideLeft = document.getElementById("html-side-prev");
+    const sideRight = document.getElementById("html-side-next");
+    sideLeft.classList.toggle("hidden", previewIndex === 0);
+    sideRight.classList.toggle("hidden", previewIndex === previewWorkerIds.length - 1);
+  }
+
+  function buildPreviewIframe(blocks) {
+    const html = blocks.join("\n<hr style='margin:2rem 0;border:1px dashed #ccc'>\n");
+    const wrap = document.createElement("div");
+    wrap.className = "html-iframe-scaled";
+    const iframe = document.createElement("iframe");
+    iframe.className = "html-preview-iframe-full";
+    iframe.sandbox = "allow-scripts";
+    iframe.srcdoc = `<!DOCTYPE html>
+<html><head><meta charset="utf-8"><style>
+*, *::before, *::after { box-sizing: border-box; }
+html, body { margin: 0; padding: 0; background: #fff; color: #111;
+  font-family: system-ui, -apple-system, sans-serif; font-size: 14px;
+  overflow: auto; line-height: 1.5; min-height: 0; }
+</style></head><body>${html}</body></html>`;
+    iframe.onload = () => applyPreviewZoom();
+    wrap.appendChild(iframe);
+    return wrap;
+  }
+
+  function applyPreviewZoom() {
+    // Update active button
+    document.querySelectorAll("#html-zoom-group .btn-zoom").forEach((b) => {
+      b.classList.toggle("active", b.dataset.zoom === previewZoom);
+    });
+
+    const iframes = htmlPreviewContent.querySelectorAll(".html-preview-iframe-full");
+    iframes.forEach((iframe) => {
+      const container = iframe.parentElement;
+      if (!container) return;
+
+      if (previewZoom === "1") {
+        // 1:1 — actual size, scrollable
+        iframe.style.transform = "none";
+        iframe.style.width = "100%";
+        iframe.style.height = "100%";
+        container.style.overflow = "auto";
+        try {
+          iframe.contentDocument.documentElement.style.overflow = "";
+          iframe.contentDocument.body.style.overflow = "";
+        } catch {}
+        return;
+      }
+
+      let scale;
+      if (previewZoom === "fit") {
+        try {
+          const doc = iframe.contentDocument;
+          const body = doc.body;
+          const root = doc.documentElement;
+          const cw = Math.max(
+            body?.scrollWidth || 0,
+            body?.offsetWidth || 0,
+            body?.clientWidth || 0,
+            root?.scrollWidth || 0,
+            root?.offsetWidth || 0,
+            root?.clientWidth || 0,
+            1
+          );
+          const ch = Math.max(
+            body?.scrollHeight || 0,
+            body?.offsetHeight || 0,
+            body?.clientHeight || 0,
+            root?.scrollHeight || 0,
+            root?.offsetHeight || 0,
+            root?.clientHeight || 0,
+            1
+          );
+          const bw = container.clientWidth || 1;
+          const bh = container.clientHeight || 1;
+          scale = Math.min(bw / cw, bh / ch, 1);
+        } catch {
+          scale = 1;
+        }
+      } else {
+        scale = parseFloat(previewZoom) || 1;
+      }
+
+      container.style.overflow = "hidden";
+      iframe.style.width = (100 / scale) + "%";
+      iframe.style.height = (100 / scale) + "%";
+      iframe.style.transform = `scale(${scale})`;
+      // Hide scrollbars inside the iframe content when scaled
+      try {
+        iframe.contentDocument.documentElement.style.overflow = "hidden";
+        iframe.contentDocument.body.style.overflow = "hidden";
+      } catch {}
+    });
+  }
+
+  // Navigation buttons (top bar + side arrows)
+  function prevWindow() { if (previewIndex > 0) { previewIndex--; renderPreview(); } }
+  function nextWindow() { if (previewIndex < previewWorkerIds.length - 1) { previewIndex++; renderPreview(); } }
+
+  htmlPrevBtn.addEventListener("click", prevWindow);
+  htmlNextBtn.addEventListener("click", nextWindow);
+  document.getElementById("html-side-prev").addEventListener("click", prevWindow);
+  document.getElementById("html-side-next").addEventListener("click", nextWindow);
+
+  // Mode toggle buttons
+  [htmlModeA, htmlModeB, htmlModeBoth].forEach((btn) => {
+    btn.addEventListener("click", () => {
+      previewMode = btn.dataset.mode;
+      renderPreview();
+    });
+  });
+
+  // Zoom buttons
+  document.getElementById("html-zoom-group").addEventListener("click", (e) => {
+    const btn = e.target.closest(".btn-zoom");
+    if (!btn) return;
+    previewZoom = btn.dataset.zoom;
+    applyPreviewZoom();
+  });
+
+  // Copy HTML source
+  document.getElementById("html-copy-code").addEventListener("click", async () => {
+    const wid = previewWorkerIds[previewIndex];
+    const cache = htmlBlocksCache[wid];
+    if (!cache) return;
+    let text = "";
+    if (previewMode === "both") {
+      text = `<!-- ${cache.nameA} -->\n${cache.a.join("\n\n")}\n\n<!-- ${cache.nameB} -->\n${cache.b.join("\n\n")}`;
+    } else {
+      const blocks = previewMode === "a" ? cache.a : cache.b;
+      text = blocks.join("\n\n");
+    }
+    try {
+      await navigator.clipboard.writeText(text);
+      showToast("HTML copied to clipboard", "success");
+    } catch {
+      showToast("Clipboard access denied", "warning");
+    }
+  });
+
+  // Close
+  document.getElementById("html-preview-close").addEventListener("click", () => {
+    htmlPreviewModal.classList.add("hidden");
+  });
 
   // ══════════════════════════════════════
   // Footer Stats (persisted in localStorage)
@@ -1109,6 +1765,11 @@
 
   renderStats();
 
+  document.getElementById("reset-stats-btn").addEventListener("click", () => {
+    localStorage.removeItem(STATS_KEY);
+    renderStats();
+  });
+
   // ══════════════════════════════════════
   // Settings Persistence (localStorage)
   // ══════════════════════════════════════
@@ -1124,6 +1785,8 @@
     { el: retainOutputInput,  key: "retain_output" },
     { el: zoomInput,          key: "zoom" },
     { el: clearCookiesInput,  key: "clear_cookies", checkbox: true },
+    { el: incognitoModeInput, key: "incognito_mode", checkbox: true },
+    { el: simultaneousStartInput, key: "simultaneous_start", checkbox: true },
     { el: monitorCountInput,  key: "monitor_count" },
     { el: monitorWidthInput,  key: "monitor_width" },
     { el: monitorHeightInput, key: "monitor_height" },
@@ -1199,6 +1862,179 @@
   ].forEach((el) => el.addEventListener("input", updateTilePreview));
 
   // ══════════════════════════════════════
+  // Checkpoint / Resume
+  // ══════════════════════════════════════
+
+  function fetchCheckpoints() {
+    fetch("/api/checkpoints")
+      .then(res => res.json())
+      .then(data => {
+        if (!Array.isArray(data) || data.length === 0) {
+          resumeBanner.classList.add("hidden");
+          return;
+        }
+        renderCheckpoints(data);
+        resumeBanner.classList.remove("hidden");
+      })
+      .catch(() => {
+        resumeBanner.classList.add("hidden");
+      });
+  }
+
+  function renderCheckpoints(checkpoints) {
+    resumeList.innerHTML = "";
+    checkpoints.forEach(cp => {
+      const div = document.createElement("div");
+      div.className = "resume-item";
+      div.dataset.runId = cp.run_id;
+
+      const lastTime = cp.last_checkpoint_at
+        ? new Date(cp.last_checkpoint_at).toLocaleString()
+        : "unknown";
+
+      div.innerHTML = `
+        <div class="resume-info">
+          <div class="resume-info-title">Run ${cp.run_id}</div>
+          <div class="resume-info-detail">
+            ${cp.completed_prompts}/${cp.total_prompts} prompts done
+            &middot; batch ${cp.next_batch}/${cp.total_batches}
+            &middot; ${lastTime}
+          </div>
+        </div>
+        <div class="resume-actions">
+          <button class="btn-resume" data-run-id="${cp.run_id}">&#9654; Resume</button>
+          <button class="btn-discard" data-run-id="${cp.run_id}">&#10005; Discard</button>
+        </div>
+      `;
+      resumeList.appendChild(div);
+    });
+  }
+
+  resumeList.addEventListener("click", (e) => {
+    const btn = e.target.closest("[data-run-id]");
+    if (!btn) return;
+
+    const runId = btn.dataset.runId;
+
+    if (btn.classList.contains("btn-resume")) {
+      if (running) {
+        showToast("A run is already in progress", "warning");
+        return;
+      }
+      // Transition UI to running state
+      running = true;
+      paused = false;
+      pauseTransitionPending = false;
+      runStartTime = Date.now();
+      workerStartTimes = {};
+      workerData = {};
+      updateStartButton();
+      stopBtn.disabled = false;
+      exportBtn.disabled = true;
+      workersContainer.innerHTML = "";
+      resultsBody.innerHTML = "";
+      logBox.innerHTML = "";
+      progressFill.style.width = "0%";
+      progressPct.textContent = "0%";
+      etaText.textContent = "Resuming...";
+      runResults = null;
+      incrementalResults = {};
+      resultsJsonPre.textContent = "";
+
+      resumeBanner.classList.add("hidden");
+
+      send({ type: "resume_from_checkpoint", run_id: runId });
+      appendLog("info", `Resuming run ${runId} from checkpoint`);
+    }
+
+    if (btn.classList.contains("btn-discard")) {
+      fetch(`/api/checkpoints/${runId}`, { method: "DELETE" })
+        .then(() => {
+          const item = resumeList.querySelector(`[data-run-id="${runId}"]`);
+          if (item && item.classList.contains("resume-item")) {
+            item.remove();
+          }
+          if (resumeList.children.length === 0) {
+            resumeBanner.classList.add("hidden");
+          }
+          showToast(`Checkpoint ${runId} discarded`, "info");
+        })
+        .catch(() => {
+          showToast("Failed to discard checkpoint", "error");
+        });
+    }
+  });
+
+  dismissResumeBtn.addEventListener("click", () => {
+    resumeBanner.classList.add("hidden");
+  });
+
+  // ══════════════════════════════════════
+  // Run State Sync (reconnect recovery)
+  // ══════════════════════════════════════
+
+  function syncRunState() {
+    fetch("/api/run-state")
+      .then(res => res.json())
+      .then(state => {
+        if (!state || !state.running) return;
+
+        // Restore running state
+        running = true;
+        paused = state.paused || false;
+        runStartTime = runStartTime || Date.now();
+        updateStartButton();
+        stopBtn.disabled = false;
+
+        // Hide resume banner while a run is active
+        resumeBanner.classList.add("hidden");
+
+        // Restore worker cards
+        const workerCount = state.workers ? state.workers.length : 0;
+        if (workerCount > 0) {
+          workersContainer.innerHTML = "";
+          layoutWindowsGrid(workerCount);
+          state.workers.forEach(w => {
+            ensureWorkerCard(w.worker_id);
+            updateWorkerCard({
+              worker_id: w.worker_id,
+              state: w.state,
+              progress_pct: w.progress_pct,
+              message: "",
+              error: null,
+            });
+          });
+        }
+
+        // Restore result rows
+        if (state.results && state.results.length > 0) {
+          state.results.forEach(r => {
+            ensureResultRow(r.worker_id);
+            updateResultRowWithData(r);
+            incrementalResults[r.worker_id] = r;
+          });
+          exportBtn.disabled = false;
+        }
+
+        // Restore progress bar
+        const total = state.total_prompts || 1;
+        const done = state.completed_prompts || 0;
+        const pct = Math.round((done / total) * 100);
+        progressFill.style.width = `${pct}%`;
+        progressPct.textContent = `${pct}%`;
+
+        if (paused) {
+          etaText.textContent = "Paused";
+        } else {
+          etaText.textContent = `${done}/${total} prompts done`;
+        }
+
+        appendLog("info", "Reconnected to active run");
+      })
+      .catch(() => {});
+  }
+
+  // ══════════════════════════════════════
   // Init
   // ══════════════════════════════════════
 
@@ -1217,11 +2053,15 @@
 
   initScreenDefaults();
   updateTilePreview();
+  updateStartButton();
 
   // Auto-expand system prompt if it has saved content
   if (systemPromptInput.value.trim()) {
     document.getElementById("system-prompt-details").open = true;
   }
+
+  // Restore file upload state if present
+  restoreFileState();
 
   connect();
 })();

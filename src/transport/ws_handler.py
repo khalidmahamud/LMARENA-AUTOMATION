@@ -7,9 +7,12 @@ from typing import Callable, Optional
 
 from fastapi import WebSocket, WebSocketDisconnect
 
+from src.checkpoint.manager import CheckpointManager, RunCheckpoint
 from src.models.messages import (
     ErrorMessage,
+    PauseRunRequest,
     PongMessage,
+    ResumeRunRequest,
     StartRunRequest,
 )
 from src.orchestrator.run_orchestrator import RunOrchestrator
@@ -31,9 +34,11 @@ class WsHandler:
         self,
         orchestrator_factory: OrchestratorFactory,
         broadcaster: WsBroadcaster,
+        checkpoint_manager: Optional[CheckpointManager] = None,
     ) -> None:
         self._orchestrator_factory = orchestrator_factory
         self._broadcaster = broadcaster
+        self._checkpoint_manager = checkpoint_manager
         self._orchestrator: Optional[RunOrchestrator] = None
         self._run_task: Optional[asyncio.Task] = None
 
@@ -70,6 +75,36 @@ class WsHandler:
                 elif msg_type == "stop_run":
                     await self._handle_stop_run()
 
+                elif msg_type == "pause_run":
+                    request = PauseRunRequest(**data)
+                    await self._handle_pause_run(request)
+
+                elif msg_type == "resume_run":
+                    request = ResumeRunRequest(**data)
+                    await self._handle_resume_run(request)
+
+                elif msg_type == "resume_from_checkpoint":
+                    run_id = data.get("run_id")
+                    if not run_id or not self._checkpoint_manager:
+                        await websocket.send_text(
+                            ErrorMessage(
+                                message="Resume not available"
+                            ).model_dump_json()
+                        )
+                        continue
+                    checkpoint = self._checkpoint_manager.load(run_id)
+                    if not checkpoint:
+                        await websocket.send_text(
+                            ErrorMessage(
+                                message=f"Checkpoint {run_id} not found or corrupt"
+                            ).model_dump_json()
+                        )
+                        continue
+                    request = StartRunRequest(**checkpoint.original_request)
+                    await self._handle_start_run(
+                        request, resume_checkpoint=checkpoint
+                    )
+
                 elif msg_type == "ping":
                     await websocket.send_text(
                         PongMessage().model_dump_json()
@@ -89,22 +124,28 @@ class WsHandler:
         finally:
             self._broadcaster.remove_client(websocket)
 
-    async def _handle_start_run(self, request: StartRunRequest) -> None:
-        """Start a new run as a background asyncio task."""
+    async def _handle_start_run(
+        self,
+        request: StartRunRequest,
+        resume_checkpoint: Optional[RunCheckpoint] = None,
+    ) -> None:
+        """Start a new run (or resume) as a background asyncio task."""
         if self._run_task and not self._run_task.done():
             logger.warning("Run already in progress, ignoring start request")
             return
 
         self._orchestrator = self._orchestrator_factory()
         self._run_task = asyncio.create_task(
-            self._run_with_error_handling(request)
+            self._run_with_error_handling(request, resume_checkpoint)
         )
 
     async def _run_with_error_handling(
-        self, request: StartRunRequest
+        self,
+        request: StartRunRequest,
+        resume_checkpoint: Optional[RunCheckpoint] = None,
     ) -> None:
         try:
-            await self._orchestrator.execute_run(request)
+            await self._orchestrator.execute_run(request, resume_checkpoint)
         except Exception as exc:
             logger.error("Run failed: %s", exc, exc_info=True)
 
@@ -118,6 +159,35 @@ class WsHandler:
         if self._run_task and not self._run_task.done():
             self._run_task.cancel()
 
+    async def _handle_pause_run(self, request: PauseRunRequest) -> None:
+        del request
+        if self._orchestrator:
+            try:
+                await self._orchestrator.pause()
+            except Exception as exc:
+                logger.error("Error during pause: %s", exc)
+
+    async def _handle_resume_run(self, request: ResumeRunRequest) -> None:
+        del request
+        if self._orchestrator:
+            try:
+                await self._orchestrator.resume()
+            except Exception as exc:
+                logger.error("Error during resume: %s", exc)
+
     @property
     def orchestrator(self) -> Optional[RunOrchestrator]:
         return self._orchestrator
+
+    @property
+    def is_run_active(self) -> bool:
+        return bool(self._run_task and not self._run_task.done())
+
+    def get_run_state(self) -> Optional[dict]:
+        """Return current run state for UI sync on reconnect."""
+        if not self._orchestrator:
+            return None
+        snapshot = self._orchestrator.get_run_snapshot()
+        if snapshot:
+            snapshot["running"] = self.is_run_active
+        return snapshot

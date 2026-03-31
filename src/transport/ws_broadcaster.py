@@ -12,7 +12,9 @@ from src.models.messages import (
     OutboundMessage,
     RunCancelledMessage,
     RunCompleteMessage,
+    RunPausedMessage,
     RunProgressMessage,
+    RunResumedMessage,
     ToastMessage,
     WindowResultPayload,
     WorkerResultMessage,
@@ -113,6 +115,12 @@ class WsBroadcaster:
 
         if event.type == EventType.RUN_CANCELLED:
             return RunCancelledMessage()
+
+        if event.type == EventType.RUN_PAUSED:
+            return RunPausedMessage()
+
+        if event.type == EventType.RUN_RESUMED:
+            return RunResumedMessage()
 
         if event.type == EventType.CHALLENGE_DETECTED:
             return ChallengeDetectedMessage(

@@ -19,6 +19,7 @@ from openpyxl import load_workbook
 
 from src.browser.manager import BrowserManager
 from src.browser.selectors import SelectorRegistry
+from src.checkpoint.manager import CheckpointManager
 from src.core.events import EventBus
 from src.export.excel_exporter import export_to_csv, export_to_excel, export_to_json
 from src.models.config import AppConfig
@@ -41,13 +42,14 @@ config: AppConfig
 event_bus: EventBus
 broadcaster: WsBroadcaster
 browser_manager: BrowserManager
+checkpoint_manager: CheckpointManager
 ws_handler: WsHandler
 
 
 @asynccontextmanager
 async def lifespan(application: FastAPI):
     """Startup / shutdown lifecycle."""
-    global config, event_bus, broadcaster, browser_manager, ws_handler
+    global config, event_bus, broadcaster, browser_manager, checkpoint_manager, ws_handler
 
     config = AppConfig.from_yaml("config/default_config.yaml")
     SelectorRegistry.load("config/selectors.yaml")
@@ -55,12 +57,15 @@ async def lifespan(application: FastAPI):
     event_bus = EventBus()
     broadcaster = WsBroadcaster(event_bus)
     browser_manager = BrowserManager(config)
+    checkpoint_manager = CheckpointManager(config.output_dir)
     await browser_manager.start()
 
     def orchestrator_factory() -> RunOrchestrator:
-        return RunOrchestrator(config, event_bus, browser_manager)
+        return RunOrchestrator(
+            config, event_bus, browser_manager, checkpoint_manager
+        )
 
-    ws_handler = WsHandler(orchestrator_factory, broadcaster)
+    ws_handler = WsHandler(orchestrator_factory, broadcaster, checkpoint_manager)
 
     logger.info("Server ready — open http://localhost:8000")
     yield
@@ -167,9 +172,49 @@ async def export_json():
     return {"error": "No results available"}
 
 
+# ── Run state endpoint ──
+
+
+@app.get("/api/run-state")
+async def get_run_state():
+    """Return current run state for UI sync on reconnect."""
+    state = ws_handler.get_run_state()
+    if state:
+        return state
+    return {"running": False}
+
+
+# ── Checkpoint endpoints ──
+
+
+@app.get("/api/checkpoints")
+async def list_checkpoints():
+    """Return all resumable (in_progress) checkpoint summaries."""
+    checkpoints = checkpoint_manager.list_resumable()
+    return [
+        {
+            "run_id": cp.run_id,
+            "total_prompts": len(cp.all_prompts),
+            "completed_prompts": len(cp.completed_prompt_indices),
+            "next_batch": cp.next_batch_index,
+            "total_batches": cp.total_batches,
+            "last_checkpoint_at": cp.last_checkpoint_at,
+            "status": cp.status,
+        }
+        for cp in checkpoints
+    ]
+
+
+@app.delete("/api/checkpoints/{run_id}")
+async def delete_checkpoint(run_id: str):
+    """Discard a checkpoint."""
+    checkpoint_manager.delete(run_id)
+    return {"deleted": run_id}
+
+
 # ── Entry point ──
 
 if __name__ == "__main__":
     import uvicorn
 
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    uvicorn.run(app, host="0.0.0.0", port=8000, ws_max_size=67_108_864)

@@ -16,6 +16,8 @@ class WindowResult(BaseModel):
     model_a_response: Optional[str] = None
     model_b_name: Optional[str] = None
     model_b_response: Optional[str] = None
+    model_a_response_html: Optional[str] = None
+    model_b_response_html: Optional[str] = None
     started_at: Optional[datetime] = None
     completed_at: Optional[datetime] = None
     elapsed_seconds: Optional[float] = None
@@ -49,5 +51,7 @@ class ExportableRow(BaseModel):
     model_b: str
     response_b: str
     elapsed_seconds: float
+    response_a_html: Optional[str] = None
+    response_b_html: Optional[str] = None
     status: str  # "success" | "error" | "timeout"
     error_detail: Optional[str] = None

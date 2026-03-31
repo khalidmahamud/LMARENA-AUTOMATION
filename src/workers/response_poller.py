@@ -32,11 +32,12 @@ class ResponsePoller:
         selectors: SelectorRegistry,
         worker_id: int = -1,
         cancel_event: Optional[asyncio.Event] = None,
+        pause_event: Optional[asyncio.Event] = None,
         baseline_responses: Optional[Tuple[str, str]] = None,
-    ) -> Tuple[Tuple[str, str], Tuple[Optional[str], Optional[str]]]:
+    ) -> Tuple[Tuple[str, str], Tuple[Optional[str], Optional[str]], Tuple[str, str]]:
         """Poll until both responses are stable.
 
-        Returns ``((response_a, response_b), (model_a_name, model_b_name))``.
+        Returns ``((response_a, response_b), (model_a_name, model_b_name), (html_a, html_b))``.
         Raises ``PollingTimeoutError`` if responses don't stabilise in time.
         """
         deadline = time.monotonic() + self._config.response_timeout_seconds
@@ -46,6 +47,7 @@ class ResponsePoller:
         prev_text_a = ""
         prev_text_b = ""
         stable_count = 0
+        retry_counts = [0, 0]
         baseline_a = (
             self._normalize_text(baseline_responses[0])
             if baseline_responses
@@ -65,6 +67,8 @@ class ResponsePoller:
         await self._hide_thinking_boxes(page)
 
         while time.monotonic() < deadline:
+            await self._wait_if_paused(cancel_event, pause_event)
+
             if cancel_event and cancel_event.is_set():
                 raise asyncio.CancelledError("Run cancelled")
 
@@ -102,6 +106,32 @@ class ResponsePoller:
             if cancel_event and cancel_event.is_set():
                 raise asyncio.CancelledError("Run cancelled")
 
+            errored_indices = [
+                idx for idx, slide in enumerate(slides[:2])
+                if slide.get("has_error")
+            ]
+            if errored_indices:
+                for idx in errored_indices:
+                    if retry_counts[idx] >= 2:
+                        continue
+                    if await self._click_retry_button(page, slide_sel, idx):
+                        retry_counts[idx] += 1
+                        logger.warning(
+                            "Worker %d: response %d failed; clicked retry button (attempt %d)",
+                            worker_id,
+                            idx + 1,
+                            retry_counts[idx],
+                        )
+                stable_count = 0
+                prev_text_a = ""
+                prev_text_b = ""
+                await self._sleep_with_controls(
+                    interval,
+                    cancel_event=cancel_event,
+                    pause_event=pause_event,
+                )
+                continue
+
             cur_a = (
                 self._normalize_text(slides[0]["response_text"])
                 if len(slides) > 0
@@ -109,6 +139,16 @@ class ResponsePoller:
             )
             cur_b = (
                 self._normalize_text(slides[1]["response_text"])
+                if len(slides) > 1
+                else ""
+            )
+            cur_html_a = (
+                slides[0]["response_html"]
+                if len(slides) > 0
+                else ""
+            )
+            cur_html_b = (
+                slides[1]["response_html"]
                 if len(slides) > 1
                 else ""
             )
@@ -156,19 +196,14 @@ class ResponsePoller:
                     slides[0]["model_name"] if len(slides) > 0 else None,
                     slides[1]["model_name"] if len(slides) > 1 else None,
                 )
-                return (cur_a, cur_b), model_names
+                return (cur_a, cur_b), model_names, (cur_html_a, cur_html_b)
 
             # Cancellation-aware sleep
-            if cancel_event:
-                try:
-                    await asyncio.wait_for(
-                        cancel_event.wait(), timeout=interval
-                    )
-                    raise asyncio.CancelledError("Run cancelled")
-                except asyncio.TimeoutError:
-                    pass
-            else:
-                await asyncio.sleep(interval)
+            await self._sleep_with_controls(
+                interval,
+                cancel_event=cancel_event,
+                pause_event=pause_event,
+            )
 
         raise PollingTimeoutError(
             worker_id=worker_id,
@@ -238,6 +273,50 @@ class ResponsePoller:
             return False
 
     @staticmethod
+    async def _wait_if_paused(
+        cancel_event: Optional[asyncio.Event],
+        pause_event: Optional[asyncio.Event],
+    ) -> None:
+        if pause_event is None:
+            return
+
+        while not pause_event.is_set():
+            if cancel_event and cancel_event.is_set():
+                raise asyncio.CancelledError("Run cancelled")
+            try:
+                await asyncio.wait_for(pause_event.wait(), timeout=0.25)
+            except asyncio.TimeoutError:
+                pass
+
+    async def _sleep_with_controls(
+        self,
+        duration: float,
+        cancel_event: Optional[asyncio.Event] = None,
+        pause_event: Optional[asyncio.Event] = None,
+    ) -> None:
+        deadline = time.monotonic() + duration
+        while True:
+            await self._wait_if_paused(cancel_event, pause_event)
+            if cancel_event and cancel_event.is_set():
+                raise asyncio.CancelledError("Run cancelled")
+
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return
+
+            if cancel_event:
+                try:
+                    await asyncio.wait_for(
+                        cancel_event.wait(),
+                        timeout=min(remaining, 0.25),
+                    )
+                    raise asyncio.CancelledError("Run cancelled")
+                except asyncio.TimeoutError:
+                    continue
+
+            await asyncio.sleep(min(remaining, 0.25))
+
+    @staticmethod
     async def _extract_slide_payloads(
         page: Page,
         slide_selector: str,
@@ -269,6 +348,16 @@ class ResponsePoller:
                         );
                     };
 
+                    const hasRetryIcon = (button) => {
+                        const paths = Array.from(
+                            button.querySelectorAll("svg path")
+                        ).map((path) => path.getAttribute("d") || "");
+                        return paths.some((d) =>
+                            d.includes("M21.8883 13.5") ||
+                            d.includes("M17 8H21.4")
+                        );
+                    };
+
                     return Array.from(document.querySelectorAll(slideSelector))
                         .filter(isVisible)
                         .map((slide) => {
@@ -282,18 +371,41 @@ class ResponsePoller:
                             const copyButton = Array.from(
                                 slide.querySelectorAll("button[type='button']")
                             ).find((btn) => isVisible(btn) && hasCopyIcon(btn));
+                            const retryButton = Array.from(
+                                slide.querySelectorAll("button[type='button']")
+                            ).find((btn) => isVisible(btn) && hasRetryIcon(btn));
                             const streamingNode = slide.querySelector(
                                 streamingSelector
                             );
+                            const errorNode = Array.from(
+                                slide.querySelectorAll("p, span, div")
+                            ).find((node) => {
+                                if (!isVisible(node)) return false;
+                                const text = (node.textContent || "").trim();
+                                return text.includes(
+                                    "Something went wrong with this response, please try again."
+                                );
+                            });
+
+                            // Strip code-block language labels (e.g. "HTML")
+                            // that appear at the start of innerText before an HTML tag
+                            let cleanText = "";
+                            let rawHtml = "";
+                            if (responseNode) {
+                                rawHtml = responseNode.innerHTML.trim();
+                                cleanText = responseNode.innerText.trim()
+                                    .replace(/^(HTML|CSS|JavaScript|JS|TypeScript|TS|Python|JSON|XML|Bash|Shell|SQL|Go|Rust|Java|Ruby|PHP)\\s*(?=<)/i, "");
+                            }
 
                             return {
                                 model_name: modelNode
                                     ? modelNode.textContent.trim()
                                     : null,
-                                response_text: responseNode
-                                    ? responseNode.innerText.trim()
-                                    : "",
+                                response_text: cleanText,
+                                response_html: rawHtml,
                                 has_copy_button: Boolean(copyButton),
+                                has_error: Boolean(errorNode),
+                                has_retry_button: Boolean(retryButton),
                                 has_streaming_indicator: Boolean(
                                     streamingNode && isVisible(streamingNode)
                                 ),
@@ -311,3 +423,62 @@ class ResponsePoller:
         except Exception as exc:
             logger.debug("Slide extraction failed for %s: %s", slide_selector, exc)
         return []
+
+    @staticmethod
+    async def _click_retry_button(
+        page: Page,
+        slide_selector: str,
+        slide_index: int,
+    ) -> bool:
+        try:
+            return bool(
+                await page.evaluate(
+                    """({ slideSelector, slideIndex }) => {
+                        const isVisible = (el) => {
+                            if (!el) return false;
+                            const style = window.getComputedStyle(el);
+                            const rect = el.getBoundingClientRect();
+                            return (
+                                style.display !== "none" &&
+                                style.visibility !== "hidden" &&
+                                rect.width > 0 &&
+                                rect.height > 0
+                            );
+                        };
+
+                        const hasRetryIcon = (button) => {
+                            const paths = Array.from(
+                                button.querySelectorAll("svg path")
+                            ).map((path) => path.getAttribute("d") || "");
+                            return paths.some((d) =>
+                                d.includes("M21.8883 13.5") ||
+                                d.includes("M17 8H21.4")
+                            );
+                        };
+
+                        const slides = Array.from(
+                            document.querySelectorAll(slideSelector)
+                        ).filter(isVisible);
+                        const slide = slides[slideIndex];
+                        if (!slide) return false;
+
+                        const retryButton = Array.from(
+                            slide.querySelectorAll("button[type='button']")
+                        ).find((btn) => isVisible(btn) && hasRetryIcon(btn));
+                        if (!retryButton) return false;
+                        retryButton.click();
+                        return true;
+                    }""",
+                    {
+                        "slideSelector": slide_selector,
+                        "slideIndex": slide_index,
+                    },
+                )
+            )
+        except Exception as exc:
+            logger.debug(
+                "Retry button click failed for slide %d: %s",
+                slide_index,
+                exc,
+            )
+            return False

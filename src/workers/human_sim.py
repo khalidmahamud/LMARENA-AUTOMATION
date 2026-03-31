@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import logging
 import random
+from typing import List
 
 from playwright.async_api import ElementHandle, Page
 
@@ -151,17 +153,19 @@ class HumanSimulator:
         page: Page,
         selector: str,
         text: str,
+        verify: bool = True,
     ) -> ElementHandle:
         """Populate the target element with *text* immediately."""
         element = await self._find_visible_element(page, selector)
         await self._paste_value(page, element, text)
 
-        current = self._normalize_text(await self._read_element_text(element))
-        expected = self._normalize_text(text)
-        if current != expected:
-            raise RuntimeError(
-                f"Pasted value did not match the requested text for {selector}"
-            )
+        if verify:
+            current = self._normalize_text(await self._read_element_text(element))
+            expected = self._normalize_text(text)
+            if current != expected:
+                raise RuntimeError(
+                    f"Pasted value did not match the requested text for {selector}"
+                )
 
         logger.debug("Pasted %d characters into %s", len(text), selector)
         return element
@@ -184,6 +188,134 @@ class HumanSimulator:
         await self.click_element(page, element)
 
         logger.debug("Clicked %s", selector)
+
+    async def paste_images(
+        self,
+        page: Page,
+        element: ElementHandle,
+        images: List[dict],
+    ) -> None:
+        """Paste images into a Tiptap/ProseMirror editor via clipboard events.
+
+        Each dict must have ``data`` (base64), ``mime_type``, and ``filename``.
+        """
+        if not images:
+            return
+
+        async def find_image_input() -> ElementHandle | None:
+            handle = await element.evaluate_handle(
+                """(el) => {
+                const isImageInput = (input) => {
+                    if (!(input instanceof HTMLInputElement)) return false;
+                    if (input.type !== "file") return false;
+                    const accept = (input.accept || "").toLowerCase();
+                    return (
+                        !accept ||
+                        accept.includes("image/") ||
+                        accept.includes(".png") ||
+                        accept.includes(".jpg") ||
+                        accept.includes(".jpeg") ||
+                        accept.includes(".webp") ||
+                        accept.includes(".gif")
+                    );
+                };
+
+                const inScope = el.closest("form") || document;
+                const scopedInputs = Array.from(
+                    inScope.querySelectorAll('input[type="file"]')
+                ).filter(isImageInput);
+                if (scopedInputs.length) return scopedInputs[scopedInputs.length - 1];
+
+                const allInputs = Array.from(
+                    document.querySelectorAll('input[type="file"]')
+                ).filter(isImageInput);
+                return allInputs.length ? allInputs[allInputs.length - 1] : null;
+            }"""
+            )
+            return handle.as_element()
+
+        file_input = await find_image_input()
+        if file_input is None:
+            add_files_button = await page.query_selector(
+                "button[aria-label='Add files and more']"
+            )
+            if add_files_button is not None:
+                try:
+                    await add_files_button.click()
+                    await asyncio.sleep(random.uniform(0.25, 0.5))
+                    file_input = await find_image_input()
+                except Exception as exc:
+                    logger.warning(
+                        "Add files button click failed before upload: %s",
+                        exc,
+                    )
+
+        if file_input is not None:
+            try:
+                await file_input.set_input_files(
+                    [
+                        {
+                            "name": img.get("filename", "image.png"),
+                            "mimeType": img["mime_type"],
+                            "buffer": base64.b64decode(img["data"]),
+                        }
+                        for img in images
+                    ]
+                )
+                await asyncio.sleep(random.uniform(0.4, 0.8))
+                logger.debug(
+                    "Uploaded %d image(s) through file input",
+                    len(images),
+                )
+                return
+            except Exception as exc:
+                logger.warning(
+                    "File input upload failed, falling back to clipboard paste: %s",
+                    exc,
+                )
+
+        await element.click()
+        await asyncio.sleep(random.uniform(0.15, 0.35))
+
+        for img in images:
+            await page.evaluate(
+                """async ({ el, base64Data, mimeType, fileName }) => {
+                    const resp = await fetch(
+                        `data:${mimeType};base64,${base64Data}`
+                    );
+                    const blob = await resp.blob();
+                    const file = new File([blob], fileName, { type: mimeType });
+                    const dt = new DataTransfer();
+                    dt.items.add(file);
+                    const pasteEvent = new ClipboardEvent("paste", {
+                        bubbles: true,
+                        cancelable: true,
+                        clipboardData: dt,
+                    });
+                    el.dispatchEvent(pasteEvent);
+                }""",
+                {
+                    "el": element,
+                    "base64Data": img["data"],
+                    "mimeType": img["mime_type"],
+                    "fileName": img.get("filename", "image.png"),
+                },
+            )
+            await asyncio.sleep(random.uniform(0.2, 0.4))
+
+        # Verify images appeared
+        img_count = await element.evaluate(
+            "el => el.querySelectorAll('img').length"
+        )
+        if img_count < len(images):
+            logger.warning(
+                "Expected %d images in editor, found %d — "
+                "some images may not have been accepted",
+                len(images),
+                img_count,
+            )
+        else:
+            logger.debug("Pasted %d image(s) into editor", len(images))
 
     @staticmethod
     async def random_delay(base_seconds: float, jitter_pct: float) -> None:
