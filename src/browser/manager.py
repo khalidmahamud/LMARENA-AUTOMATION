@@ -30,6 +30,7 @@ class BrowserManager:
         self._run_profile_base: Optional[Path] = None
         self._tmp_root = Path(".tmp_browser_profiles")
         self._context_dirs: Dict[int, Path] = {}
+        self._incognito_mode = self._config.browser.incognito
 
     async def start(self) -> None:
         """Initialise the Playwright engine (call once at server startup)."""
@@ -42,6 +43,7 @@ class BrowserManager:
         self,
         count: int,
         display_override: Optional[DisplayConfig] = None,
+        incognito: Optional[bool] = None,
     ) -> List[BrowserContext]:
         """Launch *count* isolated persistent browser contexts.
 
@@ -54,6 +56,9 @@ class BrowserManager:
         await self.close_contexts()
 
         disp = display_override or self._config.display
+        self._incognito_mode = (
+            self._config.browser.incognito if incognito is None else incognito
+        )
 
         self._tiles = compute_tile_positions(
             count=count,
@@ -78,29 +83,7 @@ class BrowserManager:
                     dir=str(self._run_profile_base),
                 )
             )
-
-            ctx = await self._playwright.chromium.launch_persistent_context(
-                user_data_dir=str(profile_dir),
-                headless=self._config.browser.headless,
-                no_viewport=True,
-                args=[
-                    "--incognito",
-                    "--disable-blink-features=AutomationControlled",
-                    "--disable-dev-shm-usage",
-                    "--no-first-run",
-                    f"--window-position={tile.x},{tile.y}",
-                    f"--window-size={tile.width},{tile.height}",
-                ],
-                ignore_default_args=["--enable-automation"],
-            )
-
-            # Grant clipboard access so copy-button extraction works
-            await ctx.grant_permissions(["clipboard-read", "clipboard-write"])
-
-            # Apply stealth to existing and future pages
-            from src.browser.stealth import apply_stealth
-
-            await apply_stealth(ctx)
+            ctx = await self._launch_context(profile_dir, tile)
 
             self._contexts.append(ctx)
             self._context_dirs[i] = profile_dir
@@ -172,26 +155,7 @@ class BrowserManager:
 
         # Launch new context at the same tile position
         tile = self._tiles[index]
-        ctx = await self._playwright.chromium.launch_persistent_context(
-            user_data_dir=str(profile_dir),
-            headless=self._config.browser.headless,
-            no_viewport=True,
-            args=[
-                "--incognito",
-                "--disable-blink-features=AutomationControlled",
-                "--disable-dev-shm-usage",
-                "--no-first-run",
-                f"--window-position={tile.x},{tile.y}",
-                f"--window-size={tile.width},{tile.height}",
-            ],
-            ignore_default_args=["--enable-automation"],
-        )
-
-        await ctx.grant_permissions(["clipboard-read", "clipboard-write"])
-
-        from src.browser.stealth import apply_stealth
-
-        await apply_stealth(ctx)
+        ctx = await self._launch_context(profile_dir, tile)
 
         self._contexts[index] = ctx
         self._context_dirs[index] = profile_dir
@@ -201,3 +165,34 @@ class BrowserManager:
     @property
     def contexts(self) -> List[BrowserContext]:
         return list(self._contexts)
+
+    def _launch_args(self, tile: TileLayout) -> List[str]:
+        args = [
+            "--disable-blink-features=AutomationControlled",
+            "--disable-dev-shm-usage",
+            "--no-first-run",
+            f"--window-position={tile.x},{tile.y}",
+            f"--window-size={tile.width},{tile.height}",
+        ]
+        if self._incognito_mode:
+            args.insert(0, "--incognito")
+        return args
+
+    async def _launch_context(
+        self,
+        profile_dir: Path,
+        tile: TileLayout,
+    ) -> BrowserContext:
+        ctx = await self._playwright.chromium.launch_persistent_context(
+            user_data_dir=str(profile_dir),
+            headless=self._config.browser.headless,
+            no_viewport=True,
+            args=self._launch_args(tile),
+            ignore_default_args=["--enable-automation"],
+        )
+
+        # Apply stealth to existing and future pages
+        from src.browser.stealth import apply_stealth
+
+        await apply_stealth(ctx)
+        return ctx

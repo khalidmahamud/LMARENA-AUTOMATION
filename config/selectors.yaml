@@ -5,9 +5,9 @@ prompt_textarea: "form textarea[name='message'], div.tiptap[contenteditable='tru
 submit_button: "form button[type='submit']:has(svg), form button[type='submit'], button[data-testid='send-button'], button[aria-label='Send']"
 
 # Model pickers — side-by-side has two model dropdown buttons
-model_dropdown: "button[aria-haspopup='dialog'][class*='max-w-']"
-model_search_input: "input[cmdk-input]"
-model_option: "[cmdk-item][role='option']"
+model_dropdown: "button[aria-haspopup='dialog']"
+model_search_input: "input[cmdk-input], input[placeholder='Search models'], input[placeholder*='Search model']"
+model_option: "[cmdk-item][role='option'], [cmdk-item], [role='option'][data-value], button[type='button']:has(span.font-mono)"
 
 # Two response panels (side-by-side produces one prose response inside each slide)
 response_panel: "[role='group'][aria-roledescription='slide'] .prose"
@@ -19,9 +19,10 @@ copy_button: "button[data-slot='tooltip-trigger']"
 # Model name display (both model buttons have span.truncate)
 model_name_label: "button[aria-haspopup='dialog'][class*='max-w-'] span.truncate.text-left"
 
-# Terms of Use dialog
-tos_dialog: "[role='dialog']"
+# Terms of Use / cookie dialogs
 tos_agree_button: "[role='dialog'] button[type='submit']"
+cookie_accept_button: "[role='dialog'] button:has-text('Accept Cookies')"
+voting_onboarding_got_it_button: "[role='dialog'] button:has-text('Got it')"
 
 # Login dialog (dismiss by clicking the X — it's a direct child of the dialog)
 login_dialog_close: "[role='dialog'] > button"
@@ -35,4 +36,3 @@ challenge:
 # Streaming indicators
 streaming_indicator: ".streaming, [data-streaming='true'], .animate-pulse"
 stop_generation_button: "button[aria-label='Stop generation']"
-

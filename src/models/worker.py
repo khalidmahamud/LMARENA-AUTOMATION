@@ -17,6 +17,7 @@ class WorkerState(str, Enum):
     READY = "ready"
     SELECTING_MODEL = "selecting_model"
     PASTING = "pasting"
+    PREPARED = "prepared"
     SUBMITTING = "submitting"
     POLLING = "polling"
     COMPLETE = "complete"

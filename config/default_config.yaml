@@ -6,6 +6,7 @@ browser:
     width: 900
     height: 800
   headless: false
+  incognito: false
 
 display:
   monitor_count: 1

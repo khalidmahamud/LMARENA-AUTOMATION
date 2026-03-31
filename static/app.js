@@ -7,6 +7,8 @@
   let ws = null;
   let connected = false;
   let running = false;
+  let paused = false;
+  let pauseTransitionPending = false;
   let autoScroll = true;
   let runStartTime = null;
   let runResults = null; // last run results for JSON view
@@ -32,6 +34,8 @@
   const retainOutputInput = document.getElementById("retain-output");
   const zoomInput         = document.getElementById("zoom");
   const clearCookiesInput = document.getElementById("clear-cookies");
+  const incognitoModeInput = document.getElementById("incognito-mode");
+  const simultaneousStartInput = document.getElementById("simultaneous-start");
   const systemPromptInput = document.getElementById("system-prompt");
   const combineWithFirstInput = document.getElementById("combine-with-first");
   const promptInput       = document.getElementById("prompt");
@@ -153,6 +157,12 @@
       case "run_cancelled":
         onRunCancelled();
         break;
+      case "run_paused":
+        onRunPaused();
+        break;
+      case "run_resumed":
+        onRunResumed();
+        break;
       case "challenge_detected":
         appendLog("warning", msg.message, msg.worker_id);
         highlightWorker(msg.worker_id, "challenge");
@@ -165,9 +175,7 @@
         showToast(msg.message, "error");
         // Reset UI if run hasn't actually started
         if (running) {
-          running = false;
-          startBtn.disabled = false;
-          stopBtn.disabled = true;
+          resetRunControlState();
         }
         break;
       case "toast":
@@ -190,6 +198,25 @@
       statusBadge.className = "status-badge disconnected";
       statusText.textContent = "Disconnected";
     }
+  }
+
+  function updateStartButton() {
+    if (!running) {
+      startBtn.innerHTML = "&#8853; Start Run";
+      startBtn.disabled = false;
+      return;
+    }
+
+    startBtn.disabled = pauseTransitionPending;
+    startBtn.innerHTML = paused ? "&#9654; Resume" : "&#9208; Pause";
+  }
+
+  function resetRunControlState() {
+    running = false;
+    paused = false;
+    pauseTransitionPending = false;
+    updateStartButton();
+    stopBtn.disabled = true;
   }
 
   // ══════════════════════════════════════
@@ -260,6 +287,12 @@
       badge.classList.add("done");
       badge.innerHTML = "&#10003; Done";
       info.textContent = `${elapsed}s`;
+    } else if (msg.state === "prepared") {
+      dot.classList.add("orange");
+      fill.classList.add("orange");
+      badge.classList.add("active");
+      badge.innerHTML = "&#9201; Prepared";
+      info.textContent = "Waiting to submit";
     } else if (msg.state === "error") {
       card.classList.add("state-error");
       dot.classList.add("red");
@@ -337,6 +370,14 @@
     if (msg.state === "complete") {
       colStatus.innerHTML = '<span class="badge badge-done">&#10003; Done</span>';
       colTime.textContent = `${elapsed}s`;
+    } else if (msg.state === "prepared") {
+      colStatus.innerHTML = '<span class="badge badge-active">&#9201; Prepared</span>';
+      colA.className = "col-model-a text-queued";
+      colA.textContent = "Prepared \u2014 waiting to submit";
+      colB.className = "col-model-b text-queued";
+      colB.textContent = "";
+      colTime.textContent = "\u2014";
+      colTokens.textContent = "\u2014";
     } else if (msg.state === "error") {
       colStatus.innerHTML = '<span class="badge badge-error">&#10007; Error</span>';
       colA.className = "col-model-a";
@@ -354,9 +395,13 @@
     } else if (msg.state === "idle") {
       // Calculate estimated start time based on gap
       const gap = parseFloat(submissionGapInput.value) || 30;
-      const startsIn = gap * msg.worker_id;
       colA.className = "col-model-a text-queued";
-      colA.textContent = startsIn > 0 ? `Queued \u2014 starts in ~${startsIn}s` : "Queued";
+      if (simultaneousStartInput.checked) {
+        colA.textContent = "Queued \u2014 prepares with the batch";
+      } else {
+        const startsIn = gap * msg.worker_id;
+        colA.textContent = startsIn > 0 ? `Queued \u2014 starts in ~${startsIn}s` : "Queued";
+      }
       colB.className = "col-model-b text-queued";
       colB.textContent = "";
       colStatus.innerHTML = '<span class="badge badge-queued">&#9201; Queued</span>';
@@ -437,6 +482,11 @@
       exportBtn.disabled = false;
     }
 
+    if (paused) {
+      etaText.textContent = "Paused";
+      return;
+    }
+
     // Show batch progress in ETA label
     if (msg.batch && msg.total_batches && msg.total_batches > 1) {
       const batchLabel = `Batch ${msg.batch}/${msg.total_batches}`;
@@ -460,9 +510,7 @@
   // ══════════════════════════════════════
 
   function onRunComplete(msg) {
-    running = false;
-    startBtn.disabled = false;
-    stopBtn.disabled = true;
+    resetRunControlState();
     exportBtn.disabled = false;
     progressFill.style.width = "100%";
     progressPct.textContent = "100%";
@@ -488,13 +536,27 @@
   // ══════════════════════════════════════
 
   function onRunCancelled() {
-    running = false;
-    startBtn.disabled = false;
-    stopBtn.disabled = true;
+    resetRunControlState();
     progressFill.style.width = "0%";
     progressPct.textContent = "0%";
     etaText.textContent = "Cancelled";
     appendLog("warning", "Run cancelled \u2014 all windows closed");
+  }
+
+  function onRunPaused() {
+    if (!running) return;
+    paused = true;
+    pauseTransitionPending = false;
+    updateStartButton();
+    etaText.textContent = "Paused";
+  }
+
+  function onRunResumed() {
+    if (!running) return;
+    paused = false;
+    pauseTransitionPending = false;
+    updateStartButton();
+    etaText.textContent = "Resuming...";
   }
 
   // ══════════════════════════════════════
@@ -526,6 +588,15 @@
   // ══════════════════════════════════════
 
   startBtn.addEventListener("click", () => {
+    if (running) {
+      if (pauseTransitionPending) return;
+      pauseTransitionPending = true;
+      updateStartButton();
+      etaText.textContent = paused ? "Resuming..." : "Pausing...";
+      send({ type: paused ? "resume_run" : "pause_run" });
+      return;
+    }
+
     const isFileMode = promptMode === "file";
     let singlePrompt = "";
     let prompts = null;
@@ -546,10 +617,12 @@
     }
 
     running = true;
+    paused = false;
+    pauseTransitionPending = false;
     runStartTime = Date.now();
     workerStartTimes = {};
     workerData = {};
-    startBtn.disabled = true;
+    updateStartButton();
     stopBtn.disabled = false;
     exportBtn.disabled = true;
     workersContainer.innerHTML = "";
@@ -590,6 +663,8 @@
       model_b: modelBInput.value.trim() || null,
       retain_output: retainOutputInput.value,
       clear_cookies: clearCookiesInput.checked,
+      incognito: incognitoModeInput.checked,
+      simultaneous_start: simultaneousStartInput.checked,
       zoom_pct: parseInt(zoomInput.value, 10) || 100,
       monitor_count: parseInt(monitorCountInput.value, 10) || 1,
       monitor_width: monW,
@@ -607,6 +682,9 @@
           appendLog("info", "System prompt will be sent first before each batch prompt.");
         }
       }
+      if (simultaneousStartInput.checked) {
+        appendLog("info", "All windows will prepare in parallel, then submit one by one using the configured gap.");
+      }
       appendLog("info", `Starting run: ${prompts.length} prompt(s), ${windowCount} window(s), ${batches} batch(es)...`);
     } else {
       if (systemPromptInput.value.trim()) {
@@ -615,6 +693,9 @@
         } else {
           appendLog("info", "System prompt will be sent first before the manual prompt.");
         }
+      }
+      if (simultaneousStartInput.checked) {
+        appendLog("info", "All windows will prepare in parallel, then submit one by one using the configured gap.");
       }
       appendLog("info", `Starting run with ${windowCount} window(s)...`);
     }
@@ -1124,6 +1205,8 @@
     { el: retainOutputInput,  key: "retain_output" },
     { el: zoomInput,          key: "zoom" },
     { el: clearCookiesInput,  key: "clear_cookies", checkbox: true },
+    { el: incognitoModeInput, key: "incognito_mode", checkbox: true },
+    { el: simultaneousStartInput, key: "simultaneous_start", checkbox: true },
     { el: monitorCountInput,  key: "monitor_count" },
     { el: monitorWidthInput,  key: "monitor_width" },
     { el: monitorHeightInput, key: "monitor_height" },
@@ -1217,6 +1300,7 @@
 
   initScreenDefaults();
   updateTilePreview();
+  updateStartButton();
 
   // Auto-expand system prompt if it has saved content
   if (systemPromptInput.value.trim()) {

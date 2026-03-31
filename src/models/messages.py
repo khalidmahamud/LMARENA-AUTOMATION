@@ -21,6 +21,8 @@ class StartRunRequest(BaseModel):
     model_b: Optional[str] = None
     retain_output: str = Field(default="both")  # "both", "model_a", "model_b"
     clear_cookies: bool = False
+    incognito: bool = False
+    simultaneous_start: bool = False
     zoom_pct: int = Field(default=100, ge=25, le=200)
     # Display / tiling overrides (sent from UI, fall back to config defaults)
     monitor_count: Optional[int] = Field(default=None, ge=1, le=8)
@@ -49,11 +51,25 @@ class StopRunRequest(BaseModel):
     type: Literal["stop_run"] = "stop_run"
 
 
+class PauseRunRequest(BaseModel):
+    type: Literal["pause_run"] = "pause_run"
+
+
+class ResumeRunRequest(BaseModel):
+    type: Literal["resume_run"] = "resume_run"
+
+
 class PingRequest(BaseModel):
     type: Literal["ping"] = "ping"
 
 
-InboundMessage = Union[StartRunRequest, StopRunRequest, PingRequest]
+InboundMessage = Union[
+    StartRunRequest,
+    StopRunRequest,
+    PauseRunRequest,
+    ResumeRunRequest,
+    PingRequest,
+]
 
 
 # ──── Outbound (Backend → GUI) ────
@@ -116,6 +132,14 @@ class RunCancelledMessage(BaseModel):
     type: Literal["run_cancelled"] = "run_cancelled"
 
 
+class RunPausedMessage(BaseModel):
+    type: Literal["run_paused"] = "run_paused"
+
+
+class RunResumedMessage(BaseModel):
+    type: Literal["run_resumed"] = "run_resumed"
+
+
 class ChallengeDetectedMessage(BaseModel):
     type: Literal["challenge_detected"] = "challenge_detected"
     worker_id: int
@@ -146,6 +170,8 @@ OutboundMessage = Union[
     LogMessage,
     RunCompleteMessage,
     RunCancelledMessage,
+    RunPausedMessage,
+    RunResumedMessage,
     ChallengeDetectedMessage,
     ToastMessage,
     PongMessage,

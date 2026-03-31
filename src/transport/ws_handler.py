@@ -9,7 +9,9 @@ from fastapi import WebSocket, WebSocketDisconnect
 
 from src.models.messages import (
     ErrorMessage,
+    PauseRunRequest,
     PongMessage,
+    ResumeRunRequest,
     StartRunRequest,
 )
 from src.orchestrator.run_orchestrator import RunOrchestrator
@@ -70,6 +72,14 @@ class WsHandler:
                 elif msg_type == "stop_run":
                     await self._handle_stop_run()
 
+                elif msg_type == "pause_run":
+                    request = PauseRunRequest(**data)
+                    await self._handle_pause_run(request)
+
+                elif msg_type == "resume_run":
+                    request = ResumeRunRequest(**data)
+                    await self._handle_resume_run(request)
+
                 elif msg_type == "ping":
                     await websocket.send_text(
                         PongMessage().model_dump_json()
@@ -117,6 +127,22 @@ class WsHandler:
         # Kill the background task so it doesn't keep running after browsers close
         if self._run_task and not self._run_task.done():
             self._run_task.cancel()
+
+    async def _handle_pause_run(self, request: PauseRunRequest) -> None:
+        del request
+        if self._orchestrator:
+            try:
+                await self._orchestrator.pause()
+            except Exception as exc:
+                logger.error("Error during pause: %s", exc)
+
+    async def _handle_resume_run(self, request: ResumeRunRequest) -> None:
+        del request
+        if self._orchestrator:
+            try:
+                await self._orchestrator.resume()
+            except Exception as exc:
+                logger.error("Error during resume: %s", exc)
 
     @property
     def orchestrator(self) -> Optional[RunOrchestrator]:

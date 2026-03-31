@@ -32,6 +32,7 @@ class ResponsePoller:
         selectors: SelectorRegistry,
         worker_id: int = -1,
         cancel_event: Optional[asyncio.Event] = None,
+        pause_event: Optional[asyncio.Event] = None,
         baseline_responses: Optional[Tuple[str, str]] = None,
     ) -> Tuple[Tuple[str, str], Tuple[Optional[str], Optional[str]]]:
         """Poll until both responses are stable.
@@ -65,6 +66,8 @@ class ResponsePoller:
         await self._hide_thinking_boxes(page)
 
         while time.monotonic() < deadline:
+            await self._wait_if_paused(cancel_event, pause_event)
+
             if cancel_event and cancel_event.is_set():
                 raise asyncio.CancelledError("Run cancelled")
 
@@ -159,16 +162,11 @@ class ResponsePoller:
                 return (cur_a, cur_b), model_names
 
             # Cancellation-aware sleep
-            if cancel_event:
-                try:
-                    await asyncio.wait_for(
-                        cancel_event.wait(), timeout=interval
-                    )
-                    raise asyncio.CancelledError("Run cancelled")
-                except asyncio.TimeoutError:
-                    pass
-            else:
-                await asyncio.sleep(interval)
+            await self._sleep_with_controls(
+                interval,
+                cancel_event=cancel_event,
+                pause_event=pause_event,
+            )
 
         raise PollingTimeoutError(
             worker_id=worker_id,
@@ -236,6 +234,50 @@ class ResponsePoller:
                 exc,
             )
             return False
+
+    @staticmethod
+    async def _wait_if_paused(
+        cancel_event: Optional[asyncio.Event],
+        pause_event: Optional[asyncio.Event],
+    ) -> None:
+        if pause_event is None:
+            return
+
+        while not pause_event.is_set():
+            if cancel_event and cancel_event.is_set():
+                raise asyncio.CancelledError("Run cancelled")
+            try:
+                await asyncio.wait_for(pause_event.wait(), timeout=0.25)
+            except asyncio.TimeoutError:
+                pass
+
+    async def _sleep_with_controls(
+        self,
+        duration: float,
+        cancel_event: Optional[asyncio.Event] = None,
+        pause_event: Optional[asyncio.Event] = None,
+    ) -> None:
+        deadline = time.monotonic() + duration
+        while True:
+            await self._wait_if_paused(cancel_event, pause_event)
+            if cancel_event and cancel_event.is_set():
+                raise asyncio.CancelledError("Run cancelled")
+
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return
+
+            if cancel_event:
+                try:
+                    await asyncio.wait_for(
+                        cancel_event.wait(),
+                        timeout=min(remaining, 0.25),
+                    )
+                    raise asyncio.CancelledError("Run cancelled")
+                except asyncio.TimeoutError:
+                    continue
+
+            await asyncio.sleep(min(remaining, 0.25))
 
     @staticmethod
     async def _extract_slide_payloads(
