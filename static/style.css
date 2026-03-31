@@ -1212,6 +1212,22 @@ textarea#prompt:focus {
   color: var(--green);
 }
 
+#reset-stats-btn {
+  background: none;
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+  font-size: 0.85rem;
+  cursor: pointer;
+  padding: 2px 8px;
+  border-radius: 4px;
+  margin-left: 4px;
+  transition: color 0.2s, border-color 0.2s;
+}
+#reset-stats-btn:hover {
+  color: var(--text);
+  border-color: var(--text);
+}
+
 .footer-powered {
   font-size: 0.7rem;
   color: var(--text-dim);

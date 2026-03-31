@@ -1190,6 +1190,11 @@
 
   renderStats();
 
+  document.getElementById("reset-stats-btn").addEventListener("click", () => {
+    localStorage.removeItem(STATS_KEY);
+    renderStats();
+  });
+
   // ══════════════════════════════════════
   // Settings Persistence (localStorage)
   // ══════════════════════════════════════
