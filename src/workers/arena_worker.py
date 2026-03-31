@@ -15,6 +15,7 @@ from src.core.exceptions import (
     LoginDialogError,
     NavigationError,
     RateLimitError,
+    SubmissionError,
 )
 from src.core.state_machine import WorkerStateMachine
 from src.models.config import AppConfig
@@ -92,6 +93,10 @@ class ArenaWorker:
                 data={"level": level, "text": text},
             )
         )
+
+    @staticmethod
+    def _normalize_text(value: Optional[str]) -> str:
+        return " ".join((value or "").replace("\u200b", "").split()).strip()
 
     @staticmethod
     async def _wait_if_paused(
@@ -786,17 +791,110 @@ class ArenaWorker:
 
         await self.state_machine.transition(WorkerState.SUBMITTING)
         textarea_sel = self._selectors.get("prompt_textarea")
-        prompt_element = await self._page.wait_for_selector(
-            textarea_sel,
-            state="visible",
-            timeout=5_000,
-        )
         submit_sel = self._selectors.get("submit_button")
-        await self._submit_prompt_form(
-            prompt_element,
-            submit_sel,
-            pause_event=pause_event,
-        )
+        submit_accepted = False
+        last_snapshot: Optional[dict] = None
+
+        for attempt in range(1, 4):
+            prompt_element = await self._page.wait_for_selector(
+                textarea_sel,
+                state="visible",
+                timeout=5_000,
+            )
+            await self._submit_prompt_form(
+                prompt_element,
+                submit_sel,
+                pause_event=pause_event,
+            )
+
+            last_snapshot = await self._wait_for_submission_acceptance(
+                expected_prompt=self._last_prompt or "",
+                pause_event=pause_event,
+                timeout_seconds=3.0,
+            )
+            if last_snapshot.get("accepted"):
+                submit_accepted = True
+                break
+
+            dialog_dismissed = await self._dismiss_known_dialogs(
+                wait_seconds=1.5,
+                pause_event=pause_event,
+            )
+
+            await self._ensure_active(pause_event)
+            challenge = await detect_challenge(self._page)
+            if challenge != ChallengeType.NONE:
+                if retry_on_challenge <= 0:
+                    raise ChallengeDetectedError(self._id, challenge.value)
+                if self.state_machine.state != WorkerState.WAITING_FOR_CHALLENGE:
+                    await self.state_machine.transition(
+                        WorkerState.WAITING_FOR_CHALLENGE
+                    )
+                await self._log(
+                    "warning",
+                    f"Challenge ({challenge.value}) appeared after submit - "
+                    "closing this window, opening a new one, and retrying",
+                )
+                await self._handle_challenge(
+                    challenge,
+                    max_retries=1,
+                    clear_cookies=False,
+                    pause_event=pause_event,
+                )
+                if self.state_machine.state != WorkerState.READY:
+                    await self.state_machine.transition(WorkerState.READY)
+                return await self.submit_prompt(
+                    prompt=self._last_prompt,
+                    model_a=self._last_model_a,
+                    model_b=self._last_model_b,
+                    retry_on_challenge=retry_on_challenge - 1,
+                    pause_event=pause_event,
+                )
+
+            last_snapshot = await self._wait_for_submission_acceptance(
+                expected_prompt=self._last_prompt or "",
+                pause_event=pause_event,
+                timeout_seconds=2.0,
+            )
+            if last_snapshot.get("accepted"):
+                submit_accepted = True
+                if dialog_dismissed:
+                    await self._log(
+                        "info",
+                        "Dialog dismissed - submission accepted",
+                    )
+                break
+
+            if attempt < 3:
+                reason = (
+                    "dialog blocked the first submit"
+                    if dialog_dismissed
+                    else "composer still contained the prompt"
+                )
+                await self._log(
+                    "warning",
+                    f"Submit attempt {attempt} was not accepted ({reason}); retrying",
+                )
+
+        if not submit_accepted:
+            details = ""
+            if last_snapshot:
+                details = (
+                    f" prompt_matches={last_snapshot.get('prompt_matches_expected')}"
+                    f", textarea_visible={last_snapshot.get('textarea_visible')}"
+                    f", submit_enabled={last_snapshot.get('submit_enabled')}"
+                    f", stop_visible={last_snapshot.get('stop_visible')}"
+                )
+            raise SubmissionError(
+                f"Prompt submission was not accepted after 3 attempts.{details}",
+                self._id,
+            )
+
+        await self._log("info", "Submitted")
+
+        # Transition to polling
+        await self.state_machine.transition(WorkerState.POLLING)
+        return
 
         # Cookie, TOS, onboarding, or login dialogs may pop up after submit.
         # Dismiss the passive ones here and let detect_challenge() catch login
@@ -978,6 +1076,15 @@ class ArenaWorker:
                     "debug",
                     f"Direct submit button click failed: {exc}",
                 )
+            try:
+                await self._ensure_active(pause_event)
+                await submit_button.click(force=True, timeout=2_000)
+                return
+            except Exception as exc:
+                await self._log(
+                    "debug",
+                    f"Forced submit button click failed: {exc}",
+                )
 
         await self._log(
             "warning",
@@ -994,6 +1101,114 @@ class ArenaWorker:
                 "warning",
                 "No non-dialog submit button was found; Enter fallback used",
             )
+
+    async def _get_submission_snapshot(
+        self,
+        expected_prompt: str,
+    ) -> dict:
+        assert self._page is not None
+
+        textarea_sel = self._selectors.get("prompt_textarea")
+        submit_sel = self._selectors.get("submit_button")
+        stop_sel = self._selectors.get("stop_generation_button")
+        slide_sel = self._selectors.get("response_slide")
+
+        snapshot = await self._page.evaluate(
+            """({ textareaSelector, submitSelector, stopSelector, slideSelector, expectedPrompt }) => {
+                const isVisible = (el) => {
+                    if (!el) return false;
+                    const style = window.getComputedStyle(el);
+                    const rect = el.getBoundingClientRect();
+                    return (
+                        style.display !== "none" &&
+                        style.visibility !== "hidden" &&
+                        rect.width > 0 &&
+                        rect.height > 0
+                    );
+                };
+
+                const isEnabled = (el) => {
+                    if (!el) return false;
+                    if (el.disabled) return false;
+                    if (el.getAttribute("aria-disabled") === "true") return false;
+                    return window.getComputedStyle(el).pointerEvents !== "none";
+                };
+
+                const normalize = (value) =>
+                    (value || "").replace(/\\u200b/g, "").replace(/\\s+/g, " ").trim();
+
+                const readPromptValue = (el) => {
+                    if (!el) return "";
+                    const tag = (el.tagName || "").toLowerCase();
+                    if (tag === "textarea" || tag === "input") {
+                        return el.value || "";
+                    }
+                    return el.innerText || el.textContent || "";
+                };
+
+                const textarea = Array.from(document.querySelectorAll(textareaSelector))
+                    .filter(isVisible)
+                    .pop() || null;
+                const currentPrompt = normalize(readPromptValue(textarea));
+                const expected = normalize(expectedPrompt);
+
+                const submitButtons = Array.from(document.querySelectorAll(submitSelector))
+                    .filter((btn) => !btn.closest('[role="dialog"]'))
+                    .filter(isVisible);
+                const submitButton = submitButtons.length
+                    ? submitButtons[submitButtons.length - 1]
+                    : null;
+                const stopVisible = Array.from(document.querySelectorAll(stopSelector))
+                    .some(isVisible);
+                const visibleSlides = Array.from(document.querySelectorAll(slideSelector))
+                    .filter(isVisible);
+
+                const promptMatchesExpected = Boolean(expected) && currentPrompt === expected;
+                const promptCleared = !currentPrompt;
+                const accepted =
+                    stopVisible ||
+                    promptCleared ||
+                    (Boolean(textarea) && !promptMatchesExpected);
+
+                return {
+                    accepted,
+                    current_prompt: currentPrompt,
+                    expected_prompt: expected,
+                    prompt_matches_expected: promptMatchesExpected,
+                    textarea_visible: Boolean(textarea),
+                    prompt_cleared: promptCleared,
+                    submit_visible: Boolean(submitButton),
+                    submit_enabled: submitButton ? isEnabled(submitButton) : false,
+                    stop_visible: stopVisible,
+                    response_slide_count: visibleSlides.length,
+                };
+            }""",
+            {
+                "textareaSelector": textarea_sel,
+                "submitSelector": submit_sel,
+                "stopSelector": stop_sel,
+                "slideSelector": slide_sel,
+                "expectedPrompt": expected_prompt,
+            },
+        )
+        return snapshot if isinstance(snapshot, dict) else {"accepted": False}
+
+    async def _wait_for_submission_acceptance(
+        self,
+        expected_prompt: str,
+        pause_event: Optional[asyncio.Event] = None,
+        timeout_seconds: float = 3.0,
+        poll_interval: float = 0.25,
+    ) -> dict:
+        deadline = asyncio.get_running_loop().time() + timeout_seconds
+        latest: dict = {"accepted": False}
+        while asyncio.get_running_loop().time() < deadline:
+            await self._ensure_active(pause_event)
+            latest = await self._get_submission_snapshot(expected_prompt)
+            if latest.get("accepted"):
+                return latest
+            await self._sleep_with_controls(poll_interval, pause_event)
+        return latest
 
     async def _find_model_dropdown_button(
         self, index: int
@@ -1303,6 +1518,12 @@ class ArenaWorker:
                 "warning",
                 f"No model {label} option found for '{model_name}'",
             )
+            try:
+                await self._ensure_active(pause_event)
+                await self._page.keyboard.press("Escape")
+                await self._sleep_with_controls(0.3, pause_event)
+            except Exception:
+                pass
         except Exception as exc:
             await self._log(
                 "warning",

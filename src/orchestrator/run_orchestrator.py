@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from typing import List, Optional, Tuple
 
 from src.browser.manager import BrowserManager
+from src.checkpoint.manager import CheckpointManager, RunCheckpoint
 from src.core.events import Event, EventBus, EventType
 from src.core.exceptions import AllWorkersFailedError, RunCancelledError
 from src.export.excel_exporter import export_to_csv, export_to_excel, export_to_json
@@ -41,21 +42,34 @@ class RunOrchestrator:
         config: AppConfig,
         event_bus: EventBus,
         browser_manager: BrowserManager,
+        checkpoint_manager: Optional[CheckpointManager] = None,
     ) -> None:
         self._config = config
         self._event_bus = event_bus
         self._browser_manager = browser_manager
+        self._checkpoint_manager = checkpoint_manager
         self._workers: List[ArenaWorker] = []
         self._cancelled = False
         self._paused = False
         self._resume_event = asyncio.Event()
         self._resume_event.set()
         self._current_run: Optional[RunResult] = None
+        self._active_request: Optional[StartRunRequest] = None
+        self._active_run_id: Optional[str] = None
+        self._active_started_at: Optional[datetime] = None
+        self._active_all_prompts: List[str] = []
+        self._active_total_batches: int = 0
+        self._active_batch_size: int = 0
+        self._completed_results: List[WindowResult] = []
+        self._live_results: dict[tuple[int, int], WindowResult] = {}
+        self._current_batch_index: Optional[int] = None
 
-    async def execute_run(self, request: StartRunRequest) -> RunResult:
+    async def execute_run(
+        self,
+        request: StartRunRequest,
+        resume_checkpoint: Optional[RunCheckpoint] = None,
+    ) -> RunResult:
         """Execute a complete run. Returns ``RunResult`` when done."""
-        run_id = str(uuid.uuid4())[:8]
-        started_at = datetime.now(timezone.utc)
         count = request.window_count
         self._cancelled = False
         self._paused = False
@@ -64,22 +78,52 @@ class RunOrchestrator:
         combine_with_first = request.combine_with_first and bool(system_prompt)
         simultaneous_start = request.simultaneous_start
 
-        # Determine all prompts and chunk into batches
-        all_prompts = request.prompts if request.prompts else [request.prompt]
+        if resume_checkpoint:
+            # Restore state from checkpoint
+            run_id = resume_checkpoint.run_id
+            started_at = datetime.fromisoformat(
+                resume_checkpoint.original_started_at
+            )
+            all_prompts = resume_checkpoint.all_prompts
+            start_batch_idx = resume_checkpoint.next_batch_index
+            restored_results = [
+                WindowResult(**wr)
+                for wr in resume_checkpoint.window_results
+            ]
+            if combine_with_first:
+                system_prompt = ""
+        else:
+            run_id = str(uuid.uuid4())[:8]
+            started_at = datetime.now(timezone.utc)
+            start_batch_idx = 0
+            restored_results = []
 
-        # Single prompt with multiple windows: replicate across all windows
-        if len(all_prompts) == 1 and count > 1:
-            all_prompts = all_prompts * count
+            # Determine all prompts and chunk into batches
+            all_prompts = request.prompts if request.prompts else [request.prompt]
 
-        if combine_with_first:
-            all_prompts = [f"{system_prompt}\n\n{p}" for p in all_prompts]
-            system_prompt = ""  # Skip Phase 1 entirely
+            # Single prompt with multiple windows: replicate across all windows
+            if len(all_prompts) == 1 and count > 1:
+                all_prompts = all_prompts * count
+
+            if combine_with_first:
+                all_prompts = [f"{system_prompt}\n\n{p}" for p in all_prompts]
+                system_prompt = ""  # Skip Phase 1 entirely
 
         batches: List[List[str]] = [
             all_prompts[i : i + count]
             for i in range(0, len(all_prompts), count)
         ]
         total_batches = len(batches)
+        self._active_request = request
+        self._active_run_id = run_id
+        self._active_started_at = started_at
+        self._active_all_prompts = list(all_prompts)
+        self._active_total_batches = total_batches
+        self._active_batch_size = count
+        self._completed_results = list(restored_results)
+        self._live_results = {}
+        self._current_batch_index = None
+        self._refresh_current_run()
 
         await self._event_bus.publish(
             Event(
@@ -90,6 +134,7 @@ class RunOrchestrator:
                     "prompt": all_prompts[0][:200],
                     "total_prompts": len(all_prompts),
                     "total_batches": total_batches,
+                    "resumed_from_batch": start_batch_idx if resume_checkpoint else None,
                 },
             )
         )
@@ -162,7 +207,7 @@ class RunOrchestrator:
 
         # Phase 4-6: Batch loop
         gap = request.submission_gap_seconds or self._config.timing.submission_gap_seconds
-        all_window_results: List[WindowResult] = []
+        all_window_results: List[WindowResult] = list(restored_results)
 
         if combine_with_first:
             await self._event_bus.publish(
@@ -176,6 +221,12 @@ class RunOrchestrator:
             )
 
         for batch_idx, batch_prompts in enumerate(batches):
+            if batch_idx < start_batch_idx:
+                continue  # Skip already-completed batches
+
+            self._current_batch_index = batch_idx
+            self._live_results = {}
+            self._refresh_current_run()
             await self._wait_if_paused()
             if self._cancelled:
                 break
@@ -628,12 +679,15 @@ class RunOrchestrator:
             await self._wait_if_paused()
             poll_tasks = [
                 asyncio.create_task(
-                    worker.poll_for_completion(
+                    self._poll_worker_for_batch(
+                        worker=worker,
+                        prompt=prompt,
+                        batch_idx=batch_idx,
+                        retain=request.retain_output,
                         baseline_responses=baseline_responses,
-                        pause_event=self._resume_event,
                     )
                 )
-                for _, worker, _, baseline_responses in submitted
+                for _, worker, prompt, baseline_responses in submitted
             ]
             if poll_tasks:
                 await asyncio.gather(*poll_tasks, return_exceptions=True)
@@ -647,16 +701,8 @@ class RunOrchestrator:
             retain = request.retain_output
             poll_failures: List[Tuple[int, ArenaWorker, str]] = []
             for worker_idx, worker, prompt, _ in submitted:
-                result = worker.get_result()
+                result = self._live_results.get((batch_idx, worker_idx))
                 if result and result.success:
-                    result.prompt = prompt
-                    result.batch_index = batch_idx
-                    if retain == "model_a":
-                        result.model_b_name = None
-                        result.model_b_response = None
-                    elif retain == "model_b":
-                        result.model_a_name = None
-                        result.model_a_response = None
                     batch_results.append(result)
                 else:
                     poll_failures.append((worker_idx, worker, prompt))
@@ -726,13 +772,20 @@ class RunOrchestrator:
 
             batch_results.sort(key=lambda item: item.worker_id)
             all_window_results.extend(batch_results)
+            self._completed_results = list(all_window_results)
+            self._live_results = {}
+            self._current_batch_index = None
 
             # Save incremental results after each batch
-            self._current_run = self._build_result(
-                run_id, all_prompts, total_batches,
-                started_at, all_window_results,
-            )
+            self._refresh_current_run()
             self._save_incremental(self._current_run)
+
+            # Save checkpoint for resume capability
+            if self._checkpoint_manager:
+                self._save_checkpoint(
+                    run_id, request, all_prompts, batch_idx,
+                    count, total_batches, all_window_results, started_at,
+                )
 
             # Emit batch complete progress
             await self._event_bus.publish(
@@ -778,7 +831,14 @@ class RunOrchestrator:
             run_result.completed_at - started_at
         ).total_seconds()
         self._current_run = run_result
+        self._completed_results = list(all_window_results)
+        self._live_results = {}
+        self._current_batch_index = None
         self._save_incremental(run_result)
+
+        # Mark checkpoint as completed
+        if self._checkpoint_manager:
+            self._checkpoint_manager.mark_completed(run_id)
 
         await self._event_bus.publish(
             Event(
@@ -811,8 +871,21 @@ class RunOrchestrator:
             run_id, all_prompts, total_batches, started_at, partial_results,
         )
         self._current_run = run_result
+        self._completed_results = list(partial_results)
+        self._live_results = {}
+        self._current_batch_index = None
         if partial_results:
             self._save_incremental(run_result)
+
+        # Save checkpoint so the run can be resumed later
+        if self._checkpoint_manager:
+            completed_batches = len(partial_results) // count if count else 0
+            if completed_batches < total_batches and completed_batches > 0:
+                self._save_checkpoint(
+                    run_id, request, all_prompts, completed_batches - 1,
+                    count, total_batches, partial_results, started_at,
+                )
+
         # RUN_CANCELLED already published by cancel()
         return run_result
 
@@ -834,6 +907,8 @@ class RunOrchestrator:
 
         self._paused = True
         self._resume_event.clear()
+        self._refresh_current_run()
+        self._save_pause_checkpoint()
         await self._event_bus.publish(Event(type=EventType.RUN_PAUSED))
         await self._event_bus.publish(
             Event(
@@ -916,9 +991,123 @@ class RunOrchestrator:
         except Exception as exc:
             logger.warning("Incremental save failed: %s", exc)
 
+    async def _poll_worker_for_batch(
+        self,
+        worker: ArenaWorker,
+        prompt: str,
+        batch_idx: int,
+        retain: str,
+        baseline_responses: Optional[Tuple[str, str]] = None,
+    ) -> WindowResult:
+        result = await worker.poll_for_completion(
+            baseline_responses=baseline_responses,
+            pause_event=self._resume_event,
+        )
+        result.prompt = prompt
+        result.batch_index = batch_idx
+        if retain == "model_a":
+            result.model_b_name = None
+            result.model_b_response = None
+        elif retain == "model_b":
+            result.model_a_name = None
+            result.model_a_response = None
+
+        self._live_results[(batch_idx, worker._id)] = result
+        self._refresh_current_run()
+        return result
+
+    def _save_checkpoint(
+        self,
+        run_id: str,
+        request: StartRunRequest,
+        all_prompts: List[str],
+        batch_idx: int,
+        count: int,
+        total_batches: int,
+        all_window_results: List[WindowResult],
+        started_at: datetime,
+    ) -> None:
+        """Save a checkpoint file so the run can be resumed."""
+        try:
+            checkpoint = RunCheckpoint(
+                run_id=run_id,
+                original_request=request.model_dump(mode="json"),
+                all_prompts=all_prompts,
+                completed_prompt_indices=list(
+                    range(min((batch_idx + 1) * count, len(all_prompts)))
+                ),
+                next_batch_index=batch_idx + 1,
+                total_batches=total_batches,
+                window_results=[
+                    wr.model_dump(mode="json") for wr in all_window_results
+                ],
+                original_started_at=started_at.isoformat(),
+                last_checkpoint_at=datetime.now(timezone.utc).isoformat(),
+                status="in_progress",
+            )
+            self._checkpoint_manager.save(checkpoint)
+        except Exception as exc:
+            logger.warning("Checkpoint save failed: %s", exc)
+
+    def _save_pause_checkpoint(self) -> None:
+        """Persist a resumable checkpoint when the run is paused."""
+        if (
+            not self._checkpoint_manager
+            or not self._active_request
+            or not self._active_run_id
+            or not self._active_started_at
+        ):
+            return
+
+        completed_batches = (
+            len(self._completed_results) // self._active_batch_size
+            if self._active_batch_size
+            else 0
+        )
+        next_batch_index = (
+            self._current_batch_index
+            if self._current_batch_index is not None
+            else completed_batches
+        )
+
+        try:
+            checkpoint = RunCheckpoint(
+                run_id=self._active_run_id,
+                original_request=self._active_request.model_dump(mode="json"),
+                all_prompts=self._active_all_prompts,
+                completed_prompt_indices=list(range(len(self._completed_results))),
+                next_batch_index=next_batch_index,
+                total_batches=self._active_total_batches,
+                window_results=[
+                    wr.model_dump(mode="json") for wr in self._completed_results
+                ],
+                original_started_at=self._active_started_at.isoformat(),
+                last_checkpoint_at=datetime.now(timezone.utc).isoformat(),
+                status="in_progress",
+            )
+            self._checkpoint_manager.save(checkpoint)
+        except Exception as exc:
+            logger.warning("Pause checkpoint save failed: %s", exc)
+
     def _apply_jitter(self, base: float) -> float:
         jitter_range = base * self._config.timing.jitter_pct
         return base + random.uniform(-jitter_range, jitter_range)
+
+    def _refresh_current_run(self) -> None:
+        if not self._active_run_id or not self._active_started_at:
+            return
+
+        live_results = sorted(
+            self._live_results.values(),
+            key=lambda item: (item.batch_index, item.worker_id),
+        )
+        self._current_run = self._build_result(
+            self._active_run_id,
+            self._active_all_prompts,
+            self._active_total_batches,
+            self._active_started_at,
+            [*self._completed_results, *live_results],
+        )
 
     @staticmethod
     def _failed_result(
@@ -1050,6 +1239,46 @@ class RunOrchestrator:
                 batch_idx=batch_idx,
                 error=f"Recovery failed (retry attempt): {exc}",
             )
+
+    def get_run_snapshot(self) -> Optional[dict]:
+        """Return a snapshot of the current run state for UI sync."""
+        if not self._current_run:
+            return None
+
+        workers_snapshot = []
+        for w in self._workers:
+            workers_snapshot.append({
+                "worker_id": w._id,
+                "state": w.state_machine.state.value,
+                "progress_pct": w.state_machine.progress,
+            })
+
+        run = self._current_run
+        return {
+            "run_id": run.run_id,
+            "running": True,
+            "paused": self._paused,
+            "cancelled": self._cancelled,
+            "total_prompts": len(run.prompts) if run.prompts else 0,
+            "completed_prompts": len(run.window_results),
+            "total_batches": run.total_batches,
+            "workers": workers_snapshot,
+            "results": [
+                {
+                    "worker_id": r.worker_id,
+                    "prompt": (r.prompt or "")[:200],
+                    "batch_index": r.batch_index,
+                    "model_a_name": r.model_a_name,
+                    "model_a_response": r.model_a_response,
+                    "model_b_name": r.model_b_name,
+                    "model_b_response": r.model_b_response,
+                    "elapsed_seconds": r.elapsed_seconds,
+                    "success": r.success,
+                    "error": r.error,
+                }
+                for r in run.window_results
+            ],
+        }
 
     @property
     def last_result(self) -> Optional[RunResult]:

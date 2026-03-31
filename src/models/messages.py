@@ -63,12 +63,18 @@ class PingRequest(BaseModel):
     type: Literal["ping"] = "ping"
 
 
+class ResumeFromCheckpointRequest(BaseModel):
+    type: Literal["resume_from_checkpoint"] = "resume_from_checkpoint"
+    run_id: str
+
+
 InboundMessage = Union[
     StartRunRequest,
     StopRunRequest,
     PauseRunRequest,
     ResumeRunRequest,
     PingRequest,
+    ResumeFromCheckpointRequest,
 ]
 
 

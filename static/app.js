@@ -94,6 +94,11 @@
   const filePreviewDiv    = document.getElementById("file-preview");
   const batchInfoDiv      = document.getElementById("batch-info");
 
+  // Resume banner DOM refs
+  const resumeBanner    = document.getElementById("resume-banner");
+  const resumeList      = document.getElementById("resume-list");
+  const dismissResumeBtn = document.getElementById("dismiss-resume");
+
   // Footer stats
   const statRuns        = document.getElementById("stat-runs");
   const statAvgTime     = document.getElementById("stat-avg-time");
@@ -111,6 +116,8 @@
     ws.onopen = () => {
       connected = true;
       setStatus(true);
+      fetchCheckpoints();
+      syncRunState();
     };
 
     ws.onclose = () => {
@@ -845,6 +852,7 @@
       }
 
       appendLog("info", `File loaded: ${data.filename} (${data.row_count} rows, ${data.columns.length} columns)`);
+      saveFileState();
     } catch (err) {
       appendLog("error", `Upload error: ${err.message}`);
       showToast("Failed to upload file", "error");
@@ -864,6 +872,79 @@
     rowRangeInfo.textContent = "";
     filePreviewDiv.innerHTML = "";
     batchInfoDiv.textContent = "";
+    clearSavedFileState();
+  }
+
+  // ── File state persistence ──
+
+  const FILE_STATE_KEY = "lmarena_file_state";
+
+  function saveFileState() {
+    if (!uploadedRows || uploadedRows.length === 0) return;
+    try {
+      const cols = getSelectedColumns();
+      const state = {
+        rows: uploadedRows,
+        filename: fileNameSpan.textContent,
+        rowCount: uploadedRows.length,
+        columns: Array.from(columnCheckboxes.querySelectorAll("input[type='checkbox']"))
+          .map(cb => cb.value),
+        selectedColumns: cols,
+        rowStart: rowStartInput.value,
+        rowEnd: rowEndInput.value,
+      };
+      localStorage.setItem(FILE_STATE_KEY, JSON.stringify(state));
+    } catch {}
+  }
+
+  function clearSavedFileState() {
+    try { localStorage.removeItem(FILE_STATE_KEY); } catch {}
+  }
+
+  function restoreFileState() {
+    try {
+      const raw = localStorage.getItem(FILE_STATE_KEY);
+      if (!raw) return;
+      const state = JSON.parse(raw);
+      if (!state.rows || state.rows.length === 0) return;
+
+      uploadedRows = state.rows;
+
+      // Restore file info display
+      fileNameSpan.textContent = state.filename || "Restored file";
+      fileRowCountSpan.textContent = `${state.rowCount || state.rows.length} row(s)`;
+      uploadArea.classList.add("hidden");
+      fileInfoDiv.classList.remove("hidden");
+
+      // Restore row range
+      rowStartInput.value = state.rowStart || 1;
+      rowEndInput.value = state.rowEnd || "";
+      rowEndInput.placeholder = `${state.rowCount || state.rows.length} (all)`;
+
+      // Restore column checkboxes
+      columnCheckboxes.innerHTML = "";
+      (state.columns || []).forEach(col => {
+        const label = document.createElement("label");
+        label.className = "column-chip";
+        const cb = document.createElement("input");
+        cb.type = "checkbox";
+        cb.value = col;
+        const isSelected = (state.selectedColumns || []).includes(col);
+        cb.checked = isSelected;
+        if (isSelected) label.classList.add("selected");
+        cb.addEventListener("change", () => {
+          label.classList.toggle("selected", cb.checked);
+          onColumnChange();
+          saveFileState();
+        });
+        label.appendChild(cb);
+        label.appendChild(document.createTextNode(col));
+        columnCheckboxes.appendChild(label);
+      });
+
+      // Rebuild prompts
+      onColumnChange();
+    } catch {}
   }
 
   function getSelectedColumns() {
@@ -909,6 +990,7 @@
     filePreviewDiv.innerHTML = html;
 
     updateBatchInfo();
+    saveFileState();
   }
 
   // Re-extract prompts when row range changes
@@ -1287,6 +1369,180 @@
   ].forEach((el) => el.addEventListener("input", updateTilePreview));
 
   // ══════════════════════════════════════
+  // Checkpoint / Resume
+  // ══════════════════════════════════════
+
+  function fetchCheckpoints() {
+    fetch("/api/checkpoints")
+      .then(res => res.json())
+      .then(data => {
+        if (!Array.isArray(data) || data.length === 0) {
+          resumeBanner.classList.add("hidden");
+          return;
+        }
+        renderCheckpoints(data);
+        resumeBanner.classList.remove("hidden");
+      })
+      .catch(() => {
+        resumeBanner.classList.add("hidden");
+      });
+  }
+
+  function renderCheckpoints(checkpoints) {
+    resumeList.innerHTML = "";
+    checkpoints.forEach(cp => {
+      const div = document.createElement("div");
+      div.className = "resume-item";
+      div.dataset.runId = cp.run_id;
+
+      const lastTime = cp.last_checkpoint_at
+        ? new Date(cp.last_checkpoint_at).toLocaleString()
+        : "unknown";
+
+      div.innerHTML = `
+        <div class="resume-info">
+          <div class="resume-info-title">Run ${cp.run_id}</div>
+          <div class="resume-info-detail">
+            ${cp.completed_prompts}/${cp.total_prompts} prompts done
+            &middot; batch ${cp.next_batch}/${cp.total_batches}
+            &middot; ${lastTime}
+          </div>
+        </div>
+        <div class="resume-actions">
+          <button class="btn-resume" data-run-id="${cp.run_id}">&#9654; Resume</button>
+          <button class="btn-discard" data-run-id="${cp.run_id}">&#10005; Discard</button>
+        </div>
+      `;
+      resumeList.appendChild(div);
+    });
+  }
+
+  resumeList.addEventListener("click", (e) => {
+    const btn = e.target.closest("[data-run-id]");
+    if (!btn) return;
+
+    const runId = btn.dataset.runId;
+
+    if (btn.classList.contains("btn-resume")) {
+      if (running) {
+        showToast("A run is already in progress", "warning");
+        return;
+      }
+      // Transition UI to running state
+      running = true;
+      paused = false;
+      pauseTransitionPending = false;
+      runStartTime = Date.now();
+      workerStartTimes = {};
+      workerData = {};
+      updateStartButton();
+      stopBtn.disabled = false;
+      exportBtn.disabled = true;
+      workersContainer.innerHTML = "";
+      workersContainer.style.gridTemplateColumns = "";
+      resultsBody.innerHTML = "";
+      logBox.innerHTML = "";
+      progressFill.style.width = "0%";
+      progressPct.textContent = "0%";
+      etaText.textContent = "Resuming...";
+      runResults = null;
+      incrementalResults = {};
+      resultsJsonPre.textContent = "";
+
+      resumeBanner.classList.add("hidden");
+
+      send({ type: "resume_from_checkpoint", run_id: runId });
+      appendLog("info", `Resuming run ${runId} from checkpoint`);
+    }
+
+    if (btn.classList.contains("btn-discard")) {
+      fetch(`/api/checkpoints/${runId}`, { method: "DELETE" })
+        .then(() => {
+          const item = resumeList.querySelector(`[data-run-id="${runId}"]`);
+          if (item && item.classList.contains("resume-item")) {
+            item.remove();
+          }
+          if (resumeList.children.length === 0) {
+            resumeBanner.classList.add("hidden");
+          }
+          showToast(`Checkpoint ${runId} discarded`, "info");
+        })
+        .catch(() => {
+          showToast("Failed to discard checkpoint", "error");
+        });
+    }
+  });
+
+  dismissResumeBtn.addEventListener("click", () => {
+    resumeBanner.classList.add("hidden");
+  });
+
+  // ══════════════════════════════════════
+  // Run State Sync (reconnect recovery)
+  // ══════════════════════════════════════
+
+  function syncRunState() {
+    fetch("/api/run-state")
+      .then(res => res.json())
+      .then(state => {
+        if (!state || !state.running) return;
+
+        // Restore running state
+        running = true;
+        paused = state.paused || false;
+        runStartTime = runStartTime || Date.now();
+        updateStartButton();
+        stopBtn.disabled = false;
+
+        // Hide resume banner while a run is active
+        resumeBanner.classList.add("hidden");
+
+        // Restore worker cards
+        const workerCount = state.workers ? state.workers.length : 0;
+        if (workerCount > 0) {
+          workersContainer.innerHTML = "";
+          layoutWindowsGrid(workerCount);
+          state.workers.forEach(w => {
+            ensureWorkerCard(w.worker_id);
+            updateWorkerCard({
+              worker_id: w.worker_id,
+              state: w.state,
+              progress_pct: w.progress_pct,
+              message: "",
+              error: null,
+            });
+          });
+        }
+
+        // Restore result rows
+        if (state.results && state.results.length > 0) {
+          state.results.forEach(r => {
+            ensureResultRow(r.worker_id);
+            updateResultRowWithData(r);
+            incrementalResults[r.worker_id] = r;
+          });
+          exportBtn.disabled = false;
+        }
+
+        // Restore progress bar
+        const total = state.total_prompts || 1;
+        const done = state.completed_prompts || 0;
+        const pct = Math.round((done / total) * 100);
+        progressFill.style.width = `${pct}%`;
+        progressPct.textContent = `${pct}%`;
+
+        if (paused) {
+          etaText.textContent = "Paused";
+        } else {
+          etaText.textContent = `${done}/${total} prompts done`;
+        }
+
+        appendLog("info", "Reconnected to active run");
+      })
+      .catch(() => {});
+  }
+
+  // ══════════════════════════════════════
   // Init
   // ══════════════════════════════════════
 
@@ -1311,6 +1567,9 @@
   if (systemPromptInput.value.trim()) {
     document.getElementById("system-prompt-details").open = true;
   }
+
+  // Restore file upload state if present
+  restoreFileState();
 
   connect();
 })();
