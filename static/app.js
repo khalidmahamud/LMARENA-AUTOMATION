@@ -1578,9 +1578,9 @@
     iframe.srcdoc = `<!DOCTYPE html>
 <html><head><meta charset="utf-8"><style>
 *, *::before, *::after { box-sizing: border-box; }
-html, body { margin: 0; padding: 16px; background: #fff; color: #111;
+html, body { margin: 0; padding: 0; background: #fff; color: #111;
   font-family: system-ui, -apple-system, sans-serif; font-size: 14px;
-  overflow: auto; line-height: 1.5; min-height: 100%; }
+  overflow: auto; line-height: 1.5; min-height: 0; }
 </style></head><body>${html}</body></html>`;
     iframe.onload = () => applyPreviewZoom();
     wrap.appendChild(iframe);
@@ -1604,15 +1604,37 @@ html, body { margin: 0; padding: 16px; background: #fff; color: #111;
         iframe.style.width = "100%";
         iframe.style.height = "100%";
         container.style.overflow = "auto";
-        try { iframe.contentDocument.documentElement.style.overflow = ""; } catch {}
+        try {
+          iframe.contentDocument.documentElement.style.overflow = "";
+          iframe.contentDocument.body.style.overflow = "";
+        } catch {}
         return;
       }
 
       let scale;
       if (previewZoom === "fit") {
         try {
-          const cw = iframe.contentDocument.body.scrollWidth || 1;
-          const ch = iframe.contentDocument.body.scrollHeight || 1;
+          const doc = iframe.contentDocument;
+          const body = doc.body;
+          const root = doc.documentElement;
+          const cw = Math.max(
+            body?.scrollWidth || 0,
+            body?.offsetWidth || 0,
+            body?.clientWidth || 0,
+            root?.scrollWidth || 0,
+            root?.offsetWidth || 0,
+            root?.clientWidth || 0,
+            1
+          );
+          const ch = Math.max(
+            body?.scrollHeight || 0,
+            body?.offsetHeight || 0,
+            body?.clientHeight || 0,
+            root?.scrollHeight || 0,
+            root?.offsetHeight || 0,
+            root?.clientHeight || 0,
+            1
+          );
           const bw = container.clientWidth || 1;
           const bh = container.clientHeight || 1;
           scale = Math.min(bw / cw, bh / ch, 1);
@@ -1628,7 +1650,10 @@ html, body { margin: 0; padding: 16px; background: #fff; color: #111;
       iframe.style.height = (100 / scale) + "%";
       iframe.style.transform = `scale(${scale})`;
       // Hide scrollbars inside the iframe content when scaled
-      try { iframe.contentDocument.documentElement.style.overflow = "hidden"; } catch {}
+      try {
+        iframe.contentDocument.documentElement.style.overflow = "hidden";
+        iframe.contentDocument.body.style.overflow = "hidden";
+      } catch {}
     });
   }
 
