@@ -70,6 +70,10 @@ async def lifespan(application: FastAPI):
     if ar["enabled"]:
         await proxy_pool.start_auto_refresh(protocol=ar["protocol"])
         logger.info("Auto-refresh resumed from saved settings (protocol=%s)", ar["protocol"])
+    elif proxy_pool.total_count > 0:
+        # Not auto-refreshing, but have loaded proxies — health-check them in background
+        asyncio.create_task(proxy_pool.maintain_pool(protocol=ar["protocol"]))
+        logger.info("Background health check started for %d loaded proxies", proxy_pool.total_count)
 
     event_bus = EventBus()
     broadcaster = WsBroadcaster(event_bus)
@@ -215,11 +219,13 @@ PROXIFLY_URL = (
 TEST_URL = "https://arena.ai/"
 
 
-def _check_proxy(proxy_server: str, timeout: int = 8) -> bool:
-    """Test if a proxy can HTTPS-tunnel to arena.ai (what Chromium actually does)."""
+def _check_proxy(proxy_server: str, timeout: int = 8) -> float:
+    """Test if a proxy can HTTPS-tunnel to arena.ai. Returns latency in ms, or -1.0 on failure."""
     import socket
     import ssl
+    import time as _time
 
+    start = _time.monotonic()
     try:
         # Parse proxy host:port
         stripped = proxy_server.split("://")[-1]
@@ -239,11 +245,11 @@ def _check_proxy(proxy_server: str, timeout: int = 8) -> bool:
                 ctx = ssl.create_default_context()
                 ss = ctx.wrap_socket(s, server_hostname="arena.ai")
                 ss.close()
-                return True
+                return (_time.monotonic() - start) * 1000.0
             except ImportError:
                 sock = socket.create_connection((proxy_host, proxy_port), timeout=timeout)
                 sock.close()
-                return True
+                return (_time.monotonic() - start) * 1000.0
         else:
             # HTTP proxy: send CONNECT request (this is exactly what Chromium does)
             sock = socket.create_connection((proxy_host, proxy_port), timeout=timeout)
@@ -255,22 +261,22 @@ def _check_proxy(proxy_server: str, timeout: int = 8) -> bool:
                 chunk = sock.recv(4096)
                 if not chunk:
                     sock.close()
-                    return False
+                    return -1.0
                 response += chunk
 
             # Check for 200 Connection established
             status_line = response.split(b"\r\n")[0].decode(errors="ignore")
             if "200" not in status_line:
                 sock.close()
-                return False
+                return -1.0
 
             # TLS handshake through the tunnel — proves it actually works
             ctx = ssl.create_default_context()
             ss = ctx.wrap_socket(sock, server_hostname="arena.ai")
             ss.close()
-            return True
+            return (_time.monotonic() - start) * 1000.0
     except Exception:
-        return False
+        return -1.0
 
 
 @app.get("/api/free-proxies")
@@ -314,7 +320,12 @@ async def fetch_free_proxies(
         *(loop.run_in_executor(None, _check_proxy, proxy) for proxy in candidates)
     )
 
-    alive = [{"server": proxy} for proxy, ok in zip(candidates, results) if ok]
+    alive = [
+        {"server": proxy, "latency_ms": round(latency, 1)}
+        for proxy, latency in zip(candidates, results)
+        if latency > 0
+    ]
+    alive.sort(key=lambda p: p["latency_ms"])
     alive = alive[:limit]
     logger.info("Found %d working proxies out of %d tested", len(alive), len(candidates))
 
@@ -386,6 +397,14 @@ async def set_pool_max_size(limit: int = 50):
     proxy_pool.set_max_healthy(limit)
     proxy_pool.save_to_file()
     return {"max_healthy": limit}
+
+
+@app.post("/api/proxy-pool/max-latency")
+async def set_pool_max_latency(ms: int = 5000):
+    """Update the max latency threshold in ms."""
+    proxy_pool.set_max_latency(float(ms))
+    proxy_pool.save_to_file()
+    return {"max_latency_ms": ms}
 
 
 @app.post("/api/proxy-pool/health-check")

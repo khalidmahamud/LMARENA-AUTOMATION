@@ -219,11 +219,48 @@
 
     <!-- RIGHT SIDEBAR -->
     <aside class="zone zone-right">
-      <div class="section-header">
-        Live Log
+      <div class="log-tabs-header">
+        <div class="log-tab-group">
+          <button class="log-tab active" id="log-tab-processing">Processing</button>
+          <button class="log-tab" id="log-tab-proxy">Proxy</button>
+        </div>
         <span class="auto-scroll-label" id="auto-scroll-toggle">auto-scroll</span>
       </div>
+      <!-- Processing tab (existing log) -->
       <div class="log-box" id="log-box"></div>
+      <!-- Proxy tab -->
+      <div class="log-box hidden" id="proxy-log-box">
+        <div class="proxy-log-stats" id="proxy-log-stats">
+          <div class="proxy-stat-row">
+            <span class="proxy-stat-label">Pool</span>
+            <span class="proxy-stat-value" id="plog-pool-count">--</span>
+          </div>
+          <div class="proxy-stat-row">
+            <span class="proxy-stat-label">Avg Latency</span>
+            <span class="proxy-stat-value" id="plog-avg-latency">--</span>
+          </div>
+          <div class="proxy-stat-row">
+            <span class="proxy-stat-label">Threshold</span>
+            <span class="proxy-stat-value" id="plog-threshold">--</span>
+          </div>
+          <div class="proxy-stat-row">
+            <span class="proxy-stat-label">Auto-refresh</span>
+            <span class="proxy-stat-value" id="plog-auto-refresh">--</span>
+          </div>
+          <div class="proxy-latency-meter">
+            <div class="proxy-latency-meter-bar">
+              <div class="proxy-latency-meter-fill" id="plog-latency-fill"></div>
+              <div class="proxy-latency-meter-marker" id="plog-latency-marker"></div>
+            </div>
+            <div class="proxy-latency-meter-labels">
+              <span>0ms</span>
+              <span id="plog-latency-max">5000ms</span>
+            </div>
+          </div>
+        </div>
+        <div class="proxy-list" id="proxy-list"></div>
+        <div class="proxy-log-entries" id="proxy-log-entries"></div>
+      </div>
     </aside>
 
   </div>
@@ -354,6 +391,9 @@
               </label>
               <label class="pool-max-label">
                 Max <input type="number" id="pool-max-size" value="50" min="1" max="500" />
+              </label>
+              <label class="pool-max-label">
+                Latency <input type="number" id="pool-max-latency" value="5000" min="500" max="30000" /> ms
               </label>
             </div>
             <span id="proxy-pool-status" class="proxy-status"></span>

@@ -582,6 +582,47 @@ body {
    LIVE LOG (right sidebar)
    ══════════════════════════════════════ */
 
+/* Log tab header */
+.log-tabs-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.5rem 0.75rem 0.4rem;
+  flex-shrink: 0;
+}
+
+.log-tab-group {
+  display: flex;
+  gap: 0;
+  background: var(--surface-2);
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+  overflow: hidden;
+}
+
+.log-tab {
+  font-family: var(--display);
+  font-size: 0.6rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-dim);
+  background: transparent;
+  border: none;
+  padding: 0.3rem 0.65rem;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.log-tab:hover {
+  color: var(--text-muted);
+}
+
+.log-tab.active {
+  color: var(--accent);
+  background: var(--accent-muted);
+}
+
 .log-box {
   flex: 1;
   overflow-y: auto;
@@ -591,6 +632,152 @@ body {
   font-size: 0.75rem;
   line-height: 1.7;
   min-height: 0;
+}
+
+/* Proxy log stats panel */
+.proxy-log-stats {
+  padding: 0.5rem 0;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 0.5rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+}
+
+.proxy-stat-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 0.68rem;
+}
+
+.proxy-stat-label {
+  color: var(--text-dim);
+  font-family: var(--display);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  font-size: 0.6rem;
+}
+
+.proxy-stat-value {
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 0.68rem;
+}
+
+/* Latency meter */
+.proxy-latency-meter {
+  margin-top: 0.3rem;
+}
+
+.proxy-latency-meter-bar {
+  height: 6px;
+  border-radius: 3px;
+  background: linear-gradient(to right, var(--green), #a3d977, #e5c93c, var(--orange), var(--red));
+  position: relative;
+  overflow: visible;
+}
+
+.proxy-latency-meter-fill {
+  position: absolute;
+  top: 0;
+  left: 0;
+  height: 100%;
+  border-radius: 3px;
+  background: rgba(0, 0, 0, 0.45);
+  width: 0%;
+  transition: width 0.4s ease;
+}
+
+.proxy-latency-meter-marker {
+  position: absolute;
+  top: -3px;
+  width: 3px;
+  height: 12px;
+  background: var(--text);
+  border-radius: 1px;
+  left: 0%;
+  transition: left 0.4s ease;
+}
+
+.proxy-latency-meter-marker.hidden {
+  display: none;
+}
+
+.proxy-latency-meter-labels {
+  display: flex;
+  justify-content: space-between;
+  font-family: var(--mono);
+  font-size: 0.55rem;
+  color: var(--text-dim);
+  margin-top: 0.15rem;
+}
+
+/* Per-proxy list */
+.proxy-list {
+  padding: 0.4rem 0;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 0.4rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+}
+
+.proxy-row {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-family: var(--mono);
+  font-size: 0.62rem;
+  padding: 0.15rem 0;
+}
+
+.proxy-row-dot {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.proxy-row-dot.green { background: var(--green); }
+.proxy-row-dot.red { background: var(--red); }
+
+.proxy-row-addr {
+  color: var(--text-dim);
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.proxy-row-bar {
+  width: 50px;
+  height: 4px;
+  background: var(--surface-2);
+  border-radius: 2px;
+  overflow: hidden;
+  flex-shrink: 0;
+}
+
+.proxy-row-bar-fill {
+  height: 100%;
+  border-radius: 2px;
+  transition: width 0.3s ease;
+}
+
+.proxy-row-lat {
+  color: var(--text-muted);
+  width: 45px;
+  text-align: right;
+  flex-shrink: 0;
+}
+
+.proxy-log-entries {
+  font-family: var(--mono);
+  font-size: 0.72rem;
+  line-height: 1.6;
 }
 
 .log-line {
