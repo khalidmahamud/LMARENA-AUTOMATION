@@ -34,10 +34,10 @@ class ResponsePoller:
         cancel_event: Optional[asyncio.Event] = None,
         pause_event: Optional[asyncio.Event] = None,
         baseline_responses: Optional[Tuple[str, str]] = None,
-    ) -> Tuple[Tuple[str, str], Tuple[Optional[str], Optional[str]]]:
+    ) -> Tuple[Tuple[str, str], Tuple[Optional[str], Optional[str]], Tuple[str, str]]:
         """Poll until both responses are stable.
 
-        Returns ``((response_a, response_b), (model_a_name, model_b_name))``.
+        Returns ``((response_a, response_b), (model_a_name, model_b_name), (html_a, html_b))``.
         Raises ``PollingTimeoutError`` if responses don't stabilise in time.
         """
         deadline = time.monotonic() + self._config.response_timeout_seconds
@@ -115,6 +115,16 @@ class ResponsePoller:
                 if len(slides) > 1
                 else ""
             )
+            cur_html_a = (
+                slides[0]["response_html"]
+                if len(slides) > 0
+                else ""
+            )
+            cur_html_b = (
+                slides[1]["response_html"]
+                if len(slides) > 1
+                else ""
+            )
             copy_ready = (
                 len(slides) >= 2
                 and slides[0]["has_copy_button"]
@@ -159,7 +169,7 @@ class ResponsePoller:
                     slides[0]["model_name"] if len(slides) > 0 else None,
                     slides[1]["model_name"] if len(slides) > 1 else None,
                 )
-                return (cur_a, cur_b), model_names
+                return (cur_a, cur_b), model_names, (cur_html_a, cur_html_b)
 
             # Cancellation-aware sleep
             await self._sleep_with_controls(
@@ -328,13 +338,22 @@ class ResponsePoller:
                                 streamingSelector
                             );
 
+                            // Strip code-block language labels (e.g. "HTML")
+                            // that appear at the start of innerText before an HTML tag
+                            let cleanText = "";
+                            let rawHtml = "";
+                            if (responseNode) {
+                                rawHtml = responseNode.innerHTML.trim();
+                                cleanText = responseNode.innerText.trim()
+                                    .replace(/^(HTML|CSS|JavaScript|JS|TypeScript|TS|Python|JSON|XML|Bash|Shell|SQL|Go|Rust|Java|Ruby|PHP)\\s*(?=<)/i, "");
+                            }
+
                             return {
                                 model_name: modelNode
                                     ? modelNode.textContent.trim()
                                     : null,
-                                response_text: responseNode
-                                    ? responseNode.innerText.trim()
-                                    : "",
+                                response_text: cleanText,
+                                response_html: rawHtml,
                                 has_copy_button: Boolean(copyButton),
                                 has_streaming_indicator: Boolean(
                                     streamingNode && isVisible(streamingNode)

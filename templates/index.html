@@ -90,6 +90,15 @@
         <!-- Manual mode (default) -->
         <div id="manual-prompt-section">
           <textarea id="prompt" rows="8" placeholder="Enter your prompt here..."></textarea>
+          <div class="image-upload-section" id="image-upload-section">
+            <div class="image-upload-area" id="image-upload-area">
+              <span class="upload-icon">&#128247;</span>
+              <span>Drop images here, or <strong>click to browse</strong></span>
+              <span class="upload-hint">.png, .jpg, .webp, .gif &mdash; max 5 MB each, max 10</span>
+              <input type="file" id="image-file-input" accept="image/png,image/jpeg,image/webp,image/gif" multiple hidden />
+            </div>
+            <div class="image-thumbnails" id="image-thumbnails"></div>
+          </div>
         </div>
 
         <!-- File upload mode -->
@@ -147,6 +156,7 @@
             <div class="tab-group">
               <button class="tab active" id="tab-table">Table View</button>
               <button class="tab" id="tab-json">JSON</button>
+              <button class="tab" id="tab-html">HTML</button>
             </div>
           </div>
           <div class="export-group">
@@ -174,6 +184,9 @@
           </table>
         </div>
         <pre class="results-json hidden" id="results-json"></pre>
+        <div class="results-html-wrap hidden" id="results-html-wrap">
+          <div class="html-results-list" id="html-results-list"></div>
+        </div>
       </section>
 
     </div>

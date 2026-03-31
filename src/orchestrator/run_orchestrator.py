@@ -77,6 +77,11 @@ class RunOrchestrator:
         system_prompt = request.system_prompt.strip()
         combine_with_first = request.combine_with_first and bool(system_prompt)
         simultaneous_start = request.simultaneous_start
+        image_dicts = (
+            [img.model_dump() for img in request.images]
+            if request.images
+            else None
+        )
 
         if resume_checkpoint:
             # Restore state from checkpoint
@@ -531,6 +536,7 @@ class RunOrchestrator:
                                     model_b=None if system_prompt else request.model_b,
                                     mark_started=False,
                                     pause_event=self._resume_event,
+                                    images=image_dicts,
                                 )
                             ),
                         )
@@ -637,6 +643,7 @@ class RunOrchestrator:
                             model_a=None if system_prompt else request.model_a,
                             model_b=None if system_prompt else request.model_b,
                             pause_event=self._resume_event,
+                            images=image_dicts,
                         )
                         submitted.append(
                             (i, worker, prompt, baseline_responses)
@@ -754,9 +761,11 @@ class RunOrchestrator:
                             if retain == "model_a":
                                 recovery_out.model_b_name = None
                                 recovery_out.model_b_response = None
+                                recovery_out.model_b_response_html = None
                             elif retain == "model_b":
                                 recovery_out.model_a_name = None
                                 recovery_out.model_a_response = None
+                                recovery_out.model_a_response_html = None
                         batch_results.append(recovery_out)
             elif all_failures:
                 # Cancelled — record failures without recovery
@@ -1008,9 +1017,11 @@ class RunOrchestrator:
         if retain == "model_a":
             result.model_b_name = None
             result.model_b_response = None
+            result.model_b_response_html = None
         elif retain == "model_b":
             result.model_a_name = None
             result.model_a_response = None
+            result.model_a_response_html = None
 
         self._live_results[(batch_idx, worker._id)] = result
         self._refresh_current_run()
@@ -1221,6 +1232,7 @@ class RunOrchestrator:
                 model_a=None if system_prompt else request.model_a,
                 model_b=None if system_prompt else request.model_b,
                 pause_event=self._resume_event,
+                images=image_dicts,
             )
 
             # Poll for completion

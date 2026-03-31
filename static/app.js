@@ -21,6 +21,9 @@
   let uploadedRows = null;   // raw parsed rows from backend
   let uploadedPrompts = [];  // combined prompts built per row from selected columns
 
+  // Image upload state
+  let uploadedImages = [];   // Array of { data: base64, mime_type, filename, objectUrl }
+
   // ── DOM refs ──
   const statusBadge       = document.getElementById("status-badge");
   const statusDot         = document.getElementById("status-dot");
@@ -64,6 +67,9 @@
   const resultsJsonPre    = document.getElementById("results-json");
   const tabTable          = document.getElementById("tab-table");
   const tabJson           = document.getElementById("tab-json");
+  const tabHtml           = document.getElementById("tab-html");
+  const resultsHtmlWrap   = document.getElementById("results-html-wrap");
+  const htmlResultsList   = document.getElementById("html-results-list");
   const autoScrollToggle  = document.getElementById("auto-scroll-toggle");
 
   const toastContainer    = document.getElementById("toast-container");
@@ -93,6 +99,11 @@
   const rowRangeInfo      = document.getElementById("row-range-info");
   const filePreviewDiv    = document.getElementById("file-preview");
   const batchInfoDiv      = document.getElementById("batch-info");
+
+  // Image upload DOM refs
+  const imageUploadArea  = document.getElementById("image-upload-area");
+  const imageFileInput   = document.getElementById("image-file-input");
+  const imageThumbnails  = document.getElementById("image-thumbnails");
 
   // Resume banner DOM refs
   const resumeBanner    = document.getElementById("resume-banner");
@@ -464,6 +475,7 @@
   function onWorkerResult(result) {
     incrementalResults[result.worker_id] = result;
     updateResultRowWithData(result);
+    if (tabHtml.classList.contains("active")) renderHtmlPreviews();
   }
 
   function populateFinalResults(results) {
@@ -534,6 +546,9 @@
 
     // Update footer stats
     updateStats(msg);
+
+    // Refresh HTML previews if HTML tab is active
+    if (tabHtml.classList.contains("active")) renderHtmlPreviews();
 
     appendLog("info", `Run complete \u2014 ${msg.results.length} window(s) finished in ${msg.total_elapsed_seconds.toFixed(1)}s`);
   }
@@ -671,6 +686,13 @@
       retain_output: retainOutputInput.value,
       clear_cookies: clearCookiesInput.checked,
       incognito: incognitoModeInput.checked,
+      images: (!isFileMode && uploadedImages.length > 0)
+        ? uploadedImages.map((img) => ({
+            data: img.data,
+            mime_type: img.mime_type,
+            filename: img.filename,
+          }))
+        : null,
       simultaneous_start: simultaneousStartInput.checked,
       zoom_pct: parseInt(zoomInput.value, 10) || 100,
       monitor_count: parseInt(monitorCountInput.value, 10) || 1,
@@ -728,6 +750,7 @@
   clearBtn.addEventListener("click", () => {
     promptInput.value = "";
     promptInput.dispatchEvent(new Event("input"));
+    clearImages();
     promptInput.focus();
   });
 
@@ -873,6 +896,137 @@
     filePreviewDiv.innerHTML = "";
     batchInfoDiv.textContent = "";
     clearSavedFileState();
+  }
+
+  // ══════════════════════════════════════
+  // Image Upload (Manual Mode)
+  // ══════════════════════════════════════
+
+  const MAX_IMAGE_SIZE = 5 * 1024 * 1024; // 5 MB
+  const MAX_IMAGES = 10;
+  const MAX_IMAGE_DIM = 2048;
+
+  imageUploadArea.addEventListener("click", () => imageFileInput.click());
+
+  imageUploadArea.addEventListener("dragover", (e) => {
+    e.preventDefault();
+    imageUploadArea.classList.add("dragover");
+  });
+
+  imageUploadArea.addEventListener("dragleave", () => {
+    imageUploadArea.classList.remove("dragover");
+  });
+
+  imageUploadArea.addEventListener("drop", (e) => {
+    e.preventDefault();
+    imageUploadArea.classList.remove("dragover");
+    handleImageFiles(e.dataTransfer.files);
+  });
+
+  imageFileInput.addEventListener("change", () => {
+    handleImageFiles(imageFileInput.files);
+    imageFileInput.value = "";
+  });
+
+  function handleImageFiles(fileList) {
+    const files = Array.from(fileList);
+    const remaining = MAX_IMAGES - uploadedImages.length;
+    if (remaining <= 0) {
+      showToast(`Maximum ${MAX_IMAGES} images allowed`, "warning");
+      return;
+    }
+    const toProcess = files.slice(0, remaining);
+
+    toProcess.forEach((file) => {
+      if (!file.type.match(/^image\/(png|jpeg|webp|gif)$/)) {
+        showToast(`Unsupported format: ${file.name}`, "warning");
+        return;
+      }
+      if (file.size > MAX_IMAGE_SIZE) {
+        showToast(`${file.name} exceeds 5 MB limit`, "warning");
+        return;
+      }
+      processImage(file);
+    });
+  }
+
+  function processImage(file) {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const img = new Image();
+      img.onload = () => {
+        let { width, height } = img;
+
+        // Resize if too large
+        if (width > MAX_IMAGE_DIM || height > MAX_IMAGE_DIM) {
+          const scale = MAX_IMAGE_DIM / Math.max(width, height);
+          width = Math.round(width * scale);
+          height = Math.round(height * scale);
+        }
+
+        const canvas = document.createElement("canvas");
+        canvas.width = width;
+        canvas.height = height;
+        const ctx = canvas.getContext("2d");
+        ctx.drawImage(img, 0, 0, width, height);
+
+        // Determine output format
+        const outputType = file.type === "image/png" ? "image/png" : "image/jpeg";
+        const quality = outputType === "image/jpeg" ? 0.85 : undefined;
+        const dataUrl = canvas.toDataURL(outputType, quality);
+        const base64 = dataUrl.split(",")[1];
+
+        const objectUrl = URL.createObjectURL(file);
+        uploadedImages.push({
+          data: base64,
+          mime_type: outputType,
+          filename: file.name,
+          objectUrl: objectUrl,
+        });
+        renderImageThumbnails();
+      };
+      img.src = reader.result;
+    };
+    reader.readAsDataURL(file);
+  }
+
+  function renderImageThumbnails() {
+    imageThumbnails.innerHTML = "";
+    uploadedImages.forEach((img, idx) => {
+      const thumb = document.createElement("div");
+      thumb.className = "image-thumb";
+      thumb.innerHTML = `
+        <img src="${img.objectUrl}" alt="${escapeAttr(img.filename)}" />
+        <button class="image-thumb-remove" data-idx="${idx}">&times;</button>
+        <span class="image-thumb-name">${escapeHtml(truncate(img.filename, 12))}</span>
+      `;
+      imageThumbnails.appendChild(thumb);
+    });
+
+    // Bind remove buttons
+    imageThumbnails.querySelectorAll(".image-thumb-remove").forEach((btn) => {
+      btn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        const idx = parseInt(btn.dataset.idx, 10);
+        removeImage(idx);
+      });
+    });
+  }
+
+  function removeImage(idx) {
+    if (uploadedImages[idx] && uploadedImages[idx].objectUrl) {
+      URL.revokeObjectURL(uploadedImages[idx].objectUrl);
+    }
+    uploadedImages.splice(idx, 1);
+    renderImageThumbnails();
+  }
+
+  function clearImages() {
+    uploadedImages.forEach((img) => {
+      if (img.objectUrl) URL.revokeObjectURL(img.objectUrl);
+    });
+    uploadedImages = [];
+    renderImageThumbnails();
   }
 
   // ── File state persistence ──
@@ -1118,23 +1272,31 @@
   });
 
   // ══════════════════════════════════════
-  // Tabs (Table View / JSON)
+  // Tabs (Table View / JSON / HTML)
   // ══════════════════════════════════════
 
+  function setResultsTab(active) {
+    tabTable.classList.toggle("active", active === "table");
+    tabJson.classList.toggle("active", active === "json");
+    tabHtml.classList.toggle("active", active === "html");
+    resultsTableWrap.classList.toggle("hidden", active !== "table");
+    resultsJsonPre.classList.toggle("hidden", active !== "json");
+    resultsHtmlWrap.classList.toggle("hidden", active !== "html");
+  }
+
   tabTable.addEventListener("click", () => {
-    tabTable.classList.add("active");
-    tabJson.classList.remove("active");
-    resultsTableWrap.classList.remove("hidden");
-    resultsJsonPre.classList.add("hidden");
+    setResultsTab("table");
     exportBtn.innerHTML = "&#128196; Export .xlsx";
   });
 
   tabJson.addEventListener("click", () => {
-    tabJson.classList.add("active");
-    tabTable.classList.remove("active");
-    resultsJsonPre.classList.remove("hidden");
-    resultsTableWrap.classList.add("hidden");
+    setResultsTab("json");
     exportBtn.innerHTML = "&#128196; Export .json";
+  });
+
+  tabHtml.addEventListener("click", () => {
+    setResultsTab("html");
+    renderHtmlPreviews();
   });
 
   // ══════════════════════════════════════
@@ -1212,6 +1374,118 @@
   function estimateTokens(text) {
     // Rough estimation: ~4 chars per token for English
     return Math.round(text.length / 4);
+  }
+
+  // ══════════════════════════════════════
+  // HTML Preview (extract code blocks & render)
+  // ══════════════════════════════════════
+
+  function extractHtmlBlocks(responseHtml) {
+    if (!responseHtml) return [];
+    const container = document.createElement("div");
+    container.innerHTML = responseHtml;
+    const blocks = [];
+    // Look for <pre><code> blocks that contain HTML
+    container.querySelectorAll("pre code").forEach((codeEl) => {
+      // Strip leading language label (e.g. "HTML", "html", "css") injected by code block renderers
+      const text = (codeEl.textContent || "")
+        .replace(/^(html|css|javascript|js|typescript|ts|xml|json|jsx|tsx)\s*(?=<)/i, "")
+        .trim();
+      // Check if it looks like HTML
+      if (/<(!DOCTYPE|html|head|body|div|span|p |h[1-6]|section|article|nav|main|form|table|ul|ol|li|a |img |style|script|link|meta|button|input|header|footer)/i.test(text)) {
+        blocks.push(text);
+      }
+    });
+    // Also check standalone <code> blocks (not inside <pre>) in case of inline code fences
+    if (blocks.length === 0) {
+      container.querySelectorAll("code").forEach((codeEl) => {
+        const text = (codeEl.textContent || "")
+          .replace(/^(html|css|javascript|js|typescript|ts|xml|json)\s*(?=<)/i, "")
+          .trim();
+        if (text.length > 50 && /<(!DOCTYPE|html|head|body|div)/i.test(text)) {
+          blocks.push(text);
+        }
+      });
+    }
+    return blocks;
+  }
+
+  function renderHtmlPreviews() {
+    htmlResultsList.innerHTML = "";
+    const results = runResults || Object.values(incrementalResults);
+    if (!results || results.length === 0) {
+      htmlResultsList.innerHTML = '<div class="html-empty">No results yet</div>';
+      return;
+    }
+
+    let hasAnyHtml = false;
+    results.forEach((r) => {
+      const blocksA = extractHtmlBlocks(r.model_a_response_html);
+      const blocksB = extractHtmlBlocks(r.model_b_response_html);
+      if (blocksA.length === 0 && blocksB.length === 0) return;
+      hasAnyHtml = true;
+
+      const card = document.createElement("div");
+      card.className = "html-result-card";
+
+      const header = document.createElement("div");
+      header.className = "html-result-header";
+      header.textContent = `Window #${r.worker_id + 1}`;
+      card.appendChild(header);
+
+      const panels = document.createElement("div");
+      panels.className = "html-result-panels";
+
+      // Model A
+      const panelA = buildHtmlPanel(r.model_a_name || "Model A", blocksA);
+      panels.appendChild(panelA);
+
+      // Model B
+      const panelB = buildHtmlPanel(r.model_b_name || "Model B", blocksB);
+      panels.appendChild(panelB);
+
+      card.appendChild(panels);
+      htmlResultsList.appendChild(card);
+    });
+
+    if (!hasAnyHtml) {
+      htmlResultsList.innerHTML = '<div class="html-empty">No HTML code blocks found in responses</div>';
+    }
+  }
+
+  function buildHtmlPanel(modelName, blocks) {
+    const panel = document.createElement("div");
+    panel.className = "html-result-panel";
+
+    const panelHeader = document.createElement("div");
+    panelHeader.className = "html-panel-header";
+    panelHeader.textContent = modelName;
+    panel.appendChild(panelHeader);
+
+    if (blocks.length === 0) {
+      const empty = document.createElement("div");
+      empty.className = "html-panel-empty";
+      empty.textContent = "No HTML code blocks";
+      panel.appendChild(empty);
+    } else {
+      blocks.forEach((html, idx) => {
+        const wrap = document.createElement("div");
+        wrap.className = "html-iframe-wrap";
+        if (blocks.length > 1) {
+          const label = document.createElement("div");
+          label.className = "html-block-label";
+          label.textContent = `Block ${idx + 1}`;
+          wrap.appendChild(label);
+        }
+        const iframe = document.createElement("iframe");
+        iframe.className = "html-preview-iframe";
+        iframe.sandbox = "allow-scripts";
+        iframe.srcdoc = html;
+        wrap.appendChild(iframe);
+        panel.appendChild(wrap);
+      });
+    }
+    return panel;
   }
 
   // ══════════════════════════════════════

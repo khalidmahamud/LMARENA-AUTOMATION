@@ -723,6 +723,7 @@ class ArenaWorker:
         model_b: Optional[str] = None,
         mark_started: bool = True,
         pause_event: Optional[asyncio.Event] = None,
+        images: Optional[list] = None,
     ) -> None:
         """Select models (optional) and paste prompt without submitting."""
         assert self._page is not None
@@ -759,10 +760,18 @@ class ArenaWorker:
         await self.state_machine.transition(WorkerState.PASTING)
         await self._ensure_active(pause_event)
         textarea_sel = self._selectors.get("prompt_textarea")
+        has_images = bool(images)
         prompt_element = await self._human.type_text(
-            self._page, textarea_sel, prompt
+            self._page, textarea_sel, prompt, verify=not has_images,
         )
         await self._log("info", "Prompt pasted")
+
+        # Paste images if provided
+        if has_images:
+            await self._human.paste_images(
+                self._page, prompt_element, images,
+            )
+            await self._log("info", f"Pasted {len(images)} image(s)")
 
         await self.state_machine.transition(WorkerState.PREPARED)
         await self._log("info", "Prompt prepared")
@@ -991,6 +1000,7 @@ class ArenaWorker:
         model_b: Optional[str] = None,
         retry_on_challenge: int = 1,
         pause_event: Optional[asyncio.Event] = None,
+        images: Optional[list] = None,
     ) -> None:
         """Select models (optional), paste prompt, and submit."""
         await self.prepare_prompt(
@@ -999,6 +1009,7 @@ class ArenaWorker:
             model_b=model_b,
             mark_started=True,
             pause_event=pause_event,
+            images=images,
         )
         await self.submit_prepared_prompt(
             retry_on_challenge=retry_on_challenge,
@@ -1549,7 +1560,7 @@ class ArenaWorker:
         assert self._page is not None
 
         try:
-            (resp_a, resp_b), (name_a, name_b) = await self._poller.poll(
+            (resp_a, resp_b), (name_a, name_b), (html_a, html_b) = await self._poller.poll(
                 page=self._page,
                 selectors=self._selectors,
                 worker_id=self._id,
@@ -1577,6 +1588,8 @@ class ArenaWorker:
                 model_a_response=final_resp_a,
                 model_b_name=name_b,
                 model_b_response=final_resp_b,
+                model_a_response_html=html_a or None,
+                model_b_response_html=html_b or None,
                 started_at=self._started_at,
                 completed_at=completed_at,
                 elapsed_seconds=elapsed,
