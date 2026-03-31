@@ -84,6 +84,7 @@ class BrowserManager:
                 headless=self._config.browser.headless,
                 no_viewport=True,
                 args=[
+                    "--incognito",
                     "--disable-blink-features=AutomationControlled",
                     "--disable-dev-shm-usage",
                     "--no-first-run",
@@ -176,6 +177,7 @@ class BrowserManager:
             headless=self._config.browser.headless,
             no_viewport=True,
             args=[
+                "--incognito",
                 "--disable-blink-features=AutomationControlled",
                 "--disable-dev-shm-usage",
                 "--no-first-run",
