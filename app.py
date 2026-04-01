@@ -162,8 +162,8 @@ async def upload_prompts(file: UploadFile):
 
 
 @app.get("/export")
-async def export_excel():
-    orch = ws_handler.orchestrator
+async def export_excel(run_id: str | None = None):
+    orch = ws_handler.get_orchestrator(run_id) if run_id else ws_handler.orchestrator
     if orch and orch.last_result:
         path = export_to_excel(orch.last_result, config.output_dir)
         return FileResponse(
@@ -175,8 +175,8 @@ async def export_excel():
 
 
 @app.get("/export-csv")
-async def export_csv_file():
-    orch = ws_handler.orchestrator
+async def export_csv_file(run_id: str | None = None):
+    orch = ws_handler.get_orchestrator(run_id) if run_id else ws_handler.orchestrator
     if orch and orch.last_result:
         path = export_to_csv(orch.last_result, config.output_dir)
         return FileResponse(path, filename=path.name, media_type="text/csv")
@@ -184,8 +184,8 @@ async def export_csv_file():
 
 
 @app.get("/export-json")
-async def export_json():
-    orch = ws_handler.orchestrator
+async def export_json(run_id: str | None = None):
+    orch = ws_handler.get_orchestrator(run_id) if run_id else ws_handler.orchestrator
     if orch and orch.last_result:
         path = export_to_json(orch.last_result, config.output_dir)
         return FileResponse(

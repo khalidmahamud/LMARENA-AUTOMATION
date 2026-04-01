@@ -49,11 +49,13 @@ class ArenaWorker:
         context_recreator: Optional[ContextRecreator] = None,
         proxy_getter: Optional[ProxyGetter] = None,
         proxy_success_reporter: Optional[ProxySuccessReporter] = None,
+        run_id: Optional[str] = None,
     ) -> None:
         self._id = worker_id
         self._context = context
         self._config = config
         self._event_bus = event_bus
+        self._run_id = run_id
         self._context_recreator = context_recreator
         self._proxy_getter = proxy_getter
         self._proxy_success_reporter = proxy_success_reporter
@@ -77,11 +79,17 @@ class ArenaWorker:
 
     # ── Event publishing ──
 
+    async def _publish(self, event: Event) -> None:
+        """Publish an event, automatically stamping the run_id."""
+        if event.run_id is None:
+            event.run_id = self._run_id
+        await self._publish(event)
+
     async def _on_state_transition(
         self, old: WorkerState, new: WorkerState, wid: int
     ) -> None:
         proxy = self._proxy_getter(self._id) if self._proxy_getter else None
-        await self._event_bus.publish(
+        await self._publish(
             Event(
                 type=EventType.WORKER_STATE_CHANGED,
                 worker_id=wid,
@@ -95,7 +103,7 @@ class ArenaWorker:
         )
 
     async def _log(self, level: str, text: str) -> None:
-        await self._event_bus.publish(
+        await self._publish(
             Event(
                 type=EventType.LOG,
                 worker_id=self._id,
@@ -439,7 +447,7 @@ class ArenaWorker:
             await self.state_machine.transition(
                 WorkerState.WAITING_FOR_CHALLENGE
             )
-            await self._event_bus.publish(
+            await self._publish(
                 Event(
                     type=EventType.CHALLENGE_DETECTED,
                     worker_id=self._id,
@@ -659,7 +667,7 @@ class ArenaWorker:
                 if self._cancelled:
                     return
                 if await detect_challenge(self._page) == ChallengeType.NONE:
-                    await self._event_bus.publish(
+                    await self._publish(
                         Event(type=EventType.CHALLENGE_RESOLVED, worker_id=self._id)
                     )
                     return
@@ -713,7 +721,7 @@ class ArenaWorker:
             if challenge == ChallengeType.NONE:
                 if self._proxy_success_reporter:
                     self._proxy_success_reporter(self._id)
-                await self._event_bus.publish(
+                await self._publish(
                     Event(type=EventType.CHALLENGE_RESOLVED, worker_id=self._id)
                 )
                 return
@@ -1658,7 +1666,7 @@ class ArenaWorker:
             model_name: Optional[str],
         ) -> None:
             slide = "a" if slide_index == 0 else "b"
-            await self._event_bus.publish(
+            await self._publish(
                 Event(
                     type=EventType.WORKER_PARTIAL_RESULT,
                     worker_id=self._id,
@@ -1710,7 +1718,7 @@ class ArenaWorker:
             )
 
             await self.state_machine.transition(WorkerState.COMPLETE)
-            await self._event_bus.publish(
+            await self._publish(
                 Event(
                     type=EventType.WORKER_COMPLETE,
                     worker_id=self._id,
@@ -1727,7 +1735,7 @@ class ArenaWorker:
                 "warning",
                 "Rate limit hit — closing window, reopening fresh, and retrying",
             )
-            await self._event_bus.publish(
+            await self._publish(
                 Event(
                     type=EventType.CHALLENGE_DETECTED,
                     worker_id=self._id,
@@ -1767,7 +1775,7 @@ class ArenaWorker:
                 dialog_wait_seconds=5.0,
             )
 
-            await self._event_bus.publish(
+            await self._publish(
                 Event(type=EventType.CHALLENGE_RESOLVED, worker_id=self._id)
             )
 
@@ -1795,7 +1803,7 @@ class ArenaWorker:
                 "warning",
                 "Login dialog detected — closing window, reopening fresh, and retrying",
             )
-            await self._event_bus.publish(
+            await self._publish(
                 Event(
                     type=EventType.CHALLENGE_DETECTED,
                     worker_id=self._id,
@@ -1832,7 +1840,7 @@ class ArenaWorker:
                 dialog_wait_seconds=5.0,
             )
 
-            await self._event_bus.publish(
+            await self._publish(
                 Event(type=EventType.CHALLENGE_RESOLVED, worker_id=self._id)
             )
 
@@ -1860,7 +1868,7 @@ class ArenaWorker:
                 completed_at=datetime.now(timezone.utc),
             )
             await self.state_machine.force_error(str(exc))
-            await self._event_bus.publish(
+            await self._publish(
                 Event(
                     type=EventType.WORKER_ERROR,
                     worker_id=self._id,

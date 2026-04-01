@@ -35,6 +35,7 @@ class ImagePayload(BaseModel):
 
 class StartRunRequest(BaseModel):
     type: Literal["start_run"] = "start_run"
+    run_id: Optional[str] = None
     prompt: str = Field(default="", max_length=50_000)
     prompts: Optional[List[str]] = Field(default=None)
     system_prompt: str = Field(default="", max_length=100_000)
@@ -78,14 +79,17 @@ class StartRunRequest(BaseModel):
 
 class StopRunRequest(BaseModel):
     type: Literal["stop_run"] = "stop_run"
+    run_id: Optional[str] = None
 
 
 class PauseRunRequest(BaseModel):
     type: Literal["pause_run"] = "pause_run"
+    run_id: Optional[str] = None
 
 
 class ResumeRunRequest(BaseModel):
     type: Literal["resume_run"] = "resume_run"
+    run_id: Optional[str] = None
 
 
 class PingRequest(BaseModel):
@@ -112,6 +116,7 @@ InboundMessage = Union[
 
 class WorkerUpdateMessage(BaseModel):
     type: Literal["worker_update"] = "worker_update"
+    run_id: Optional[str] = None
     worker_id: int
     state: str
     progress_pct: float
@@ -122,6 +127,7 @@ class WorkerUpdateMessage(BaseModel):
 
 class RunProgressMessage(BaseModel):
     type: Literal["run_progress"] = "run_progress"
+    run_id: Optional[str] = None
     total_workers: int
     completed_workers: int
     overall_pct: float
@@ -132,6 +138,7 @@ class RunProgressMessage(BaseModel):
 
 class LogMessage(BaseModel):
     type: Literal["log"] = "log"
+    run_id: Optional[str] = None
     level: str  # "info", "warning", "error"
     text: str
     timestamp: datetime = Field(
@@ -164,16 +171,19 @@ class WorkerPartialResultPayload(BaseModel):
 
 class WorkerPartialResultMessage(BaseModel):
     type: Literal["worker_partial_result"] = "worker_partial_result"
+    run_id: Optional[str] = None
     result: WorkerPartialResultPayload
 
 
 class WorkerResultMessage(BaseModel):
     type: Literal["worker_result"] = "worker_result"
+    run_id: Optional[str] = None
     result: WindowResultPayload
 
 
 class RunCompleteMessage(BaseModel):
     type: Literal["run_complete"] = "run_complete"
+    run_id: Optional[str] = None
     results: List[WindowResultPayload]
     total_elapsed_seconds: float
     export_available: bool
@@ -181,18 +191,22 @@ class RunCompleteMessage(BaseModel):
 
 class RunCancelledMessage(BaseModel):
     type: Literal["run_cancelled"] = "run_cancelled"
+    run_id: Optional[str] = None
 
 
 class RunPausedMessage(BaseModel):
     type: Literal["run_paused"] = "run_paused"
+    run_id: Optional[str] = None
 
 
 class RunResumedMessage(BaseModel):
     type: Literal["run_resumed"] = "run_resumed"
+    run_id: Optional[str] = None
 
 
 class ChallengeDetectedMessage(BaseModel):
     type: Literal["challenge_detected"] = "challenge_detected"
+    run_id: Optional[str] = None
     worker_id: int
     challenge_type: str  # "turnstile", "recaptcha", "login_wall"
     message: str

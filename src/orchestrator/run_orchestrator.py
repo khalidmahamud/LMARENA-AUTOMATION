@@ -98,7 +98,7 @@ class RunOrchestrator:
             if combine_with_first:
                 system_prompt = ""
         else:
-            run_id = str(uuid.uuid4())[:8]
+            run_id = request.run_id or str(uuid.uuid4())[:8]
             started_at = datetime.now(timezone.utc)
             start_batch_idx = 0
             restored_results = []
@@ -130,7 +130,7 @@ class RunOrchestrator:
         self._current_batch_index = None
         self._refresh_current_run()
 
-        await self._event_bus.publish(
+        await self._publish(
             Event(
                 type=EventType.RUN_STARTED,
                 data={
@@ -183,7 +183,18 @@ class RunOrchestrator:
             proxies=proxy_list,
             proxy_on_challenge=request.proxy_on_challenge,
             zoom_pct=request.zoom_pct,
+            run_id=run_id,
         )
+
+        # Create run_id-scoped callbacks for workers
+        async def _recreator(index: int) -> object:
+            return await self._browser_manager.recreate_context(index, run_id=run_id)
+
+        def _proxy_getter(index: int) -> object:
+            return self._browser_manager.get_context_proxy(index, run_id=run_id)
+
+        def _proxy_reporter(index: int) -> None:
+            self._browser_manager.report_proxy_success(index, run_id=run_id)
 
         # Phase 2: Create workers
         self._workers = [
@@ -192,9 +203,10 @@ class RunOrchestrator:
                 context=contexts[i],
                 config=self._config,
                 event_bus=self._event_bus,
-                context_recreator=self._browser_manager.recreate_context,
-                proxy_getter=self._browser_manager.get_context_proxy,
-                proxy_success_reporter=self._browser_manager.report_proxy_success,
+                context_recreator=_recreator,
+                proxy_getter=_proxy_getter,
+                proxy_success_reporter=_proxy_reporter,
+                run_id=run_id,
             )
             for i in range(count)
         ]
@@ -213,7 +225,7 @@ class RunOrchestrator:
                 logger.error("Worker %d navigation failed: %s", i, result)
 
         if request.clear_cookies:
-            await self._event_bus.publish(
+            await self._publish(
                 Event(
                     type=EventType.TOAST,
                     data={
@@ -235,7 +247,7 @@ class RunOrchestrator:
         all_window_results: List[WindowResult] = list(restored_results)
 
         if combine_with_first:
-            await self._event_bus.publish(
+            await self._publish(
                 Event(
                     type=EventType.LOG,
                     data={
@@ -257,7 +269,7 @@ class RunOrchestrator:
                 break
 
             # Log batch start
-            await self._event_bus.publish(
+            await self._publish(
                 Event(
                     type=EventType.LOG,
                     data={
@@ -303,7 +315,7 @@ class RunOrchestrator:
             ready_for_actual: dict[int, Tuple[str, str]] = {}
 
             if system_prompt:
-                await self._event_bus.publish(
+                await self._publish(
                     Event(
                         type=EventType.LOG,
                         data={
@@ -377,7 +389,7 @@ class RunOrchestrator:
                             await self._sleep_with_pause(jittered)
 
                 if simultaneous_start and pending_system_prepare:
-                    await self._event_bus.publish(
+                    await self._publish(
                         Event(
                             type=EventType.LOG,
                             data={
@@ -486,7 +498,7 @@ class RunOrchestrator:
                             (worker_idx, worker, actual_prompt)
                         )
 
-                await self._event_bus.publish(
+                await self._publish(
                     Event(
                         type=EventType.LOG,
                         data={
@@ -500,7 +512,7 @@ class RunOrchestrator:
                 )
 
             if simultaneous_start:
-                await self._event_bus.publish(
+                await self._publish(
                     Event(
                         type=EventType.LOG,
                         data={
@@ -617,7 +629,7 @@ class RunOrchestrator:
                         + len(batch_results)
                         + len(submitted)
                     )
-                    await self._event_bus.publish(
+                    await self._publish(
                         Event(
                             type=EventType.RUN_PROGRESS,
                             data={
@@ -681,7 +693,7 @@ class RunOrchestrator:
                         + len(batch_results)
                         + len(submitted)
                     )
-                    await self._event_bus.publish(
+                    await self._publish(
                         Event(
                             type=EventType.RUN_PROGRESS,
                             data={
@@ -738,7 +750,7 @@ class RunOrchestrator:
             all_failures = early_failures + poll_failures
             if all_failures and not self._cancelled:
                 await self._wait_if_paused()
-                await self._event_bus.publish(
+                await self._publish(
                     Event(
                         type=EventType.LOG,
                         data={
@@ -820,7 +832,7 @@ class RunOrchestrator:
                 )
 
             # Emit batch complete progress
-            await self._event_bus.publish(
+            await self._publish(
                 Event(
                     type=EventType.RUN_PROGRESS,
                     data={
@@ -833,7 +845,7 @@ class RunOrchestrator:
                 )
             )
 
-            await self._event_bus.publish(
+            await self._publish(
                 Event(
                     type=EventType.LOG,
                     data={
@@ -872,7 +884,7 @@ class RunOrchestrator:
         if self._checkpoint_manager:
             self._checkpoint_manager.mark_completed(run_id)
 
-        await self._event_bus.publish(
+        await self._publish(
             Event(
                 type=EventType.RUN_COMPLETE,
                 data={"run_result": run_result.model_dump(mode="json")},
@@ -880,7 +892,7 @@ class RunOrchestrator:
         )
 
         # Close browser windows after successful completion
-        await self._browser_manager.close_contexts()
+        await self._browser_manager.close_contexts(run_id=self._active_run_id)
 
         if run_result.successful_windows == 0 and len(all_prompts) > 0:
             raise AllWorkersFailedError(len(all_prompts))
@@ -898,7 +910,7 @@ class RunOrchestrator:
         partial_results: List[WindowResult],
     ) -> RunResult:
         """Clean up after cancellation: close browsers, notify UI, return."""
-        await self._browser_manager.close_contexts()
+        await self._browser_manager.close_contexts(run_id=self._active_run_id)
         run_result = self._build_result(
             run_id, all_prompts, total_batches, started_at, partial_results,
         )
@@ -929,8 +941,8 @@ class RunOrchestrator:
         for worker in self._workers:
             await worker.cancel()
         # Close browsers immediately — don't wait for execute_run to detect the flag
-        await self._browser_manager.close_contexts()
-        await self._event_bus.publish(Event(type=EventType.RUN_CANCELLED))
+        await self._browser_manager.close_contexts(run_id=self._active_run_id)
+        await self._publish(Event(type=EventType.RUN_CANCELLED))
         logger.info("Run cancelled")
 
     async def pause(self) -> None:
@@ -941,8 +953,8 @@ class RunOrchestrator:
         self._resume_event.clear()
         self._refresh_current_run()
         self._save_pause_checkpoint()
-        await self._event_bus.publish(Event(type=EventType.RUN_PAUSED))
-        await self._event_bus.publish(
+        await self._publish(Event(type=EventType.RUN_PAUSED))
+        await self._publish(
             Event(
                 type=EventType.LOG,
                 data={
@@ -958,8 +970,8 @@ class RunOrchestrator:
 
         self._paused = False
         self._resume_event.set()
-        await self._event_bus.publish(Event(type=EventType.RUN_RESUMED))
-        await self._event_bus.publish(
+        await self._publish(Event(type=EventType.RUN_RESUMED))
+        await self._publish(
             Event(
                 type=EventType.LOG,
                 data={"level": "info", "text": "Run resumed"},
@@ -987,6 +999,12 @@ class RunOrchestrator:
                 return
 
             await asyncio.sleep(min(remaining, 0.25))
+
+    async def _publish(self, event: Event) -> None:
+        """Publish an event, automatically stamping the current run_id."""
+        if event.run_id is None:
+            event.run_id = self._active_run_id
+        await self._publish(event)
 
     @staticmethod
     def _build_result(
@@ -1193,7 +1211,7 @@ class RunOrchestrator:
             await self._publish_failed_worker_result(worker, result)
             return result
 
-        await self._event_bus.publish(
+        await self._publish(
             Event(
                 type=EventType.LOG,
                 worker_id=worker_idx,
@@ -1303,14 +1321,14 @@ class RunOrchestrator:
                 exc,
             )
 
-        await self._event_bus.publish(
+        await self._publish(
             Event(
                 type=EventType.WORKER_ERROR,
                 worker_id=result.worker_id,
                 data={"error": error_text},
             )
         )
-        await self._event_bus.publish(
+        await self._publish(
             Event(
                 type=EventType.WORKER_COMPLETE,
                 worker_id=result.worker_id,

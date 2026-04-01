@@ -49,6 +49,7 @@ class Event:
     )
     data: Dict[str, Any] = field(default_factory=dict)
     worker_id: Optional[int] = None
+    run_id: Optional[str] = None
 
 
 class EventBus:

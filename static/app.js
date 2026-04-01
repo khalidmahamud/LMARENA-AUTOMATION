@@ -16,6 +16,14 @@
   let workerData = {};   // live data per worker
   let incrementalResults = {}; // worker_id -> result payload (available as each worker completes)
 
+  // Multi-prompt card state
+  let promptCards = {};     // cardId -> card state object
+  let nextCardIndex = 1;    // counter for card numbering
+
+  function generateCardId() {
+    return "card_" + Date.now() + "_" + (nextCardIndex++);
+  }
+
   // File upload state
   let promptMode = "manual"; // "manual" | "file"
   let uploadedRows = null;   // raw parsed rows from backend
@@ -602,31 +610,65 @@
   // ══════════════════════════════════════
 
   function handleMessage(msg) {
+    const runId = msg.run_id;
+
     switch (msg.type) {
       case "worker_update":
-        updateWorkerCard(msg);
-        updateResultRow(msg);
+        if (runId && promptCards[runId]) {
+          updateCardWorker(runId, msg);
+        } else {
+          updateWorkerCard(msg);
+          updateResultRow(msg);
+        }
         break;
       case "worker_result":
-        onWorkerResult(msg.result);
+        if (runId && promptCards[runId]) {
+          onCardWorkerResult(runId, msg.result);
+        } else {
+          onWorkerResult(msg.result);
+        }
         break;
       case "worker_partial_result":
-        onWorkerPartialResult(msg.result);
+        if (runId && promptCards[runId]) {
+          onCardPartialResult(runId, msg.result);
+        } else {
+          onWorkerPartialResult(msg.result);
+        }
         break;
       case "run_progress":
-        updateProgress(msg);
+        if (runId && promptCards[runId]) {
+          updateCardProgress(runId, msg);
+        } else {
+          updateProgress(msg);
+        }
         break;
       case "run_complete":
-        onRunComplete(msg);
+        if (runId && promptCards[runId]) {
+          onCardRunComplete(runId, msg);
+        } else {
+          onRunComplete(msg);
+        }
         break;
       case "run_cancelled":
-        onRunCancelled();
+        if (runId && promptCards[runId]) {
+          onCardRunCancelled(runId);
+        } else {
+          onRunCancelled();
+        }
         break;
       case "run_paused":
-        onRunPaused();
+        if (runId && promptCards[runId]) {
+          onCardRunPaused(runId);
+        } else {
+          onRunPaused();
+        }
         break;
       case "run_resumed":
-        onRunResumed();
+        if (runId && promptCards[runId]) {
+          onCardRunResumed(runId);
+        } else {
+          onRunResumed();
+        }
         break;
       case "challenge_detected":
         appendLog("warning", msg.message, msg.worker_id);
@@ -1304,6 +1346,23 @@
     // Show/hide paste & clear buttons (only for manual mode)
     pasteBtn.style.display = mode === "manual" ? "" : "none";
     clearBtn.style.display = mode === "manual" ? "" : "none";
+    // Show/hide prompt cards vs file mode
+    const cardsContainer = document.getElementById("prompt-cards-container");
+    const cardsToolbar = document.getElementById("prompt-cards-toolbar");
+    if (cardsContainer) {
+      if (mode === "file") {
+        cardsContainer.classList.add("hidden");
+      } else {
+        cardsContainer.classList.remove("hidden");
+      }
+    }
+    if (cardsToolbar) {
+      if (mode === "file") {
+        cardsToolbar.classList.add("hidden");
+      } else {
+        cardsToolbar.classList.remove("hidden");
+      }
+    }
     saveSettings();
   }
 
@@ -2304,6 +2363,530 @@ html, body { margin: 0; padding: 0; background: #fff; color: #111;
   });
 
   // ══════════════════════════════════════
+  // Multi-Prompt Cards
+  // ══════════════════════════════════════
+
+  function createPromptCard(cardId) {
+    if (!cardId) cardId = generateCardId();
+    var index = nextCardIndex - 1; // generateCardId already incremented
+    if (promptCards[cardId]) return cardId; // already exists
+
+    var card = {
+      id: cardId,
+      index: index,
+      running: false,
+      paused: false,
+      pauseTransitionPending: false,
+      runStartTime: null,
+      workerStartTimes: {},
+      workerData: {},
+      incrementalResults: {},
+      runResults: null,
+      images: [],
+      _uploadedImages: [],
+      settings: {
+        prompt: "",
+        system_prompt: "",
+        combine_with_first: false,
+        window_count: 4,
+        submission_gap: 30,
+        model_a: "",
+        model_b: "",
+        retain_output: "both",
+        clear_cookies: false,
+        incognito: false,
+        simultaneous_start: false,
+        zoom_pct: 100,
+      },
+    };
+
+    promptCards[cardId] = card;
+
+    var el = document.createElement("div");
+    el.className = "prompt-card";
+    el.setAttribute("data-card-id", cardId);
+    el.innerHTML =
+      '<div class="prompt-card-header">' +
+        '<span class="prompt-card-title">Prompt #' + index + '</span>' +
+        '<span class="prompt-card-status">Idle</span>' +
+        '<div class="prompt-card-actions">' +
+          '<button class="btn-card-run" data-card-id="' + cardId + '">&#9654; Run</button>' +
+          '<button class="btn-card-stop" data-card-id="' + cardId + '" disabled>&#9632; Stop</button>' +
+          '<button class="btn-card-collapse" data-card-id="' + cardId + '">&#9660;</button>' +
+          '<button class="btn-card-remove" data-card-id="' + cardId + '">&times;</button>' +
+        '</div>' +
+      '</div>' +
+      '<div class="prompt-card-body">' +
+        '<details class="system-prompt-details">' +
+          '<summary class="system-prompt-toggle">System Prompt</summary>' +
+          '<label class="combine-prompt-option">' +
+            '<input type="checkbox" class="card-combine-first" /> Combine with prompt' +
+          '</label>' +
+          '<textarea class="card-system-prompt" rows="2" placeholder="e.g. You are a helpful assistant."></textarea>' +
+        '</details>' +
+        '<div class="prompt-input-wrap card-image-upload-area">' +
+          '<textarea class="card-prompt" rows="4" placeholder="Enter your prompt here... (drag images onto this box)"></textarea>' +
+          '<div class="prompt-input-toolbar">' +
+            '<button type="button" class="btn-attach card-btn-attach" title="Attach images">&#128206;</button>' +
+            '<span class="attach-hint card-attach-hint"></span>' +
+          '</div>' +
+        '</div>' +
+        '<div class="image-thumbnails card-image-thumbnails"></div>' +
+        '<details class="card-settings-details">' +
+          '<summary>Settings</summary>' +
+          '<div class="card-settings-grid">' +
+            '<div class="card-setting"><label>Windows</label><input type="number" class="card-window-count" value="4" min="1" max="12" /></div>' +
+            '<div class="card-setting"><label>Gap (sec)</label><input type="number" class="card-gap" value="30" min="5" max="300" /></div>' +
+            '<div class="card-setting"><label>Model A</label><input type="text" class="card-model-a" placeholder="optional" /></div>' +
+            '<div class="card-setting"><label>Model B</label><input type="text" class="card-model-b" placeholder="optional" /></div>' +
+            '<div class="card-setting"><label>Retain</label>' +
+              '<select class="card-retain">' +
+                '<option value="both">Both</option>' +
+                '<option value="model_a">Model A</option>' +
+                '<option value="model_b">Model B</option>' +
+              '</select>' +
+            '</div>' +
+            '<div class="card-setting"><label>Zoom %</label><input type="number" class="card-zoom" value="100" min="25" max="200" step="5" /></div>' +
+            '<div class="card-setting checkbox-group"><label><input type="checkbox" class="card-clear-cookies" /> Clear cookies</label></div>' +
+            '<div class="card-setting checkbox-group"><label><input type="checkbox" class="card-incognito" /> Incognito</label></div>' +
+            '<div class="card-setting checkbox-group"><label><input type="checkbox" class="card-simultaneous" /> Simultaneous</label></div>' +
+          '</div>' +
+        '</details>' +
+        '<div class="card-progress hidden">' +
+          '<span class="card-eta">ETA: &mdash;</span>' +
+          '<div class="progress-track"><div class="progress-fill card-progress-fill"></div></div>' +
+          '<span class="card-progress-pct">0%</span>' +
+        '</div>' +
+        '<details class="card-results-details">' +
+          '<summary>Results (<span class="card-results-count">0</span>)</summary>' +
+          '<div class="card-results-body"></div>' +
+        '</details>' +
+      '</div>';
+
+    var container = document.getElementById("prompt-cards-container");
+    if (container) container.appendChild(el);
+
+    // Event listeners for card buttons
+    el.querySelector(".btn-card-run").addEventListener("click", function () {
+      var c = promptCards[cardId];
+      if (c.running) {
+        // Pause/resume toggle
+        if (c.pauseTransitionPending) return;
+        c.pauseTransitionPending = true;
+        updateCardRunState(cardId);
+        send({ type: c.paused ? "resume_run" : "pause_run", run_id: cardId });
+      } else {
+        startCardRun(cardId);
+      }
+    });
+
+    el.querySelector(".btn-card-stop").addEventListener("click", function () {
+      stopCardRun(cardId);
+    });
+
+    el.querySelector(".btn-card-collapse").addEventListener("click", function () {
+      var body = el.querySelector(".prompt-card-body");
+      var btn = el.querySelector(".btn-card-collapse");
+      body.classList.toggle("collapsed");
+      btn.innerHTML = body.classList.contains("collapsed") ? "&#9654;" : "&#9660;";
+    });
+
+    el.querySelector(".btn-card-remove").addEventListener("click", function () {
+      removePromptCard(cardId);
+    });
+
+    // Image upload handling for this card
+    var cardUploadArea = el.querySelector(".card-image-upload-area");
+    var cardAttachBtn = el.querySelector(".card-btn-attach");
+    var cardThumbnails = el.querySelector(".card-image-thumbnails");
+    var cardAttachHint = el.querySelector(".card-attach-hint");
+
+    function addCardImage(file) {
+      if (card._uploadedImages.length >= 10) return;
+      if (file.size > 5 * 1024 * 1024) return;
+
+      var reader = new FileReader();
+      reader.onload = function (e) {
+        var base64 = e.target.result.split(",")[1];
+        card._uploadedImages.push({
+          data: base64,
+          mime_type: file.type,
+          filename: file.name,
+        });
+        cardAttachHint.textContent = card._uploadedImages.length + " image(s)";
+        // Render thumbnail
+        var thumb = document.createElement("div");
+        thumb.className = "image-thumb";
+        var idx = card._uploadedImages.length - 1;
+        thumb.innerHTML = '<img src="' + e.target.result + '" /><button class="thumb-remove" data-idx="' + idx + '">&times;</button>';
+        thumb.querySelector(".thumb-remove").addEventListener("click", function () {
+          card._uploadedImages.splice(idx, 1);
+          thumb.remove();
+          cardAttachHint.textContent = card._uploadedImages.length > 0 ? card._uploadedImages.length + " image(s)" : "";
+        });
+        cardThumbnails.appendChild(thumb);
+      };
+      reader.readAsDataURL(file);
+    }
+
+    cardUploadArea.addEventListener("dragover", function (e) {
+      e.preventDefault();
+      cardUploadArea.classList.add("drag-over");
+    });
+    cardUploadArea.addEventListener("dragleave", function () {
+      cardUploadArea.classList.remove("drag-over");
+    });
+    cardUploadArea.addEventListener("drop", function (e) {
+      e.preventDefault();
+      cardUploadArea.classList.remove("drag-over");
+      Array.from(e.dataTransfer.files).forEach(function (f) {
+        if (f.type.startsWith("image/")) addCardImage(f);
+      });
+    });
+    cardAttachBtn.addEventListener("click", function () {
+      var inp = document.createElement("input");
+      inp.type = "file";
+      inp.accept = "image/png,image/jpeg,image/webp,image/gif";
+      inp.multiple = true;
+      inp.onchange = function () { Array.from(inp.files).forEach(addCardImage); };
+      inp.click();
+    });
+
+    // Save settings on card input changes
+    el.querySelector(".card-prompt").addEventListener("input", saveSettings);
+    el.querySelector(".card-system-prompt").addEventListener("input", saveSettings);
+    el.querySelector(".card-combine-first").addEventListener("change", saveSettings);
+    el.querySelector(".card-window-count").addEventListener("input", saveSettings);
+    el.querySelector(".card-gap").addEventListener("input", saveSettings);
+    el.querySelector(".card-model-a").addEventListener("input", saveSettings);
+    el.querySelector(".card-model-b").addEventListener("input", saveSettings);
+    el.querySelector(".card-retain").addEventListener("change", saveSettings);
+    el.querySelector(".card-zoom").addEventListener("input", saveSettings);
+    el.querySelector(".card-clear-cookies").addEventListener("change", saveSettings);
+    el.querySelector(".card-incognito").addEventListener("change", saveSettings);
+    el.querySelector(".card-simultaneous").addEventListener("change", saveSettings);
+
+    return cardId;
+  }
+
+  function startCardRun(cardId) {
+    var card = promptCards[cardId];
+    if (!card || card.running) return;
+
+    var el = document.querySelector('.prompt-card[data-card-id="' + cardId + '"]');
+    var promptText = el.querySelector(".card-prompt").value.trim();
+    if (!promptText) {
+      el.querySelector(".card-prompt").focus();
+      return;
+    }
+
+    card.running = true;
+    card.paused = false;
+    card.pauseTransitionPending = false;
+    card.runStartTime = Date.now();
+    card.workerStartTimes = {};
+    card.workerData = {};
+    card.incrementalResults = {};
+    card.runResults = null;
+    card.images = getCardImages(cardId);
+
+    // Read per-card settings
+    var windowCount = parseInt(el.querySelector(".card-window-count").value, 10) || 4;
+    var gap = parseFloat(el.querySelector(".card-gap").value) || null;
+    var modelA = el.querySelector(".card-model-a").value.trim() || null;
+    var modelB = el.querySelector(".card-model-b").value.trim() || null;
+    var retain = el.querySelector(".card-retain").value;
+    var zoom = parseInt(el.querySelector(".card-zoom").value, 10) || 100;
+    var clearCookies = el.querySelector(".card-clear-cookies").checked;
+    var incognito = el.querySelector(".card-incognito").checked;
+    var simultaneous = el.querySelector(".card-simultaneous").checked;
+    var systemPrompt = el.querySelector(".card-system-prompt").value.trim() || "";
+    var combineFirst = el.querySelector(".card-combine-first").checked;
+
+    // Read global settings
+    var monW = parseInt(monitorWidthInput.value, 10) || screen.availWidth || 1920;
+    var monH = parseInt(monitorHeightInput.value, 10) || screen.availHeight || 1080;
+
+    // Update UI
+    updateCardRunState(cardId);
+
+    send({
+      type: "start_run",
+      run_id: cardId,
+      prompt: promptText,
+      system_prompt: systemPrompt,
+      combine_with_first: combineFirst,
+      window_count: windowCount,
+      submission_gap_seconds: gap,
+      model_a: modelA,
+      model_b: modelB,
+      retain_output: retain,
+      clear_cookies: clearCookies,
+      incognito: incognito,
+      images: card.images.length > 0 ? card.images.map(function (img) { return { data: img.data, mime_type: img.mime_type, filename: img.filename }; }) : null,
+      simultaneous_start: simultaneous,
+      zoom_pct: zoom,
+      monitor_count: parseInt(monitorCountInput.value, 10) || 1,
+      monitor_width: monW,
+      monitor_height: monH,
+      taskbar_height: parseInt(taskbarHeightInput.value, 10) || 0,
+      margin: parseInt(tileMarginInput.value, 10) || 0,
+      proxies: parseProxyList(proxyListInput.value),
+      proxy_on_challenge: proxyOnChallengeInput.checked,
+    });
+
+    appendLog("info", "[Prompt #" + card.index + "] Starting run with " + windowCount + " window(s)...");
+  }
+
+  function stopCardRun(cardId) {
+    send({ type: "stop_run", run_id: cardId });
+    var card = promptCards[cardId];
+    appendLog("warning", "[Prompt #" + (card ? card.index : "?") + "] Stop requested...");
+  }
+
+  function removePromptCard(cardId) {
+    var card = promptCards[cardId];
+    if (card && card.running) {
+      stopCardRun(cardId);
+    }
+    delete promptCards[cardId];
+    var el = document.querySelector('.prompt-card[data-card-id="' + cardId + '"]');
+    if (el) el.remove();
+    // Ensure at least one card exists
+    if (Object.keys(promptCards).length === 0) {
+      createPromptCard();
+    }
+  }
+
+  function getCardImages(cardId) {
+    return promptCards[cardId] ? promptCards[cardId]._uploadedImages : [];
+  }
+
+  function updateCardRunState(cardId) {
+    var card = promptCards[cardId];
+    var el = document.querySelector('.prompt-card[data-card-id="' + cardId + '"]');
+    if (!el || !card) return;
+
+    var statusEl = el.querySelector(".prompt-card-status");
+    var runBtn = el.querySelector(".btn-card-run");
+    var stopBtn2 = el.querySelector(".btn-card-stop");
+    var progressEl = el.querySelector(".card-progress");
+
+    el.classList.remove("running", "completed", "error");
+
+    if (card.running) {
+      el.classList.add("running");
+      statusEl.textContent = card.paused ? "Paused" : "Running";
+      statusEl.className = "prompt-card-status status-running";
+      runBtn.innerHTML = card.paused ? "&#9654; Resume" : "&#9208; Pause";
+      runBtn.disabled = card.pauseTransitionPending;
+      stopBtn2.disabled = false;
+      progressEl.classList.remove("hidden");
+    } else {
+      var hasResults = Object.keys(card.incrementalResults || {}).length > 0;
+      if (hasResults) {
+        el.classList.add("completed");
+        statusEl.textContent = "Complete";
+        statusEl.className = "prompt-card-status status-complete";
+      } else {
+        statusEl.textContent = "Idle";
+        statusEl.className = "prompt-card-status";
+      }
+      runBtn.innerHTML = "&#9654; Run";
+      runBtn.disabled = false;
+      stopBtn2.disabled = true;
+    }
+  }
+
+  // ── Card-specific message handlers ──
+
+  function updateCardWorker(runId, msg) {
+    var card = promptCards[runId];
+    if (!card) return;
+
+    // Store worker data in card
+    card.workerData[msg.worker_id] = {
+      state: msg.state,
+      progress_pct: msg.progress_pct,
+      message: msg.message || "",
+      error: msg.error || null,
+    };
+    if (!card.workerStartTimes[msg.worker_id] && msg.state !== "idle") {
+      card.workerStartTimes[msg.worker_id] = Date.now();
+    }
+
+    // Also update the global worker cards (in sidebar)
+    updateWorkerCard(msg);
+    // And the global results table
+    updateResultRow(msg);
+  }
+
+  function onCardWorkerResult(runId, result) {
+    var card = promptCards[runId];
+    if (!card) return;
+
+    card.incrementalResults[result.worker_id] = result;
+
+    // Update card results count
+    var el = document.querySelector('.prompt-card[data-card-id="' + runId + '"]');
+    if (el) {
+      var countEl = el.querySelector(".card-results-count");
+      if (countEl) countEl.textContent = Object.keys(card.incrementalResults).length;
+    }
+
+    // Also update global results table
+    onWorkerResult(result);
+  }
+
+  function onCardPartialResult(runId, partial) {
+    var card = promptCards[runId];
+    if (!card) return;
+
+    if (!card.incrementalResults[partial.worker_id]) {
+      card.incrementalResults[partial.worker_id] = { worker_id: partial.worker_id };
+    }
+    var ir = card.incrementalResults[partial.worker_id];
+    if (partial.slide === "a") {
+      ir.model_a_name = partial.model_name;
+      ir.model_a_response = partial.response;
+      ir.model_a_response_html = partial.response_html;
+    } else {
+      ir.model_b_name = partial.model_name;
+      ir.model_b_response = partial.response;
+      ir.model_b_response_html = partial.response_html;
+    }
+
+    // Also update global
+    onWorkerPartialResult(partial);
+  }
+
+  function updateCardProgress(runId, msg) {
+    var card = promptCards[runId];
+    if (!card) return;
+
+    var el = document.querySelector('.prompt-card[data-card-id="' + runId + '"]');
+    if (!el) return;
+
+    var pct = Math.round(msg.overall_pct);
+    var fillEl = el.querySelector(".card-progress-fill");
+    var pctEl = el.querySelector(".card-progress-pct");
+    var etaEl = el.querySelector(".card-eta");
+
+    if (fillEl) fillEl.style.width = pct + "%";
+    if (pctEl) pctEl.textContent = pct + "%";
+
+    if (card.paused) {
+      if (etaEl) etaEl.textContent = "Paused";
+    } else if (card.runStartTime && pct > 0 && pct < 100) {
+      var elapsed = (Date.now() - card.runStartTime) / 1000;
+      var totalEstimate = (elapsed / pct) * 100;
+      var remaining = Math.max(0, totalEstimate - elapsed);
+      if (etaEl) etaEl.textContent = "ETA: ~" + formatDuration(remaining);
+    }
+
+    // Also update global progress (file mode uses this)
+    updateProgress(msg);
+  }
+
+  function onCardRunComplete(runId, msg) {
+    var card = promptCards[runId];
+    if (!card) return;
+
+    card.running = false;
+    card.paused = false;
+    card.pauseTransitionPending = false;
+    card.runResults = msg.results;
+
+    var el = document.querySelector('.prompt-card[data-card-id="' + runId + '"]');
+    if (el) {
+      var fillEl = el.querySelector(".card-progress-fill");
+      var pctEl = el.querySelector(".card-progress-pct");
+      var etaEl = el.querySelector(".card-eta");
+      var countEl = el.querySelector(".card-results-count");
+      if (fillEl) fillEl.style.width = "100%";
+      if (pctEl) pctEl.textContent = "100%";
+      if (etaEl) etaEl.textContent = "Complete";
+      if (countEl) countEl.textContent = msg.results.length;
+    }
+
+    updateCardRunState(runId);
+    updateStopAllState();
+
+    // Update global results
+    onRunComplete(msg);
+  }
+
+  function onCardRunCancelled(runId) {
+    var card = promptCards[runId];
+    if (!card) return;
+
+    card.running = false;
+    card.paused = false;
+    card.pauseTransitionPending = false;
+
+    var el = document.querySelector('.prompt-card[data-card-id="' + runId + '"]');
+    if (el) {
+      var etaEl = el.querySelector(".card-eta");
+      if (etaEl) etaEl.textContent = "Cancelled";
+    }
+
+    updateCardRunState(runId);
+    updateStopAllState();
+    appendLog("warning", "[Prompt #" + card.index + "] Run cancelled");
+  }
+
+  function onCardRunPaused(runId) {
+    var card = promptCards[runId];
+    if (!card || !card.running) return;
+    card.paused = true;
+    card.pauseTransitionPending = false;
+    updateCardRunState(runId);
+  }
+
+  function onCardRunResumed(runId) {
+    var card = promptCards[runId];
+    if (!card || !card.running) return;
+    card.paused = false;
+    card.pauseTransitionPending = false;
+    updateCardRunState(runId);
+  }
+
+  function updateStopAllState() {
+    var anyRunning = Object.values(promptCards).some(function (c) { return c.running; });
+    var btn = document.getElementById("btn-stop-all");
+    if (btn) btn.disabled = !anyRunning;
+  }
+
+  // ── Card toolbar buttons ──
+
+  (function () {
+    var addCardBtn = document.getElementById("btn-add-card");
+    if (addCardBtn) {
+      addCardBtn.addEventListener("click", function () {
+        createPromptCard();
+      });
+    }
+
+    var runAllBtn = document.getElementById("btn-run-all");
+    if (runAllBtn) {
+      runAllBtn.addEventListener("click", function () {
+        Object.keys(promptCards).forEach(function (cid) {
+          if (!promptCards[cid].running) startCardRun(cid);
+        });
+      });
+    }
+
+    var stopAllBtn = document.getElementById("btn-stop-all");
+    if (stopAllBtn) {
+      stopAllBtn.addEventListener("click", function () {
+        Object.keys(promptCards).forEach(function (cid) {
+          if (promptCards[cid].running) stopCardRun(cid);
+        });
+      });
+    }
+  })();
+
+  // ══════════════════════════════════════
   // Settings Persistence (localStorage)
   // ══════════════════════════════════════
 
@@ -2336,6 +2919,25 @@ html, body { margin: 0; padding: 0; background: #fff; color: #111;
       obj[f.key] = f.checkbox ? f.el.checked : f.el.value;
     });
     obj.prompt_mode = promptMode;
+    // Save card states
+    obj.cards = Object.values(promptCards).map(function (c) {
+      var el = document.querySelector('.prompt-card[data-card-id="' + c.id + '"]');
+      if (!el) return null;
+      return {
+        prompt: el.querySelector(".card-prompt") ? el.querySelector(".card-prompt").value : "",
+        system_prompt: el.querySelector(".card-system-prompt") ? el.querySelector(".card-system-prompt").value : "",
+        combine_with_first: el.querySelector(".card-combine-first") ? el.querySelector(".card-combine-first").checked : false,
+        window_count: el.querySelector(".card-window-count") ? el.querySelector(".card-window-count").value : "4",
+        gap: el.querySelector(".card-gap") ? el.querySelector(".card-gap").value : "30",
+        model_a: el.querySelector(".card-model-a") ? el.querySelector(".card-model-a").value : "",
+        model_b: el.querySelector(".card-model-b") ? el.querySelector(".card-model-b").value : "",
+        retain: el.querySelector(".card-retain") ? el.querySelector(".card-retain").value : "both",
+        zoom: el.querySelector(".card-zoom") ? el.querySelector(".card-zoom").value : "100",
+        clear_cookies: el.querySelector(".card-clear-cookies") ? el.querySelector(".card-clear-cookies").checked : false,
+        incognito: el.querySelector(".card-incognito") ? el.querySelector(".card-incognito").checked : false,
+        simultaneous: el.querySelector(".card-simultaneous") ? el.querySelector(".card-simultaneous").checked : false,
+      };
+    }).filter(Boolean);
     try { localStorage.setItem(STORAGE_KEY, JSON.stringify(obj)); } catch {}
   }
 
@@ -2352,6 +2954,26 @@ html, body { margin: 0; padding: 0; background: #fff; color: #111;
       });
       if (obj.prompt_mode) {
         setPromptMode(obj.prompt_mode);
+      }
+      // Restore cards
+      if (obj.cards && Array.isArray(obj.cards) && obj.cards.length > 0) {
+        obj.cards.forEach(function (cardData) {
+          var cardId = createPromptCard();
+          var el = document.querySelector('.prompt-card[data-card-id="' + cardId + '"]');
+          if (!el) return;
+          if (cardData.prompt) el.querySelector(".card-prompt").value = cardData.prompt;
+          if (cardData.system_prompt) el.querySelector(".card-system-prompt").value = cardData.system_prompt;
+          el.querySelector(".card-combine-first").checked = cardData.combine_with_first || false;
+          el.querySelector(".card-window-count").value = cardData.window_count || "4";
+          el.querySelector(".card-gap").value = cardData.gap || "30";
+          el.querySelector(".card-model-a").value = cardData.model_a || "";
+          el.querySelector(".card-model-b").value = cardData.model_b || "";
+          el.querySelector(".card-retain").value = cardData.retain || "both";
+          el.querySelector(".card-zoom").value = cardData.zoom || "100";
+          el.querySelector(".card-clear-cookies").checked = cardData.clear_cookies || false;
+          el.querySelector(".card-incognito").checked = cardData.incognito || false;
+          el.querySelector(".card-simultaneous").checked = cardData.simultaneous || false;
+        });
       }
     } catch {}
   }
@@ -2595,6 +3217,21 @@ html, body { margin: 0; padding: 0; background: #fff; color: #111;
 
   // Restore file upload state if present
   restoreFileState();
+
+  // Create default card if none exist (first load or migration from old format)
+  if (Object.keys(promptCards).length === 0) {
+    var defaultCardId = createPromptCard();
+    // Migrate old prompt/system_prompt if present
+    var oldPrompt = promptInput.value;
+    var oldSys = systemPromptInput.value;
+    if (oldPrompt || oldSys) {
+      var defaultEl = document.querySelector('.prompt-card[data-card-id="' + defaultCardId + '"]');
+      if (defaultEl) {
+        if (oldPrompt) defaultEl.querySelector(".card-prompt").value = oldPrompt;
+        if (oldSys) defaultEl.querySelector(".card-system-prompt").value = oldSys;
+      }
+    }
+  }
 
   connect();
 })();

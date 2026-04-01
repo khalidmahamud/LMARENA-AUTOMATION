@@ -2816,3 +2816,392 @@ textarea::placeholder {
     gap: 0.25rem;
   }
 }
+
+/* ═══════════════════════════════════════════
+   Multi-Prompt Cards
+   ═══════════════════════════════════════════ */
+
+#prompt-cards-container {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.prompt-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg, 8px);
+  overflow: hidden;
+  transition: border-color 0.2s ease;
+}
+
+.prompt-card.running {
+  border-color: var(--accent);
+  box-shadow: 0 0 8px var(--accent-glow);
+}
+
+.prompt-card.completed {
+  border-color: var(--green-border);
+}
+
+.prompt-card.error {
+  border-color: var(--red-border, rgba(239, 68, 68, 0.3));
+}
+
+.prompt-card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.4rem 0.75rem;
+  background: var(--surface-2);
+  border-bottom: 1px solid var(--border);
+  gap: 0.5rem;
+}
+
+.prompt-card-title {
+  font-family: var(--font-mono, 'JetBrains Mono', monospace);
+  font-size: 0.7rem;
+  font-weight: 600;
+  color: var(--text);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.prompt-card-status {
+  font-size: 0.65rem;
+  color: var(--text-dim);
+  margin-left: auto;
+  margin-right: 0.5rem;
+}
+
+.prompt-card-status.status-running {
+  color: var(--accent);
+}
+
+.prompt-card-status.status-complete {
+  color: var(--green);
+}
+
+.prompt-card-actions {
+  display: flex;
+  gap: 0.25rem;
+  align-items: center;
+}
+
+.prompt-card-actions button {
+  background: var(--surface-3);
+  color: var(--text-muted);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 0.15rem 0.4rem;
+  font-size: 0.65rem;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  font-family: inherit;
+}
+
+.prompt-card-actions button:hover:not(:disabled) {
+  background: var(--border);
+  color: var(--text);
+}
+
+.prompt-card-actions button:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
+.btn-card-run {
+  color: var(--green) !important;
+  border-color: var(--green-border) !important;
+}
+
+.btn-card-run:hover:not(:disabled) {
+  background: var(--green-bg) !important;
+}
+
+.btn-card-stop {
+  color: var(--red, #ef4444) !important;
+  border-color: rgba(239, 68, 68, 0.25) !important;
+}
+
+.btn-card-stop:hover:not(:disabled) {
+  background: rgba(239, 68, 68, 0.08) !important;
+}
+
+.btn-card-remove:hover {
+  color: var(--red, #ef4444) !important;
+}
+
+.prompt-card-body {
+  padding: 0.5rem 0.75rem;
+}
+
+.prompt-card-body.collapsed {
+  display: none;
+}
+
+/* Card system prompt */
+.prompt-card .system-prompt-details {
+  margin-bottom: 0.4rem;
+}
+
+.prompt-card .system-prompt-toggle {
+  font-size: 0.7rem;
+}
+
+.prompt-card .card-system-prompt {
+  width: 100%;
+  box-sizing: border-box;
+  background: var(--surface-2);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 0.4rem;
+  font-family: var(--font-mono, 'JetBrains Mono', monospace);
+  font-size: 0.75rem;
+  resize: vertical;
+  margin-top: 0.3rem;
+}
+
+/* Card prompt textarea */
+.prompt-card .card-prompt {
+  width: 100%;
+  box-sizing: border-box;
+  background: var(--surface-2);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 0.5rem;
+  font-family: var(--font-mono, 'JetBrains Mono', monospace);
+  font-size: 0.8rem;
+  resize: vertical;
+  line-height: 1.5;
+}
+
+.prompt-card .card-prompt:focus {
+  border-color: var(--accent);
+  outline: none;
+  box-shadow: 0 0 0 2px var(--accent-glow);
+}
+
+.prompt-card .prompt-input-wrap {
+  position: relative;
+}
+
+.prompt-card .prompt-input-toolbar {
+  position: absolute;
+  bottom: 0.3rem;
+  right: 0.3rem;
+  display: flex;
+  align-items: center;
+  gap: 0.3rem;
+}
+
+.prompt-card .btn-attach {
+  background: none;
+  border: none;
+  color: var(--text-dim);
+  cursor: pointer;
+  font-size: 0.85rem;
+  padding: 0.15rem;
+}
+
+.prompt-card .btn-attach:hover {
+  color: var(--accent);
+}
+
+.prompt-card .attach-hint {
+  font-size: 0.6rem;
+  color: var(--text-dim);
+}
+
+.prompt-card .card-image-thumbnails {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.3rem;
+  margin-top: 0.3rem;
+}
+
+.prompt-card .card-image-upload-area.drag-over {
+  border-color: var(--accent);
+  background: var(--accent-muted);
+}
+
+/* Card settings */
+.card-settings-details {
+  margin-top: 0.4rem;
+}
+
+.card-settings-details summary {
+  font-size: 0.7rem;
+  color: var(--text-muted);
+  cursor: pointer;
+  user-select: none;
+}
+
+.card-settings-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
+  gap: 0.35rem;
+  padding: 0.4rem 0;
+}
+
+.card-setting {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+}
+
+.card-setting label {
+  font-size: 0.6rem;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.card-setting input,
+.card-setting select {
+  background: var(--surface-2);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 0.2rem 0.35rem;
+  font-size: 0.7rem;
+  font-family: var(--font-mono, 'JetBrains Mono', monospace);
+}
+
+.card-setting.checkbox-group {
+  flex-direction: row;
+  align-items: center;
+}
+
+.card-setting.checkbox-group label {
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+  font-size: 0.65rem;
+  text-transform: none;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+
+/* Card progress */
+.card-progress {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-top: 0.5rem;
+  font-size: 0.65rem;
+  color: var(--text-muted);
+}
+
+.card-progress .progress-track {
+  flex: 1;
+  height: 3px;
+  background: var(--surface-3);
+  border-radius: 2px;
+  overflow: hidden;
+}
+
+.card-progress .progress-fill {
+  height: 100%;
+  background: var(--accent);
+  border-radius: 2px;
+  transition: width 0.3s ease;
+  width: 0%;
+}
+
+/* Card results */
+.card-results-details {
+  margin-top: 0.4rem;
+}
+
+.card-results-details summary {
+  font-size: 0.7rem;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+
+/* Prompt cards toolbar */
+.prompt-cards-toolbar {
+  display: flex;
+  gap: 0.4rem;
+  margin-top: 0.5rem;
+  align-items: center;
+}
+
+.btn-add-card {
+  background: var(--surface-2);
+  color: var(--text-muted);
+  border: 1px dashed var(--border-light);
+  border-radius: 6px;
+  padding: 0.3rem 0.75rem;
+  font-size: 0.7rem;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  font-family: var(--font-mono, 'JetBrains Mono', monospace);
+}
+
+.btn-add-card:hover {
+  background: var(--surface-3);
+  color: var(--text);
+  border-color: var(--accent);
+}
+
+.btn-run-all,
+.btn-stop-all {
+  font-size: 0.7rem;
+  padding: 0.3rem 0.6rem;
+}
+
+/* Panel mode toggle — compact when file mode is hidden */
+.panel-mode-toggle {
+  margin-bottom: 0;
+}
+
+.panel-mode-toggle .panel-header {
+  padding: 0.4rem 0.75rem;
+}
+
+/* Image thumbnail in cards */
+.prompt-card .image-thumb {
+  position: relative;
+  width: 48px;
+  height: 48px;
+  border-radius: 4px;
+  overflow: hidden;
+  border: 1px solid var(--border);
+}
+
+.prompt-card .image-thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.prompt-card .image-thumb .thumb-remove {
+  position: absolute;
+  top: -2px;
+  right: -2px;
+  background: rgba(0, 0, 0, 0.7);
+  color: var(--text);
+  border: none;
+  border-radius: 50%;
+  width: 14px;
+  height: 14px;
+  font-size: 10px;
+  line-height: 14px;
+  text-align: center;
+  cursor: pointer;
+  padding: 0;
+}
+
+/* Combine option in card */
+.prompt-card .combine-prompt-option {
+  display: flex;
+  align-items: center;
+  gap: 0.3rem;
+  font-size: 0.65rem;
+  color: var(--text-muted);
+  margin: 0.2rem 0;
+}
