@@ -2872,6 +2872,8 @@ html, body { margin: 0; padding: 0; background: #fff; color: #111;
           if (inst.clear_cookies !== undefined) el.querySelector(".card-clear-cookies").checked = !!inst.clear_cookies;
           if (inst.incognito !== undefined) el.querySelector(".card-incognito").checked = !!inst.incognito;
           if (inst.simultaneous_start !== undefined) el.querySelector(".card-simultaneous").checked = !!inst.simultaneous_start;
+          // Trigger preview update (setting .value doesn't fire input event)
+          el.querySelector(".card-prompt").dispatchEvent(new Event("input"));
         });
 
         updateInstructionOverallProgress();
