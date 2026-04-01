@@ -161,6 +161,109 @@ async def upload_prompts(file: UploadFile):
     }
 
 
+INSTRUCTION_FIELDS = {
+    "prompt", "system_prompt", "combine_with_first", "window_count",
+    "submission_gap_seconds", "model_a", "model_b", "retain_output",
+    "clear_cookies", "incognito", "simultaneous_start", "zoom_pct",
+}
+
+BOOL_FIELDS = {"combine_with_first", "clear_cookies", "incognito", "simultaneous_start"}
+INT_FIELDS = {"window_count": (1, 12), "zoom_pct": (25, 200)}
+FLOAT_FIELDS = {"submission_gap_seconds": (5.0, 300.0)}
+
+
+def _coerce_instruction(raw: dict) -> dict:
+    """Validate and coerce a raw instruction dict."""
+    inst = {}
+    for k, v in raw.items():
+        key = k.strip().lower().replace(" ", "_")
+        if key not in INSTRUCTION_FIELDS:
+            continue
+        if v is None or (isinstance(v, str) and not v.strip()):
+            continue
+        if key in BOOL_FIELDS:
+            if isinstance(v, str):
+                v = v.strip().lower() in ("true", "1", "yes")
+            inst[key] = bool(v)
+        elif key in INT_FIELDS:
+            lo, hi = INT_FIELDS[key]
+            inst[key] = max(lo, min(hi, int(float(v))))
+        elif key in FLOAT_FIELDS:
+            lo, hi = FLOAT_FIELDS[key]
+            inst[key] = max(lo, min(hi, float(v)))
+        else:
+            inst[key] = str(v).strip() if isinstance(v, str) else v
+    return inst
+
+
+@app.post("/upload-instructions")
+async def upload_instructions(file: UploadFile):
+    """Parse a JSON, CSV, or Excel instruction file.
+
+    Each entry must have a ``prompt`` field; all other fields are optional
+    and override global settings per-instruction.
+    """
+    if not file.filename:
+        return JSONResponse({"error": "No file provided"}, status_code=400)
+
+    ext = Path(file.filename).suffix.lower()
+    raw_bytes = await file.read()
+
+    try:
+        if ext == ".json":
+            data = json_mod.loads(raw_bytes.decode("utf-8-sig"))
+            if not isinstance(data, list):
+                return JSONResponse(
+                    {"error": "JSON must be an array of instruction objects"},
+                    status_code=400,
+                )
+            raw_rows = data
+        elif ext == ".csv":
+            text = raw_bytes.decode("utf-8-sig")
+            reader = csv.DictReader(io.StringIO(text))
+            raw_rows = [dict(r) for r in reader]
+        elif ext == ".xlsx":
+            wb = load_workbook(filename=io.BytesIO(raw_bytes), read_only=True)
+            ws = wb.active
+            all_rows = list(ws.iter_rows(values_only=True))
+            if not all_rows:
+                return JSONResponse({"error": "Empty spreadsheet"}, status_code=400)
+            columns = [str(c).strip() if c else f"col_{i}" for i, c in enumerate(all_rows[0])]
+            raw_rows = [
+                {columns[j]: cell for j, cell in enumerate(row)}
+                for row in all_rows[1:]
+            ]
+            wb.close()
+        else:
+            return JSONResponse(
+                {"error": f"Unsupported file type: {ext}. Use .json, .csv, or .xlsx"},
+                status_code=400,
+            )
+    except Exception as exc:
+        logger.error("Failed to parse instruction file: %s", exc)
+        return JSONResponse({"error": f"Parse error: {exc}"}, status_code=400)
+
+    # Validate and coerce
+    instructions = []
+    for i, raw in enumerate(raw_rows):
+        inst = _coerce_instruction(raw)
+        if not inst.get("prompt"):
+            continue  # skip rows without a prompt
+        instructions.append(inst)
+
+    if not instructions:
+        return JSONResponse(
+            {"error": "No valid instructions found (each row needs a 'prompt' field)"},
+            status_code=400,
+        )
+
+    return {
+        "filename": file.filename,
+        "instructions": instructions,
+        "count": len(instructions),
+    }
+
+
 @app.get("/export")
 async def export_excel(run_id: str | None = None):
     orch = ws_handler.get_orchestrator(run_id) if run_id else ws_handler.orchestrator

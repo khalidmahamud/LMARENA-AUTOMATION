@@ -145,6 +145,22 @@
   const imageFileInput   = document.getElementById("image-file-input");
   const imageThumbnails  = document.getElementById("image-thumbnails");
 
+  // Instruction Load mode DOM refs
+  const modeInstructionBtn     = document.getElementById("mode-instruction");
+  const instructionSection     = document.getElementById("instruction-load-section");
+  const instructionUploadArea  = document.getElementById("instruction-upload-area");
+  const instructionFileInput   = document.getElementById("instruction-file-input");
+  const instructionInfoDiv     = document.getElementById("instruction-info");
+  const instructionFileName    = document.getElementById("instruction-file-name");
+  const instructionCountSpan   = document.getElementById("instruction-count");
+  const removeInstructionsBtn  = document.getElementById("btn-remove-instructions");
+  const instructionCardsContainer = document.getElementById("instruction-cards-container");
+  const instructionRunBtn      = document.getElementById("btn-instruction-run");
+  const instructionStopBtn     = document.getElementById("btn-instruction-stop");
+  const instructionEta         = document.getElementById("instruction-eta");
+  const instructionProgressFill = document.getElementById("instruction-progress-fill");
+  const instructionProgressPct = document.getElementById("instruction-progress-pct");
+
   // Resume banner DOM refs
   const resumeBanner    = document.getElementById("resume-banner");
   const resumeList      = document.getElementById("resume-list");
@@ -610,65 +626,70 @@
   // ══════════════════════════════════════
 
   function handleMessage(msg) {
-    const runId = msg.run_id;
+    var runId = msg.run_id;
 
+    // Route to instruction mode handlers if active
+    if (runId && instructionRunning && promptCards[runId]) {
+      switch (msg.type) {
+        case "worker_update":
+          updateCardWorker(runId, msg);
+          break;
+        case "worker_result":
+          onCardWorkerResult(runId, msg.result);
+          break;
+        case "worker_partial_result":
+          onCardPartialResult(runId, msg.result);
+          break;
+        case "run_progress":
+          updateCardProgress(runId, msg);
+          break;
+        case "run_complete":
+          onCardRunComplete(runId, msg);
+          runNextInstruction();
+          break;
+        case "run_cancelled":
+          onCardRunCancelled(runId);
+          runNextInstruction();
+          break;
+        case "run_paused":
+          onCardRunPaused(runId);
+          break;
+        case "run_resumed":
+          onCardRunResumed(runId);
+          break;
+        case "log":
+          appendLog(msg.level, msg.text, msg.worker_id);
+          break;
+      }
+      return;
+    }
+
+    // Original message handling (manual + file mode)
     switch (msg.type) {
       case "worker_update":
-        if (runId && promptCards[runId]) {
-          updateCardWorker(runId, msg);
-        } else {
-          updateWorkerCard(msg);
-          updateResultRow(msg);
-        }
+        updateWorkerCard(msg);
+        updateResultRow(msg);
         break;
       case "worker_result":
-        if (runId && promptCards[runId]) {
-          onCardWorkerResult(runId, msg.result);
-        } else {
-          onWorkerResult(msg.result);
-        }
+        onWorkerResult(msg.result);
         break;
       case "worker_partial_result":
-        if (runId && promptCards[runId]) {
-          onCardPartialResult(runId, msg.result);
-        } else {
-          onWorkerPartialResult(msg.result);
-        }
+        onWorkerPartialResult(msg.result);
         break;
       case "run_progress":
-        if (runId && promptCards[runId]) {
-          updateCardProgress(runId, msg);
-        } else {
-          updateProgress(msg);
-        }
+        updateProgress(msg);
         break;
       case "run_complete":
-        if (runId && promptCards[runId]) {
-          onCardRunComplete(runId, msg);
-        } else {
-          onRunComplete(msg);
-        }
+        onRunComplete(msg);
         break;
       case "run_cancelled":
-        if (runId && promptCards[runId]) {
-          onCardRunCancelled(runId);
-        } else {
-          onRunCancelled();
-        }
+        onRunCancelled();
         break;
       case "run_paused":
-        if (runId && promptCards[runId]) {
-          onCardRunPaused(runId);
-        } else {
-          onRunPaused();
-        }
+        onRunPaused();
         break;
       case "run_resumed":
-        if (runId && promptCards[runId]) {
-          onCardRunResumed(runId);
-        } else {
-          onRunResumed();
-        }
+        onRunResumed();
         break;
       case "challenge_detected":
         appendLog("warning", msg.message, msg.worker_id);
@@ -680,7 +701,6 @@
       case "error":
         appendLog("error", msg.message);
         showToast(msg.message, "error");
-        // Reset UI if run hasn't actually started
         if (running) {
           resetRunControlState();
         }
@@ -1297,28 +1317,24 @@
     appendLog("warning", "Stop requested...");
   });
 
-  // Paste button (may not exist in multi-prompt mode)
-  if (pasteBtn) {
-    pasteBtn.addEventListener("click", async () => {
-      try {
-        const text = await navigator.clipboard.readText();
-        promptInput.value = text;
-        promptInput.dispatchEvent(new Event("input"));
-      } catch {
-        appendLog("warning", "Clipboard access denied \u2014 paste manually");
-      }
-    });
-  }
-
-  // Clear button (may not exist in multi-prompt mode)
-  if (clearBtn) {
-    clearBtn.addEventListener("click", () => {
-      promptInput.value = "";
+  // Paste button
+  pasteBtn.addEventListener("click", async () => {
+    try {
+      const text = await navigator.clipboard.readText();
+      promptInput.value = text;
       promptInput.dispatchEvent(new Event("input"));
-      clearImages();
-      promptInput.focus();
-    });
-  }
+    } catch {
+      appendLog("warning", "Clipboard access denied \u2014 paste manually");
+    }
+  });
+
+  // Clear button
+  clearBtn.addEventListener("click", () => {
+    promptInput.value = "";
+    promptInput.dispatchEvent(new Event("input"));
+    clearImages();
+    promptInput.focus();
+  });
 
   // Export dropdown
   const exportDropdown = document.getElementById("export-dropdown");
@@ -1345,33 +1361,25 @@
     promptMode = mode;
     modeManualBtn.classList.toggle("active", mode === "manual");
     modeFileBtn.classList.toggle("active", mode === "file");
-    if (manualSection) manualSection.classList.toggle("hidden", mode !== "manual");
+    if (modeInstructionBtn) modeInstructionBtn.classList.toggle("active", mode === "instruction");
+    manualSection.classList.toggle("hidden", mode !== "manual");
     fileSection.classList.toggle("hidden", mode !== "file");
+    if (instructionSection) instructionSection.classList.toggle("hidden", mode !== "instruction");
     // Show/hide paste & clear buttons (only for manual mode)
-    if (pasteBtn) pasteBtn.style.display = mode === "manual" ? "" : "none";
-    if (clearBtn) clearBtn.style.display = mode === "manual" ? "" : "none";
-    // Show/hide prompt cards vs file mode
-    const cardsContainer = document.getElementById("prompt-cards-container");
-    const cardsToolbar = document.getElementById("prompt-cards-toolbar");
-    if (cardsContainer) {
-      if (mode === "file") {
-        cardsContainer.classList.add("hidden");
-      } else {
-        cardsContainer.classList.remove("hidden");
-      }
-    }
-    if (cardsToolbar) {
-      if (mode === "file") {
-        cardsToolbar.classList.add("hidden");
-      } else {
-        cardsToolbar.classList.remove("hidden");
-      }
-    }
+    pasteBtn.style.display = mode === "manual" ? "" : "none";
+    clearBtn.style.display = mode === "manual" ? "" : "none";
+    // Show/hide system prompt details (manual + file modes only)
+    var sysDet = document.getElementById("system-prompt-details");
+    if (sysDet) sysDet.style.display = mode === "instruction" ? "none" : "";
+    // Show/hide global start/stop (not in instruction mode — it has its own)
+    var promptControls = document.querySelector(".prompt-controls");
+    if (promptControls) promptControls.style.display = mode === "instruction" ? "none" : "";
     saveSettings();
   }
 
   modeManualBtn.addEventListener("click", () => setPromptMode("manual"));
   modeFileBtn.addEventListener("click", () => setPromptMode("file"));
+  if (modeInstructionBtn) modeInstructionBtn.addEventListener("click", () => setPromptMode("instruction"));
 
   // ══════════════════════════════════════
   // File Upload
@@ -1489,37 +1497,32 @@
   const MAX_IMAGES = 10;
   const MAX_IMAGE_DIM = 2048;
 
-  // Attach button opens file picker (not the whole area)
-  var _btnAttach = document.getElementById("btn-attach");
-  if (_btnAttach) _btnAttach.addEventListener("click", () => imageFileInput.click());
+  // Attach button opens file picker
+  document.getElementById("btn-attach").addEventListener("click", () => imageFileInput.click());
 
-  // Drag-drop images onto the prompt input area (only if element exists)
-  if (imageUploadArea) {
-    imageUploadArea.addEventListener("dragover", (e) => {
-      e.preventDefault();
-      imageUploadArea.classList.add("dragover");
-    });
+  // Drag-drop images onto the prompt input area
+  imageUploadArea.addEventListener("dragover", (e) => {
+    e.preventDefault();
+    imageUploadArea.classList.add("dragover");
+  });
 
-    imageUploadArea.addEventListener("dragleave", () => {
-      imageUploadArea.classList.remove("dragover");
-    });
+  imageUploadArea.addEventListener("dragleave", () => {
+    imageUploadArea.classList.remove("dragover");
+  });
 
-    imageUploadArea.addEventListener("drop", (e) => {
-      e.preventDefault();
-      imageUploadArea.classList.remove("dragover");
-      const imageFiles = Array.from(e.dataTransfer.files).filter(f => f.type.startsWith("image/"));
-      if (imageFiles.length > 0) {
-        handleImageFiles(imageFiles);
-      }
-    });
-  }
+  imageUploadArea.addEventListener("drop", (e) => {
+    e.preventDefault();
+    imageUploadArea.classList.remove("dragover");
+    const imageFiles = Array.from(e.dataTransfer.files).filter(f => f.type.startsWith("image/"));
+    if (imageFiles.length > 0) {
+      handleImageFiles(imageFiles);
+    }
+  });
 
-  if (imageFileInput) {
-    imageFileInput.addEventListener("change", () => {
-      handleImageFiles(imageFileInput.files);
-      imageFileInput.value = "";
-    });
-  }
+  imageFileInput.addEventListener("change", () => {
+    handleImageFiles(imageFileInput.files);
+    imageFileInput.value = "";
+  });
 
   function handleImageFiles(fileList) {
     const files = Array.from(fileList);
@@ -1584,7 +1587,6 @@
   }
 
   function renderImageThumbnails() {
-    if (!imageThumbnails) return;
     imageThumbnails.innerHTML = "";
     uploadedImages.forEach((img, idx) => {
       const thumb = document.createElement("div");
@@ -2424,7 +2426,6 @@ html, body { margin: 0; padding: 0; background: #fff; color: #111;
           '<button class="btn-card-run" data-card-id="' + cardId + '">&#9654; Run</button>' +
           '<button class="btn-card-stop" data-card-id="' + cardId + '" disabled>&#9632; Stop</button>' +
           '<button class="btn-card-collapse" data-card-id="' + cardId + '">&#9660;</button>' +
-          '<button class="btn-card-remove" data-card-id="' + cardId + '">&times;</button>' +
         '</div>' +
       '</div>' +
       '<div class="prompt-card-body">' +
@@ -2474,7 +2475,7 @@ html, body { margin: 0; padding: 0; background: #fff; color: #111;
         '</details>' +
       '</div>';
 
-    var container = document.getElementById("prompt-cards-container");
+    var container = document.getElementById("instruction-cards-container");
     if (container) container.appendChild(el);
 
     // Event listeners for card buttons
@@ -2500,10 +2501,6 @@ html, body { margin: 0; padding: 0; background: #fff; color: #111;
       var btn = el.querySelector(".btn-card-collapse");
       body.classList.toggle("collapsed");
       btn.innerHTML = body.classList.contains("collapsed") ? "&#9654;" : "&#9660;";
-    });
-
-    el.querySelector(".btn-card-remove").addEventListener("click", function () {
-      removePromptCard(cardId);
     });
 
     // Image upload handling for this card
@@ -2868,34 +2865,181 @@ html, body { margin: 0; padding: 0; background: #fff; color: #111;
     if (btn) btn.disabled = !anyRunning;
   }
 
-  // ── Card toolbar buttons ──
+  // ══════════════════════════════════════
+  // Instruction Load Mode
+  // ══════════════════════════════════════
 
-  (function () {
-    var addCardBtn = document.getElementById("btn-add-card");
-    if (addCardBtn) {
-      addCardBtn.addEventListener("click", function () {
-        createPromptCard();
-      });
-    }
+  let instructionRunning = false;
+  let instructionStopRequested = false;
+  let loadedInstructions = [];
+  let instructionRunQueue = [];
+  let currentInstructionCardId = null;
 
-    var runAllBtn = document.getElementById("btn-run-all");
-    if (runAllBtn) {
-      runAllBtn.addEventListener("click", function () {
-        Object.keys(promptCards).forEach(function (cid) {
-          if (!promptCards[cid].running) startCardRun(cid);
+  function handleInstructionUpload(file) {
+    var formData = new FormData();
+    formData.append("file", file);
+
+    fetch("/upload-instructions", { method: "POST", body: formData })
+      .then(function (res) { return res.json(); })
+      .then(function (data) {
+        if (data.error) {
+          showToast(data.error, "error");
+          return;
+        }
+        loadedInstructions = data.instructions || [];
+        if (loadedInstructions.length === 0) {
+          showToast("No valid instructions found in file", "warning");
+          return;
+        }
+
+        // Show info
+        instructionFileName.textContent = data.filename || file.name;
+        instructionCountSpan.textContent = loadedInstructions.length + " instruction(s)";
+        instructionUploadArea.classList.add("hidden");
+        instructionInfoDiv.classList.remove("hidden");
+
+        // Clear existing cards
+        promptCards = {};
+        nextCardIndex = 1;
+        instructionCardsContainer.innerHTML = "";
+
+        // Generate cards from instructions
+        loadedInstructions.forEach(function (inst) {
+          var cardId = createPromptCard();
+          var el = document.querySelector('.prompt-card[data-card-id="' + cardId + '"]');
+          if (!el) return;
+          if (inst.prompt) el.querySelector(".card-prompt").value = inst.prompt;
+          if (inst.system_prompt) el.querySelector(".card-system-prompt").value = inst.system_prompt;
+          if (inst.combine_with_first !== undefined) el.querySelector(".card-combine-first").checked = !!inst.combine_with_first;
+          if (inst.window_count) el.querySelector(".card-window-count").value = inst.window_count;
+          if (inst.submission_gap_seconds) el.querySelector(".card-gap").value = inst.submission_gap_seconds;
+          if (inst.model_a) el.querySelector(".card-model-a").value = inst.model_a;
+          if (inst.model_b) el.querySelector(".card-model-b").value = inst.model_b;
+          if (inst.retain_output) el.querySelector(".card-retain").value = inst.retain_output;
+          if (inst.zoom_pct) el.querySelector(".card-zoom").value = inst.zoom_pct;
+          if (inst.clear_cookies !== undefined) el.querySelector(".card-clear-cookies").checked = !!inst.clear_cookies;
+          if (inst.incognito !== undefined) el.querySelector(".card-incognito").checked = !!inst.incognito;
+          if (inst.simultaneous_start !== undefined) el.querySelector(".card-simultaneous").checked = !!inst.simultaneous_start;
         });
+
+        updateInstructionOverallProgress();
+        appendLog("info", "Loaded " + loadedInstructions.length + " instruction(s) from " + file.name);
+      })
+      .catch(function (err) {
+        showToast("Failed to parse instruction file: " + err.message, "error");
       });
+  }
+
+  function clearInstructions() {
+    loadedInstructions = [];
+    instructionRunQueue = [];
+    currentInstructionCardId = null;
+    instructionRunning = false;
+    instructionStopRequested = false;
+    promptCards = {};
+    nextCardIndex = 1;
+    if (instructionCardsContainer) instructionCardsContainer.innerHTML = "";
+    if (instructionUploadArea) instructionUploadArea.classList.remove("hidden");
+    if (instructionInfoDiv) instructionInfoDiv.classList.add("hidden");
+    updateInstructionOverallProgress();
+  }
+
+  function startInstructionSequence() {
+    if (instructionRunning) return;
+    instructionRunning = true;
+    instructionStopRequested = false;
+
+    // Build queue of card IDs that are not yet completed
+    instructionRunQueue = Object.keys(promptCards).filter(function (cid) {
+      var c = promptCards[cid];
+      return !c.running && Object.keys(c.incrementalResults || {}).length === 0;
+    });
+
+    if (instructionRunQueue.length === 0) {
+      // All done or no cards
+      instructionRunning = false;
+      return;
     }
 
-    var stopAllBtn = document.getElementById("btn-stop-all");
-    if (stopAllBtn) {
-      stopAllBtn.addEventListener("click", function () {
-        Object.keys(promptCards).forEach(function (cid) {
-          if (promptCards[cid].running) stopCardRun(cid);
-        });
-      });
+    instructionRunBtn.disabled = true;
+    instructionStopBtn.disabled = false;
+
+    runNextInstruction();
+  }
+
+  function runNextInstruction() {
+    if (instructionStopRequested || instructionRunQueue.length === 0) {
+      onInstructionSequenceComplete();
+      return;
     }
-  })();
+
+    currentInstructionCardId = instructionRunQueue.shift();
+    startCardRun(currentInstructionCardId);
+    updateInstructionOverallProgress();
+  }
+
+  function stopInstructionSequence() {
+    instructionStopRequested = true;
+    if (currentInstructionCardId) {
+      stopCardRun(currentInstructionCardId);
+    }
+  }
+
+  function onInstructionSequenceComplete() {
+    instructionRunning = false;
+    instructionStopRequested = false;
+    currentInstructionCardId = null;
+    instructionRunBtn.disabled = false;
+    instructionStopBtn.disabled = true;
+    updateInstructionOverallProgress();
+    appendLog("info", "Instruction sequence complete");
+  }
+
+  function updateInstructionOverallProgress() {
+    var total = Object.keys(promptCards).length;
+    var done = 0;
+    Object.values(promptCards).forEach(function (c) {
+      if (!c.running && Object.keys(c.incrementalResults || {}).length > 0) done++;
+    });
+    var pct = total > 0 ? Math.round((done / total) * 100) : 0;
+    if (instructionEta) instructionEta.textContent = done + " / " + total;
+    if (instructionProgressFill) instructionProgressFill.style.width = pct + "%";
+    if (instructionProgressPct) instructionProgressPct.textContent = pct + "%";
+  }
+
+  // Wire instruction upload area
+  if (instructionUploadArea) {
+    instructionUploadArea.addEventListener("click", function () {
+      if (instructionFileInput) instructionFileInput.click();
+    });
+    instructionUploadArea.addEventListener("dragover", function (e) {
+      e.preventDefault();
+      instructionUploadArea.classList.add("dragover");
+    });
+    instructionUploadArea.addEventListener("dragleave", function () {
+      instructionUploadArea.classList.remove("dragover");
+    });
+    instructionUploadArea.addEventListener("drop", function (e) {
+      e.preventDefault();
+      instructionUploadArea.classList.remove("dragover");
+      if (e.dataTransfer.files.length > 0) handleInstructionUpload(e.dataTransfer.files[0]);
+    });
+  }
+  if (instructionFileInput) {
+    instructionFileInput.addEventListener("change", function () {
+      if (instructionFileInput.files.length > 0) handleInstructionUpload(instructionFileInput.files[0]);
+      instructionFileInput.value = "";
+    });
+  }
+  if (removeInstructionsBtn) {
+    removeInstructionsBtn.addEventListener("click", clearInstructions);
+  }
+  if (instructionRunBtn) {
+    instructionRunBtn.addEventListener("click", startInstructionSequence);
+  }
+  if (instructionStopBtn) {
+    instructionStopBtn.addEventListener("click", stopInstructionSequence);
+  }
 
   // ══════════════════════════════════════
   // Settings Persistence (localStorage)
@@ -2930,25 +3074,6 @@ html, body { margin: 0; padding: 0; background: #fff; color: #111;
       obj[f.key] = f.checkbox ? f.el.checked : f.el.value;
     });
     obj.prompt_mode = promptMode;
-    // Save card states
-    obj.cards = Object.values(promptCards).map(function (c) {
-      var el = document.querySelector('.prompt-card[data-card-id="' + c.id + '"]');
-      if (!el) return null;
-      return {
-        prompt: el.querySelector(".card-prompt") ? el.querySelector(".card-prompt").value : "",
-        system_prompt: el.querySelector(".card-system-prompt") ? el.querySelector(".card-system-prompt").value : "",
-        combine_with_first: el.querySelector(".card-combine-first") ? el.querySelector(".card-combine-first").checked : false,
-        window_count: el.querySelector(".card-window-count") ? el.querySelector(".card-window-count").value : "4",
-        gap: el.querySelector(".card-gap") ? el.querySelector(".card-gap").value : "30",
-        model_a: el.querySelector(".card-model-a") ? el.querySelector(".card-model-a").value : "",
-        model_b: el.querySelector(".card-model-b") ? el.querySelector(".card-model-b").value : "",
-        retain: el.querySelector(".card-retain") ? el.querySelector(".card-retain").value : "both",
-        zoom: el.querySelector(".card-zoom") ? el.querySelector(".card-zoom").value : "100",
-        clear_cookies: el.querySelector(".card-clear-cookies") ? el.querySelector(".card-clear-cookies").checked : false,
-        incognito: el.querySelector(".card-incognito") ? el.querySelector(".card-incognito").checked : false,
-        simultaneous: el.querySelector(".card-simultaneous") ? el.querySelector(".card-simultaneous").checked : false,
-      };
-    }).filter(Boolean);
     try { localStorage.setItem(STORAGE_KEY, JSON.stringify(obj)); } catch {}
   }
 
@@ -2965,26 +3090,6 @@ html, body { margin: 0; padding: 0; background: #fff; color: #111;
       });
       if (obj.prompt_mode) {
         setPromptMode(obj.prompt_mode);
-      }
-      // Restore cards
-      if (obj.cards && Array.isArray(obj.cards) && obj.cards.length > 0) {
-        obj.cards.forEach(function (cardData) {
-          var cardId = createPromptCard();
-          var el = document.querySelector('.prompt-card[data-card-id="' + cardId + '"]');
-          if (!el) return;
-          if (cardData.prompt) el.querySelector(".card-prompt").value = cardData.prompt;
-          if (cardData.system_prompt) el.querySelector(".card-system-prompt").value = cardData.system_prompt;
-          el.querySelector(".card-combine-first").checked = cardData.combine_with_first || false;
-          el.querySelector(".card-window-count").value = cardData.window_count || "4";
-          el.querySelector(".card-gap").value = cardData.gap || "30";
-          el.querySelector(".card-model-a").value = cardData.model_a || "";
-          el.querySelector(".card-model-b").value = cardData.model_b || "";
-          el.querySelector(".card-retain").value = cardData.retain || "both";
-          el.querySelector(".card-zoom").value = cardData.zoom || "100";
-          el.querySelector(".card-clear-cookies").checked = cardData.clear_cookies || false;
-          el.querySelector(".card-incognito").checked = cardData.incognito || false;
-          el.querySelector(".card-simultaneous").checked = cardData.simultaneous || false;
-        });
       }
     } catch {}
   }
@@ -3222,28 +3327,12 @@ html, body { margin: 0; padding: 0; background: #fff; color: #111;
   updateStartButton();
 
   // Auto-expand system prompt if it has saved content
-  var _sysDet = document.getElementById("system-prompt-details");
-  if (_sysDet && systemPromptInput && systemPromptInput.value.trim()) {
-    _sysDet.open = true;
+  if (systemPromptInput.value.trim()) {
+    document.getElementById("system-prompt-details").open = true;
   }
 
   // Restore file upload state if present
   restoreFileState();
-
-  // Create default card if none exist (first load or migration from old format)
-  if (Object.keys(promptCards).length === 0) {
-    var defaultCardId = createPromptCard();
-    // Migrate old prompt/system_prompt if present
-    var oldPrompt = promptInput.value;
-    var oldSys = systemPromptInput.value;
-    if (oldPrompt || oldSys) {
-      var defaultEl = document.querySelector('.prompt-card[data-card-id="' + defaultCardId + '"]');
-      if (defaultEl) {
-        if (oldPrompt) defaultEl.querySelector(".card-prompt").value = oldPrompt;
-        if (oldSys) defaultEl.querySelector(".card-system-prompt").value = oldSys;
-      }
-    }
-  }
 
   connect();
 })();

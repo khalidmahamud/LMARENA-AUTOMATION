@@ -89,19 +89,46 @@
         <div id="resume-list"></div>
       </div>
 
-      <!-- Prompt Mode Toggle + File Upload (global) -->
-      <section class="panel panel-mode-toggle">
+      <!-- Prompt -->
+      <section class="panel">
         <div class="panel-header">
           <span class="panel-title">&#9998; PROMPT</span>
           <div class="panel-actions">
             <div class="prompt-mode-toggle">
               <button class="mode-btn active" id="mode-manual">Manual</button>
               <button class="mode-btn" id="mode-file">File Upload</button>
+              <button class="mode-btn" id="mode-instruction">Instruction Load</button>
             </div>
+            <button class="btn-icon" id="btn-paste">&#128203; Paste</button>
+            <button class="btn-icon" id="btn-clear">&#128465; Clear</button>
           </div>
         </div>
 
-        <!-- File upload mode (hidden in manual mode) -->
+        <!-- System prompt -->
+        <details class="system-prompt-details" id="system-prompt-details">
+          <summary class="system-prompt-toggle">System Prompt <span class="system-prompt-hint">&#8212; sent first before each actual prompt run</span></summary>
+          <label class="combine-prompt-option">
+            <input type="checkbox" id="combine-with-first" />
+            Combine with prompt
+            <span class="system-prompt-hint">&#8212; send as one message instead of two turns</span>
+          </label>
+          <textarea id="system-prompt" rows="3" placeholder="e.g. You are a helpful assistant. Answer concisely."></textarea>
+        </details>
+
+        <!-- Manual mode (default) -->
+        <div id="manual-prompt-section">
+          <div class="prompt-input-wrap" id="image-upload-area">
+            <textarea id="prompt" rows="6" placeholder="Enter your prompt here... (drag images onto this box)"></textarea>
+            <div class="prompt-input-toolbar">
+              <button type="button" class="btn-attach" id="btn-attach" title="Attach images">&#128206;</button>
+              <span class="attach-hint" id="attach-hint"></span>
+            </div>
+            <input type="file" id="image-file-input" accept="image/png,image/jpeg,image/webp,image/gif" multiple hidden />
+          </div>
+          <div class="image-thumbnails" id="image-thumbnails"></div>
+        </div>
+
+        <!-- File upload mode -->
         <div id="file-prompt-section" class="hidden">
           <div class="upload-area" id="upload-area">
             <div class="upload-icon">&#128193;</div>
@@ -131,38 +158,49 @@
             <div class="file-preview" id="file-preview"></div>
             <div class="batch-info" id="batch-info"></div>
           </div>
+        </div>
 
-          <div class="prompt-controls">
-            <div class="prompt-buttons">
-              <button class="btn-start" id="btn-start">&#8853; Start Run</button>
-              <button class="btn-stop" id="btn-stop" disabled>&#8854; Stop</button>
+        <!-- Instruction Load mode -->
+        <div id="instruction-load-section" class="hidden">
+          <div class="upload-area" id="instruction-upload-area">
+            <div class="upload-icon">&#128220;</div>
+            <span>Drop JSON, CSV, or Excel instruction file, or <strong>click to browse</strong></span>
+            <span class="upload-hint">.json, .csv, .xlsx &mdash; each row = prompt + settings</span>
+            <input type="file" id="instruction-file-input" accept=".json,.csv,.xlsx" hidden />
+          </div>
+          <div id="instruction-info" class="hidden">
+            <div class="file-info-bar">
+              <span class="file-name" id="instruction-file-name"></span>
+              <span class="file-row-count" id="instruction-count"></span>
+              <button class="btn-icon" id="btn-remove-instructions">&#10005; Remove</button>
             </div>
-            <div class="progress-inline" id="progress-inline">
-              <span class="eta-label" id="eta-text">ETA: &mdash;</span>
-              <div class="progress-track">
-                <div class="progress-fill" id="progress-fill"></div>
+            <div id="instruction-cards-container"></div>
+            <div class="prompt-cards-toolbar">
+              <button class="btn-start" id="btn-instruction-run">&#9654; Run All</button>
+              <button class="btn-stop" id="btn-instruction-stop" disabled>&#9632; Stop All</button>
+              <div class="instruction-overall-progress">
+                <span class="eta-label" id="instruction-eta">0 / 0</span>
+                <div class="progress-track"><div class="progress-fill" id="instruction-progress-fill"></div></div>
+                <span class="progress-pct" id="instruction-progress-pct">0%</span>
               </div>
-              <span class="progress-pct" id="progress-pct">0%</span>
             </div>
           </div>
         </div>
+
+        <div class="prompt-controls">
+          <div class="prompt-buttons">
+            <button class="btn-start" id="btn-start">&#8853; Start Run</button>
+            <button class="btn-stop" id="btn-stop" disabled>&#8854; Stop</button>
+          </div>
+          <div class="progress-inline" id="progress-inline">
+            <span class="eta-label" id="eta-text">ETA: &mdash;</span>
+            <div class="progress-track">
+              <div class="progress-fill" id="progress-fill"></div>
+            </div>
+            <span class="progress-pct" id="progress-pct">0%</span>
+          </div>
+        </div>
       </section>
-
-      <!-- Multi-Prompt Cards Container (manual mode) -->
-      <div id="prompt-cards-container">
-        <!-- Cards rendered dynamically by JS -->
-      </div>
-      <div class="prompt-cards-toolbar" id="prompt-cards-toolbar">
-        <button class="btn-add-card" id="btn-add-card">+ Add Prompt</button>
-        <button class="btn-start btn-run-all" id="btn-run-all">&#9654; Run All</button>
-        <button class="btn-stop btn-stop-all" id="btn-stop-all" disabled>&#9632; Stop All</button>
-      </div>
-
-      <!-- Hidden template elements for manual mode (referenced by JS) -->
-      <input type="file" id="image-file-input" accept="image/png,image/jpeg,image/webp,image/gif" multiple hidden />
-      <textarea id="system-prompt" class="hidden"></textarea>
-      <input type="checkbox" id="combine-with-first" class="hidden" />
-      <textarea id="prompt" class="hidden"></textarea>
 
       <!-- Results -->
       <section class="panel" id="results-section">
