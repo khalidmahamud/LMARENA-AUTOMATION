@@ -1,0 +1,72 @@
+[
+  {
+    "prompt": "Write a short poem about the ocean at sunset. Use vivid imagery and sensory details.",
+    "system_prompt": "You are a creative poet who writes concise, evocative poetry.",
+    "combine_with_first": false,
+    "window_count": 2,
+    "submission_gap_seconds": 30,
+    "model_a": "gpt-4o",
+    "model_b": "claude-sonnet-4-20250514",
+    "retain_output": "both",
+    "clear_cookies": false,
+    "incognito": false,
+    "simultaneous_start": false,
+    "zoom_pct": 100
+  },
+  {
+    "prompt": "Explain the difference between TCP and UDP protocols. Include when to use each one.",
+    "system_prompt": "",
+    "combine_with_first": false,
+    "window_count": 4,
+    "submission_gap_seconds": 15,
+    "model_a": "gemini-2.5-pro",
+    "model_b": "gpt-4o",
+    "retain_output": "both",
+    "clear_cookies": false,
+    "incognito": false,
+    "simultaneous_start": false,
+    "zoom_pct": 100
+  },
+  {
+    "prompt": "Solve this step by step: A train leaves Station A at 60 km/h. Another train leaves Station B (300 km away) at 80 km/h heading toward Station A. When and where do they meet?",
+    "system_prompt": "You are a math tutor. Show all work clearly.",
+    "combine_with_first": true,
+    "window_count": 2,
+    "submission_gap_seconds": 30,
+    "model_a": "claude-opus-4-20250514",
+    "model_b": "",
+    "retain_output": "model_a",
+    "clear_cookies": true,
+    "incognito": false,
+    "simultaneous_start": false,
+    "zoom_pct": 110
+  },
+  {
+    "prompt": "Write a Python function that implements binary search on a sorted list. Include docstring, type hints, and edge case handling.",
+    "system_prompt": "You are a senior Python developer. Write clean, production-ready code.",
+    "combine_with_first": false,
+    "window_count": 3,
+    "submission_gap_seconds": 20,
+    "model_a": "",
+    "model_b": "",
+    "retain_output": "both",
+    "clear_cookies": false,
+    "incognito": true,
+    "simultaneous_start": true,
+    "zoom_pct": 100
+  },
+  {
+    "prompt": "Compare and contrast the Renaissance and the Enlightenment periods. Cover art, science, philosophy, and social impact.",
+    "system_prompt": "",
+    "combine_with_first": false,
+    "window_count": 2,
+    "submission_gap_seconds": 25,
+    "model_a": "gpt-4o",
+    "model_b": "gemini-2.5-pro",
+    "retain_output": "both",
+    "clear_cookies": false,
+    "incognito": false,
+    "simultaneous_start": false,
+    "zoom_pct": 90
+  }
+]
