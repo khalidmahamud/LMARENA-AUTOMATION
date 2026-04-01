@@ -33,11 +33,19 @@ class ImagePayload(BaseModel):
         return v
 
 
+class PromptTurn(BaseModel):
+    """A single turn in a multi-turn conversation."""
+
+    text: str = Field(max_length=50_000)
+    images: Optional[List[ImagePayload]] = Field(default=None, max_length=10)
+
+
 class StartRunRequest(BaseModel):
     type: Literal["start_run"] = "start_run"
     run_id: Optional[str] = None
     prompt: str = Field(default="", max_length=50_000)
     prompts: Optional[List[str]] = Field(default=None)
+    turns: Optional[List[PromptTurn]] = Field(default=None, max_length=10)
     system_prompt: str = Field(default="", max_length=100_000)
     combine_with_first: bool = False
     window_count: int = Field(default=2, ge=1, le=12)
@@ -60,13 +68,22 @@ class StartRunRequest(BaseModel):
     # Proxy list — each dict: {"server": "http://host:port", "username": "...", "password": "..."}
     proxies: Optional[List[dict]] = Field(default=None)
     proxy_on_challenge: bool = False
+    windows_per_proxy: int = Field(default=4, ge=1, le=50)
 
     @model_validator(mode="after")
     def validate_has_prompt(self):
+        # Clean up turns: drop entries with empty text
+        if self.turns:
+            self.turns = [t for t in self.turns if t.text.strip()]
         if self.prompts:
             self.prompts = [p for p in self.prompts if p.strip()]
-        if not self.prompt and not self.prompts:
-            raise ValueError("Either 'prompt' or 'prompts' must be provided")
+        has_turns = self.turns and len(self.turns) > 0
+        has_prompt = bool(self.prompt)
+        has_prompts = self.prompts and len(self.prompts) > 0
+        if not has_turns and not has_prompt and not has_prompts:
+            raise ValueError(
+                "Either 'prompt', 'prompts', or 'turns' must be provided"
+            )
         return self
 
     def get_prompt_for_worker(self, worker_index: int) -> str:
@@ -151,6 +168,7 @@ class WindowResultPayload(BaseModel):
     worker_id: int
     prompt: Optional[str] = None
     batch_index: Optional[int] = None
+    turn_index: Optional[int] = None
     model_a_name: Optional[str] = None
     model_a_response: Optional[str] = None
     model_b_name: Optional[str] = None

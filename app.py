@@ -7,17 +7,20 @@ Open: http://localhost:8000
 from __future__ import annotations
 
 import asyncio
+import base64
 import csv
 import io
 import json as json_mod
 import logging
 import random
+import re
 import urllib.request
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from functools import partial
 from pathlib import Path
 
-from fastapi import FastAPI, UploadFile, WebSocket
+from fastapi import FastAPI, File, UploadFile, WebSocket
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from openpyxl import load_workbook
@@ -28,6 +31,7 @@ from src.checkpoint.manager import CheckpointManager
 from src.core.events import EventBus
 from src.export.excel_exporter import export_to_csv, export_to_excel, export_to_json
 from src.models.config import AppConfig
+from src.models.results import RunResult, WindowResult
 from src.orchestrator.run_orchestrator import RunOrchestrator
 from src.proxy.pool import ProxyPool
 from src.transport.ws_broadcaster import WsBroadcaster
@@ -68,11 +72,20 @@ async def lifespan(application: FastAPI):
     # Resume auto-refresh if it was enabled before shutdown
     ar = proxy_pool.auto_refresh_settings
     if ar["enabled"]:
-        await proxy_pool.start_auto_refresh(protocol=ar["protocol"], interval=ar["interval"])
-        logger.info("Auto-refresh resumed (protocol=%s, interval=%.0fs)", ar["protocol"], ar["interval"])
+        await proxy_pool.start_auto_refresh(
+            protocol=ar["protocol"],
+            fetch_limit=int(ar.get("fetch_limit", 20)),
+            interval=ar["interval"],
+        )
+        logger.info(
+            "Auto-refresh resumed (protocol=%s, fetch_limit=%d, interval=%.0fs)",
+            ar["protocol"],
+            int(ar.get("fetch_limit", 20)),
+            ar["interval"],
+        )
     elif proxy_pool.total_count > 0:
         # Not auto-refreshing, but have loaded proxies — health-check them in background
-        asyncio.create_task(proxy_pool.maintain_pool(protocol=ar["protocol"]))
+        asyncio.create_task(proxy_pool.health_check_all())
         logger.info("Background health check started for %d loaded proxies", proxy_pool.total_count)
 
     event_bus = EventBus()
@@ -162,25 +175,107 @@ async def upload_prompts(file: UploadFile):
 
 
 INSTRUCTION_FIELDS = {
-    "prompt", "window_count",
+    "prompt", "turns", "images", "window_count",
     "submission_gap_seconds", "model_a", "model_b", "retain_output",
     "clear_cookies", "incognito", "simultaneous_start", "zoom_pct",
 }
+
+# Pattern for numbered turn columns: prompt_1, prompt_2, images_1, etc.
+_TURN_COLUMN_RE = re.compile(r"^(prompt|images)_(\d+)$")
 
 BOOL_FIELDS = {"clear_cookies", "incognito", "simultaneous_start"}
 INT_FIELDS = {"window_count": (1, 12), "zoom_pct": (25, 200)}
 FLOAT_FIELDS = {"submission_gap_seconds": (5.0, 300.0)}
 
+ALLOWED_IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".gif"}
+_MIME_MAP = {
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".webp": "image/webp",
+    ".gif": "image/gif",
+}
 
-def _coerce_instruction(raw: dict) -> dict:
+
+def _build_image_pool(
+    image_files: list[tuple[str, bytes]],
+) -> dict[str, dict]:
+    """Build ``{filename: {data, mime_type, filename}}`` from uploaded images."""
+    pool: dict[str, dict] = {}
+    for filename, data in image_files:
+        ext = Path(filename).suffix.lower()
+        mime = _MIME_MAP.get(ext)
+        if not mime:
+            continue
+        pool[filename] = {
+            "data": base64.b64encode(data).decode("ascii"),
+            "mime_type": mime,
+            "filename": filename,
+        }
+    return pool
+
+
+def _resolve_image_refs(
+    filenames: list[str],
+    image_pool: dict[str, dict],
+) -> list[dict] | None:
+    """Resolve image filename references against the pool (case-insensitive)."""
+    resolved = []
+    for fname in filenames:
+        entry = image_pool.get(fname)
+        if not entry:
+            fname_lower = fname.lower()
+            for pool_name, pool_entry in image_pool.items():
+                if pool_name.lower() == fname_lower:
+                    entry = pool_entry
+                    break
+        if entry:
+            resolved.append(entry)
+    return resolved if resolved else None
+
+
+def _coerce_instruction(
+    raw: dict,
+    image_pool: dict[str, dict] | None = None,
+) -> dict:
     """Validate and coerce a raw instruction dict."""
-    inst = {}
+    inst: dict = {}
+    turn_columns: dict[int, dict] = {}  # {N: {"prompt": ..., "images": ...}}
+
     for k, v in raw.items():
         key = k.strip().lower().replace(" ", "_")
+
+        # Check for numbered turn columns (prompt_1, images_2, etc.)
+        turn_match = _TURN_COLUMN_RE.match(key)
+        if turn_match:
+            col_type = turn_match.group(1)  # "prompt" or "images"
+            col_num = int(turn_match.group(2))
+            if col_num > 10:
+                continue  # cap at 10 turns
+            if v is not None and (not isinstance(v, str) or v.strip()):
+                turn_columns.setdefault(col_num, {})[col_type] = v
+            continue
+
         if key not in INSTRUCTION_FIELDS:
             continue
         if v is None or (isinstance(v, str) and not v.strip()):
             continue
+
+        # Pass-through for JSON "turns" array
+        if key == "turns":
+            if isinstance(v, list):
+                inst["turns"] = v
+            continue
+
+        # Pass-through for "images" (list of filenames or dicts)
+        if key == "images":
+            if isinstance(v, list):
+                inst["images"] = v
+            elif isinstance(v, str) and v.strip():
+                # CSV: comma-separated filenames
+                inst["images"] = [f.strip() for f in v.split(",") if f.strip()]
+            continue
+
         if key in BOOL_FIELDS:
             if isinstance(v, str):
                 v = v.strip().lower() in ("true", "1", "yes")
@@ -193,21 +288,83 @@ def _coerce_instruction(raw: dict) -> dict:
             inst[key] = max(lo, min(hi, float(v)))
         else:
             inst[key] = str(v).strip() if isinstance(v, str) else v
+
+    # Assemble turns from numbered columns (CSV/Excel: prompt_1, prompt_2, …)
+    if turn_columns and "turns" not in inst:
+        turns = []
+        for n in sorted(turn_columns.keys()):
+            col = turn_columns[n]
+            text = str(col.get("prompt", "")).strip()
+            if not text:
+                continue
+            turn_entry: dict = {"text": text}
+            img_refs = col.get("images")
+            if img_refs and image_pool:
+                fnames = [f.strip() for f in str(img_refs).split(",") if f.strip()]
+                resolved = _resolve_image_refs(fnames, image_pool)
+                if resolved:
+                    turn_entry["images"] = resolved
+            turns.append(turn_entry)
+        if turns:
+            inst["turns"] = turns
+
+    # Resolve image filename refs inside JSON turns
+    if "turns" in inst and image_pool:
+        for turn in inst["turns"]:
+            if isinstance(turn, dict) and "images" in turn:
+                imgs = turn["images"]
+                if isinstance(imgs, list) and imgs and isinstance(imgs[0], str):
+                    resolved = _resolve_image_refs(imgs, image_pool)
+                    turn["images"] = resolved
+
+    # Resolve image filename refs for single-turn "images" field
+    if "images" in inst and "turns" not in inst and image_pool:
+        imgs = inst["images"]
+        if isinstance(imgs, list) and imgs and isinstance(imgs[0], str):
+            resolved = _resolve_image_refs(imgs, image_pool)
+            inst["images"] = resolved if resolved else None
+
     return inst
 
 
 @app.post("/upload-instructions")
-async def upload_instructions(file: UploadFile):
-    """Parse a JSON, CSV, or Excel instruction file.
+async def upload_instructions(files: list[UploadFile] = File(...)):
+    """Parse instruction file(s) with optional image files.
 
-    Each entry must have a ``prompt`` field; all other fields are optional
-    and override global settings per-instruction.
+    Accepts one instruction file (``.json`` / ``.csv`` / ``.xlsx``) and any
+    number of image files (``.png`` / ``.jpg`` / ``.webp`` / ``.gif``).
+    Image filenames referenced in the instruction file are resolved against
+    the co-uploaded images.
     """
-    if not file.filename:
-        return JSONResponse({"error": "No file provided"}, status_code=400)
+    if not files:
+        return JSONResponse({"error": "No files provided"}, status_code=400)
 
-    ext = Path(file.filename).suffix.lower()
-    raw_bytes = await file.read()
+    # Separate instruction file from image files
+    instruction_file: UploadFile | None = None
+    image_files: list[tuple[str, bytes]] = []
+
+    for f in files:
+        if not f.filename:
+            continue
+        ext = Path(f.filename).suffix.lower()
+        if ext in {".json", ".csv", ".xlsx"}:
+            if instruction_file is None:
+                instruction_file = f
+        elif ext in ALLOWED_IMAGE_EXTENSIONS:
+            raw = await f.read()
+            image_files.append((f.filename, raw))
+
+    if instruction_file is None:
+        return JSONResponse(
+            {"error": "No instruction file found (.json, .csv, or .xlsx)"},
+            status_code=400,
+        )
+
+    # Build image pool from co-uploaded images
+    image_pool = _build_image_pool(image_files) if image_files else None
+
+    ext = Path(instruction_file.filename).suffix.lower()
+    raw_bytes = await instruction_file.read()
 
     try:
         if ext == ".json":
@@ -246,29 +403,29 @@ async def upload_instructions(file: UploadFile):
     # Validate and coerce
     instructions = []
     for i, raw in enumerate(raw_rows):
-        inst = _coerce_instruction(raw)
-        if not inst.get("prompt"):
-            continue  # skip rows without a prompt
+        inst = _coerce_instruction(raw, image_pool=image_pool)
+        if not inst.get("prompt") and not inst.get("turns"):
+            continue  # skip rows without prompt or turns
         instructions.append(inst)
 
     if not instructions:
         return JSONResponse(
-            {"error": "No valid instructions found (each row needs a 'prompt' field)"},
+            {"error": "No valid instructions found (each row needs a 'prompt' or 'turns')"},
             status_code=400,
         )
 
     return {
-        "filename": file.filename,
+        "filename": instruction_file.filename,
         "instructions": instructions,
         "count": len(instructions),
     }
 
 
 @app.get("/export")
-async def export_excel(run_id: str | None = None):
-    orch = ws_handler.get_orchestrator(run_id) if run_id else ws_handler.orchestrator
-    if orch and orch.last_result:
-        path = export_to_excel(orch.last_result, config.output_dir)
+async def export_excel(run_id: str | None = None, scope: str | None = None):
+    result = _resolve_export_result(run_id=run_id, scope=scope)
+    if result:
+        path = export_to_excel(result, config.output_dir)
         return FileResponse(
             path,
             filename=path.name,
@@ -278,25 +435,95 @@ async def export_excel(run_id: str | None = None):
 
 
 @app.get("/export-csv")
-async def export_csv_file(run_id: str | None = None):
-    orch = ws_handler.get_orchestrator(run_id) if run_id else ws_handler.orchestrator
-    if orch and orch.last_result:
-        path = export_to_csv(orch.last_result, config.output_dir)
+async def export_csv_file(run_id: str | None = None, scope: str | None = None):
+    result = _resolve_export_result(run_id=run_id, scope=scope)
+    if result:
+        path = export_to_csv(result, config.output_dir)
         return FileResponse(path, filename=path.name, media_type="text/csv")
     return {"error": "No results available"}
 
 
 @app.get("/export-json")
-async def export_json(run_id: str | None = None):
-    orch = ws_handler.get_orchestrator(run_id) if run_id else ws_handler.orchestrator
-    if orch and orch.last_result:
-        path = export_to_json(orch.last_result, config.output_dir)
+async def export_json(run_id: str | None = None, scope: str | None = None):
+    result = _resolve_export_result(run_id=run_id, scope=scope)
+    if result:
+        path = export_to_json(result, config.output_dir)
         return FileResponse(
             path,
             filename=path.name,
             media_type="application/json",
         )
     return {"error": "No results available"}
+
+
+def _resolve_export_result(
+    run_id: str | None = None,
+    scope: str | None = None,
+) -> RunResult | None:
+    """Resolve export scope.
+
+    - run_id set: export that run only
+    - scope=all: export merged results of every run that has results
+    - default: export the latest run
+    """
+    if run_id:
+        orch = ws_handler.get_orchestrator(run_id)
+        return orch.last_result if orch and orch.last_result else None
+
+    if (scope or "").strip().lower() == "all":
+        results = [
+            orch.last_result
+            for orch in ws_handler.get_all_orchestrators().values()
+            if orch and orch.last_result
+        ]
+        if not results:
+            return None
+        results.sort(key=lambda r: r.started_at)
+        if len(results) == 1:
+            return results[0]
+        return _merge_run_results(results)
+
+    orch = ws_handler.orchestrator
+    return orch.last_result if orch and orch.last_result else None
+
+
+def _merge_run_results(results: list[RunResult]) -> RunResult:
+    """Merge multiple runs into one exportable payload."""
+    merged_rows: list[WindowResult] = []
+    merged_prompts: list[str] = []
+    for run in results:
+        merged_prompts.extend(run.prompts or [run.prompt])
+        for row in run.window_results:
+            merged_rows.append(
+                row.model_copy(
+                    update={"run_id": row.run_id or run.run_id}
+                )
+            )
+
+    successful = sum(1 for r in merged_rows if r.success)
+    failed = len(merged_rows) - successful
+    started_at = min(r.started_at for r in results)
+    completed_candidates = [r.completed_at for r in results if r.completed_at]
+    completed_at = max(completed_candidates) if completed_candidates else None
+    total_elapsed = sum(r.total_elapsed_seconds or 0.0 for r in results)
+
+    return RunResult(
+        run_id=f"combined_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}",
+        prompt=(
+            results[0].prompt
+            if len(results) == 1
+            else f"Combined export ({len(results)} runs)"
+        ),
+        prompts=merged_prompts,
+        total_batches=sum(r.total_batches for r in results),
+        started_at=started_at,
+        completed_at=completed_at,
+        total_elapsed_seconds=total_elapsed,
+        window_results=merged_rows,
+        total_windows=len(merged_rows),
+        successful_windows=successful,
+        failed_windows=failed,
+    )
 
 
 # ── Run state endpoint ──

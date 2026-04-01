@@ -10,8 +10,10 @@ class WindowResult(BaseModel):
     """Result from a single browser window (side-by-side: two models)."""
 
     worker_id: int
+    run_id: Optional[str] = None
     prompt: str
     batch_index: int = 0
+    turn_index: int = 0
     model_a_name: Optional[str] = None
     model_a_response: Optional[str] = None
     model_b_name: Optional[str] = None

@@ -490,6 +490,7 @@ body {
   align-items: center;
   gap: 0.35rem;
   min-width: 0;
+  flex: 1;
 }
 
 .window-dot {
@@ -519,6 +520,21 @@ body {
   font-weight: 500;
   color: var(--text);
   white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 85px;
+}
+
+.window-run-badge {
+  font-family: var(--mono);
+  font-size: 0.55rem;
+  color: var(--orange);
+  background: rgba(224, 136, 49, 0.12);
+  border: 1px solid rgba(224, 136, 49, 0.28);
+  padding: 0.1rem 0.3rem;
+  border-radius: 3px;
+  white-space: nowrap;
+  flex-shrink: 0;
 }
 
 .window-proxy-badge {
@@ -542,6 +558,11 @@ body {
   color: var(--text-muted);
   white-space: nowrap;
   flex-shrink: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 98px;
+  display: inline-block;
+  text-align: right;
 }
 
 .window-card-badge.done { color: var(--green); }
@@ -2953,6 +2974,131 @@ textarea::placeholder {
   border-color: var(--accent);
   outline: none;
   box-shadow: 0 0 0 2px var(--accent-glow);
+}
+
+/* ── Card turns ── */
+.card-turns-container {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  margin-bottom: 0.3rem;
+}
+
+.card-turn {
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 0.3rem 0.4rem;
+  background: var(--surface-2);
+}
+
+.card-turn + .card-turn {
+  border-top-color: var(--accent);
+}
+
+.card-turn-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 0.2rem;
+}
+
+.card-turn-label {
+  font-size: 0.6rem;
+  font-weight: 600;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.btn-remove-turn {
+  background: none;
+  border: none;
+  color: var(--text-dim);
+  cursor: pointer;
+  font-size: 0.85rem;
+  padding: 0 0.2rem;
+  line-height: 1;
+  opacity: 0.6;
+}
+.btn-remove-turn:hover { opacity: 1; color: #ef4444; }
+
+.card-turn-prompt {
+  width: 100%;
+  box-sizing: border-box;
+  background: var(--bg);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  padding: 0.3rem 0.4rem;
+  font-family: var(--font-mono, 'JetBrains Mono', monospace);
+  font-size: 0.72rem;
+  resize: vertical;
+  line-height: 1.35;
+  min-height: 2rem;
+}
+.card-turn-prompt:focus {
+  border-color: var(--accent);
+  outline: none;
+  box-shadow: 0 0 0 2px var(--accent-glow);
+}
+
+.card-turn-image-area {
+  display: flex;
+  align-items: center;
+  gap: 0.3rem;
+  margin-top: 0.2rem;
+  flex-wrap: wrap;
+}
+
+.card-turn-image-drop {
+  font-size: 0.62rem;
+  color: var(--text-dim);
+  border: 1px dashed var(--border);
+  border-radius: 3px;
+  padding: 0.15rem 0.4rem;
+  cursor: pointer;
+  transition: border-color 0.15s, background 0.15s;
+  white-space: nowrap;
+}
+.card-turn-image-drop:hover,
+.card-turn-image-drop.drag-over {
+  border-color: var(--accent);
+  background: rgba(99,102,241,0.06);
+}
+
+.card-turn-thumbs {
+  display: flex;
+  gap: 0.25rem;
+  flex-wrap: wrap;
+}
+
+.card-turn-thumbs .image-thumb {
+  width: 28px;
+  height: 28px;
+}
+.card-turn-thumbs .image-thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  border-radius: 3px;
+}
+
+.btn-add-turn {
+  display: block;
+  width: 100%;
+  background: none;
+  border: 1px dashed var(--border);
+  border-radius: 4px;
+  color: var(--text-dim);
+  font-size: 0.68rem;
+  padding: 0.25rem 0;
+  cursor: pointer;
+  margin-bottom: 0.3rem;
+  transition: border-color 0.15s, color 0.15s;
+}
+.btn-add-turn:hover {
+  border-color: var(--accent);
+  color: var(--accent);
 }
 
 /* System prompt row */

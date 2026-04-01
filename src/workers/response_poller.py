@@ -34,6 +34,7 @@ class ResponsePoller:
         cancel_event: Optional[asyncio.Event] = None,
         pause_event: Optional[asyncio.Event] = None,
         baseline_responses: Optional[Tuple[str, str]] = None,
+        timeout_override_seconds: Optional[float] = None,
         on_slide_stable: Optional[
             Callable[[int, str, str, Optional[str]], Coroutine[Any, Any, None]]
         ] = None,
@@ -43,7 +44,12 @@ class ResponsePoller:
         Returns ``((response_a, response_b), (model_a_name, model_b_name), (html_a, html_b))``.
         Raises ``PollingTimeoutError`` if responses don't stabilise in time.
         """
-        deadline = time.monotonic() + self._config.response_timeout_seconds
+        timeout_seconds = (
+            timeout_override_seconds
+            if timeout_override_seconds is not None
+            else self._config.response_timeout_seconds
+        )
+        deadline = time.monotonic() + timeout_seconds
         interval = self._config.poll_interval_seconds
         required = self._config.stable_polls_required
 
@@ -280,7 +286,7 @@ class ResponsePoller:
 
         raise PollingTimeoutError(
             worker_id=worker_id,
-            timeout_seconds=self._config.response_timeout_seconds,
+            timeout_seconds=timeout_seconds,
         )
 
     @staticmethod

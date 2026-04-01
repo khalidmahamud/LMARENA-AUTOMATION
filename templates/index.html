@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <meta name="theme-color" content="#08090d" />
   <title>Arena Runner</title>
+  <link rel="icon" type="image/svg+xml" href="/static/favicon.svg" />
   <link rel="stylesheet" href="/static/style.css" />
 </head>
 <body>
@@ -164,9 +165,9 @@
         <div id="instruction-load-section" class="hidden">
           <div class="upload-area" id="instruction-upload-area">
             <div class="upload-icon">&#128220;</div>
-            <span>Drop JSON, CSV, or Excel instruction file, or <strong>click to browse</strong></span>
-            <span class="upload-hint">.json, .csv, .xlsx &mdash; each row = prompt + settings</span>
-            <input type="file" id="instruction-file-input" accept=".json,.csv,.xlsx" hidden />
+            <span>Drop instruction file (+ images), or <strong>click to browse</strong></span>
+            <span class="upload-hint">.json, .csv, .xlsx + optional image files &mdash; supports multi-turn</span>
+            <input type="file" id="instruction-file-input" accept=".json,.csv,.xlsx,.png,.jpg,.jpeg,.webp,.gif" multiple hidden />
           </div>
           <div id="instruction-info" class="hidden">
             <div class="file-info-bar">
@@ -399,8 +400,12 @@
             <div class="form-group checkbox-group">
               <label>
                 <input type="checkbox" id="proxy-on-challenge" checked />
-                Use proxies only when challenged (recommended)
+                Smart proxy distribution (recommended)
               </label>
+            </div>
+            <div class="form-group" id="windows-per-proxy-group">
+              <label for="windows-per-proxy">Windows per proxy IP</label>
+              <input type="number" id="windows-per-proxy" value="4" min="1" max="50" style="width: 70px;" />
             </div>
           </div>
           <!-- Proxy Pool Status -->

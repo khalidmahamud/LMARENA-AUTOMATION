@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import shutil
 import tempfile
@@ -22,6 +23,7 @@ class _RunGroup:
         "contexts", "tiles", "profile_base", "context_dirs",
         "proxies", "proxy_on_challenge", "proxy_assign_counter",
         "context_proxies", "incognito_mode", "zoom_pct",
+        "windows_per_proxy",
     )
 
     def __init__(self) -> None:
@@ -35,6 +37,7 @@ class _RunGroup:
         self.context_proxies: Dict[int, Optional[str]] = {}
         self.incognito_mode: bool = False
         self.zoom_pct: int = 100
+        self.windows_per_proxy: int = 4
 
 
 class BrowserManager:
@@ -71,6 +74,7 @@ class BrowserManager:
         incognito: Optional[bool] = None,
         proxies: Optional[List[dict]] = None,
         proxy_on_challenge: bool = False,
+        windows_per_proxy: int = 4,
         zoom_pct: int = 100,
         run_id: Optional[str] = None,
     ) -> List[BrowserContext]:
@@ -91,15 +95,20 @@ class BrowserManager:
         await self.close_contexts(run_id=gkey)
 
         group = _RunGroup()
-        self._groups[gkey] = group
 
         disp = display_override or self._config.display
         group.incognito_mode = (
             self._config.browser.incognito if incognito is None else incognito
         )
 
-        group.tiles = compute_tile_positions(
-            count=count,
+        # Global tiling across all active runs to avoid overlap.
+        existing_context_entries: list[tuple[str, int, BrowserContext]] = []
+        for other_key, other_group in self._groups.items():
+            for idx, ctx in enumerate(other_group.contexts):
+                existing_context_entries.append((other_key, idx, ctx))
+
+        all_tiles = compute_tile_positions(
+            count=len(existing_context_entries) + count,
             monitor_count=disp.monitor_count,
             monitor_width=disp.monitor_width,
             monitor_height=disp.monitor_height,
@@ -107,12 +116,33 @@ class BrowserManager:
             margin=disp.margin,
             border_offset=disp.border_offset,
         )
+        tile_cursor = 0
+        retile_tasks: list[asyncio.Task] = []
+        for other_key, idx, ctx in existing_context_entries:
+            tile = all_tiles[tile_cursor]
+            tile_cursor += 1
+            other_group = self._groups.get(other_key)
+            if not other_group:
+                continue
+            if len(other_group.tiles) <= idx:
+                other_group.tiles.extend(
+                    [tile] * (idx + 1 - len(other_group.tiles))
+                )
+            else:
+                other_group.tiles[idx] = tile
+            retile_tasks.append(asyncio.create_task(self._retile_context(ctx, tile)))
+
+        group.tiles = all_tiles[tile_cursor : tile_cursor + count]
+        self._groups[gkey] = group
+        if retile_tasks:
+            await asyncio.gather(*retile_tasks, return_exceptions=True)
 
         group.proxies = proxies or []
         group.proxy_on_challenge = proxy_on_challenge
         group.proxy_assign_counter = 0
         group.context_proxies.clear()
         group.zoom_pct = max(25, min(200, int(zoom_pct)))
+        group.windows_per_proxy = max(1, int(windows_per_proxy))
 
         # Seed the pool with manually provided proxies
         if group.proxies and self._proxy_pool:
@@ -132,9 +162,9 @@ class BrowserManager:
                     dir=str(group.profile_base),
                 )
             )
-            # If proxy_on_challenge, launch without proxy — proxy assigned on recreate
+            # If proxy_on_challenge, proactively distribute proxies across windows
             if group.proxy_on_challenge:
-                proxy = None
+                proxy = self._assign_proactive_proxy(group, i)
             else:
                 proxy = group.proxies[i % len(group.proxies)] if group.proxies else None
             ctx = await self._launch_context(
@@ -151,7 +181,143 @@ class BrowserManager:
                 i, gkey[:8], tile.x, tile.y, tile.width, tile.height,
             )
 
+        # Log proxy distribution summary
+        proxy_summary: Dict[str, int] = {}
+        for idx in range(count):
+            key = group.context_proxies.get(idx) or "bare-ip"
+            proxy_summary[key] = proxy_summary.get(key, 0) + 1
+        logger.info(
+            "Proxy distribution for run %s: %s",
+            gkey[:8],
+            {k: f"{v} windows" for k, v in proxy_summary.items()},
+        )
+
         return list(group.contexts)
+
+    def _assign_proactive_proxy(
+        self, group: _RunGroup, index: int
+    ) -> Optional[dict]:
+        """Assign a proxy proactively using IP-slot grouping.
+
+        Groups ``windows_per_proxy`` consecutive windows onto the same
+        proxy IP.  First window in each slot fetches a fresh proxy from
+        the pool (or manual list); subsequent windows in the slot reuse it.
+        """
+        wpp = group.windows_per_proxy
+        first_in_slot = (index // wpp) * wpp
+
+        # Reuse the proxy already assigned to the first window in this slot
+        if index != first_in_slot and first_in_slot in group.context_proxies:
+            existing_server = group.context_proxies[first_in_slot]
+            if existing_server is not None:
+                return self._find_proxy_dict(group, existing_server)
+            return None  # slot is proxyless
+
+        # First window in slot — get a fresh proxy
+        if self._proxy_pool and self._proxy_pool.healthy_count > 0:
+            proxy = self._proxy_pool.get_next_healthy()
+            if proxy:
+                logger.info(
+                    "Proactive slot %d: assigning proxy %s to context %d",
+                    index // wpp, proxy.get("server", "???"), index,
+                )
+                return proxy
+
+        # Fallback: round-robin through manual list
+        if group.proxies:
+            proxy = group.proxies[group.proxy_assign_counter % len(group.proxies)]
+            group.proxy_assign_counter += 1
+            return proxy
+
+        # No proxies available — bare IP
+        return None
+
+    def _find_proxy_dict(
+        self, group: _RunGroup, server: str
+    ) -> Optional[dict]:
+        """Look up the full proxy dict (with credentials) for a server string."""
+        if self._proxy_pool:
+            entry = self._proxy_pool._entries.get(server)
+            if entry:
+                return entry.to_playwright_dict()
+        for p in group.proxies:
+            if p.get("server") == server:
+                return p
+        return None
+
+    def _pick_pool_proxy(
+        self,
+        avoid_server: Optional[str] = None,
+    ) -> Optional[dict]:
+        """Pick a healthy pool proxy, avoiding *avoid_server* when possible."""
+        if self._proxy_pool is None or self._proxy_pool.healthy_count <= 0:
+            return None
+
+        attempts = max(1, self._proxy_pool.healthy_count)
+        fallback: Optional[dict] = None
+        for _ in range(attempts):
+            candidate = self._proxy_pool.get_next_healthy()
+            if not candidate:
+                break
+            if fallback is None:
+                fallback = candidate
+            server = candidate.get("server")
+            if avoid_server and server == avoid_server and attempts > 1:
+                continue
+            return candidate
+
+        # If only the avoided server is available, force a direct fallback.
+        if fallback and avoid_server and fallback.get("server") == avoid_server:
+            return None
+        return fallback
+
+    def _pick_manual_proxy(
+        self,
+        group: _RunGroup,
+        avoid_server: Optional[str] = None,
+    ) -> Optional[dict]:
+        """Round-robin through manual proxies, avoiding *avoid_server* if possible."""
+        if not group.proxies:
+            return None
+
+        total = len(group.proxies)
+        fallback: Optional[dict] = None
+        for _ in range(total):
+            candidate = group.proxies[group.proxy_assign_counter % total]
+            group.proxy_assign_counter += 1
+            if fallback is None:
+                fallback = candidate
+            server = candidate.get("server")
+            if avoid_server and server == avoid_server and total > 1:
+                continue
+            return candidate
+
+        if fallback and avoid_server and fallback.get("server") == avoid_server:
+            return None
+        return fallback
+
+    async def _retile_context(self, ctx: BrowserContext, tile: TileLayout) -> None:
+        """Move and resize an already-open Chromium window."""
+        try:
+            page = ctx.pages[0] if ctx.pages else await ctx.new_page()
+            session = await ctx.new_cdp_session(page)
+            window_info = await session.send("Browser.getWindowForTarget")
+            await session.send(
+                "Browser.setWindowBounds",
+                {
+                    "windowId": window_info["windowId"],
+                    "bounds": {
+                        "left": tile.x,
+                        "top": tile.y,
+                        "width": tile.width,
+                        "height": tile.height,
+                        "windowState": "normal",
+                    },
+                },
+            )
+            await session.detach()
+        except Exception as exc:
+            logger.debug("Window re-tiling skipped: %s", exc)
 
     async def close_contexts(self, run_id: Optional[str] = None) -> None:
         """Close browser contexts for a specific run (or default group).
@@ -224,22 +390,29 @@ class BrowserManager:
 
         # Launch new context at the same tile position
         tile = group.tiles[index]
-        if group.proxy_on_challenge and self._proxy_pool and self._proxy_pool.healthy_count > 0:
-            # Mark old proxy as problematic
-            old_proxy = group.context_proxies.get(index)
-            if old_proxy:
+        old_proxy = group.context_proxies.get(index)
+        if group.proxy_on_challenge:
+            # Immediately penalize the previous proxy for this window.
+            if old_proxy and self._proxy_pool:
                 self._proxy_pool.mark_unhealthy(old_proxy)
-            # Get next healthy proxy from pool
-            proxy = self._proxy_pool.get_next_healthy()
+
+            proxy = self._pick_pool_proxy(avoid_server=old_proxy)
+            if proxy is None:
+                proxy = self._pick_manual_proxy(group, avoid_server=old_proxy)
+
             if proxy:
-                logger.info("Pool mode: assigning healthy proxy %s to context %d", proxy.get("server", "???"), index)
+                logger.info(
+                    "Challenge mode: assigning proxy %s to context %d (prev=%s)",
+                    proxy.get("server", "???"),
+                    index,
+                    old_proxy or "none",
+                )
             else:
-                logger.warning("No healthy proxies in pool for context %d", index)
-        elif group.proxy_on_challenge and group.proxies:
-            # Fallback to round-robin if no pool
-            proxy = group.proxies[group.proxy_assign_counter % len(group.proxies)]
-            group.proxy_assign_counter += 1
-            logger.info("Challenge mode: assigning proxy %s to context %d", proxy.get("server", "???"), index)
+                logger.warning(
+                    "Challenge mode: no alternate proxy for context %d (prev=%s); using direct/no proxy fallback",
+                    index,
+                    old_proxy or "none",
+                )
         else:
             proxy = group.proxies[index % len(group.proxies)] if group.proxies else None
         ctx = await self._launch_context(
@@ -274,6 +447,36 @@ class BrowserManager:
             server = group.context_proxies.get(index)
             if server and self._proxy_pool:
                 self._proxy_pool.mark_healthy(server)
+
+    def report_proxy_failure(
+        self,
+        index: int,
+        run_id: Optional[str] = None,
+        reason: Optional[str] = None,
+    ) -> None:
+        """Penalize the current proxy for a worker context."""
+        if self._proxy_pool is None:
+            return
+        gkey = run_id or self._default_group_key
+        group = self._groups.get(gkey)
+        if not group:
+            return
+        server = group.context_proxies.get(index)
+        if not server:
+            return
+
+        # Navigation timeouts are usually hard proxy failures; apply extra penalty.
+        strikes = 2 if reason == "goto_timeout" else 1
+        for _ in range(strikes):
+            self._proxy_pool.mark_unhealthy(server)
+        logger.info(
+            "Proxy failure reported for context %d (run=%s, server=%s, reason=%s, strikes=%d)",
+            index,
+            gkey[:8],
+            server,
+            reason or "unknown",
+            strikes,
+        )
 
     async def _get_zoom_service_worker(self, ctx: BrowserContext) -> Optional[Worker]:
         workers = ctx.service_workers

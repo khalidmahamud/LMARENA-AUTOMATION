@@ -54,6 +54,7 @@
   const proxyTestInput    = document.getElementById("proxy-test");
   const proxyFetchStatus  = document.getElementById("proxy-fetch-status");
   const proxyOnChallengeInput = document.getElementById("proxy-on-challenge");
+  const windowsPerProxyInput  = document.getElementById("windows-per-proxy");
   const savePoolBtn         = document.getElementById("save-pool-btn");
   const loadPoolBtn         = document.getElementById("load-pool-btn");
   const checkPoolBtn        = document.getElementById("check-pool-btn");
@@ -671,10 +672,10 @@
         updateResultRow(msg);
         break;
       case "worker_result":
-        onWorkerResult(msg.result);
+        onWorkerResult({ ...msg.result, run_id: msg.run_id || null });
         break;
       case "worker_partial_result":
-        onWorkerPartialResult(msg.result);
+        onWorkerPartialResult({ ...msg.result, run_id: msg.run_id || null });
         break;
       case "run_progress":
         updateProgress(msg);
@@ -693,7 +694,7 @@
         break;
       case "challenge_detected":
         appendLog("warning", msg.message, msg.worker_id);
-        highlightWorker(msg.worker_id, "challenge");
+        highlightWorker(msg.worker_id, "challenge", msg.run_id);
         break;
       case "log":
         appendLog(msg.level, msg.text, msg.worker_id);
@@ -750,17 +751,46 @@
   // Window Cards (Right Column)
   // ══════════════════════════════════════
 
-  function ensureWorkerCard(id) {
-    let card = document.getElementById(`worker-${id}`);
+  function getWorkerKey(workerId, runId) {
+    return (runId || "default") + "::" + workerId;
+  }
+
+  function getWorkerDomId(workerId, runId) {
+    return "worker-" + getWorkerKey(workerId, runId).replace(/[^\w-]/g, "_");
+  }
+
+  function getRunLabel(runId) {
+    if (!runId) return "";
+    const card = promptCards[runId];
+    if (card && card.index) return "P#" + card.index;
+    if (runId.startsWith("card_")) return "P#?";
+    return runId.slice(0, 6);
+  }
+
+  function getResultKey(workerId, runId) {
+    return getWorkerKey(workerId, runId);
+  }
+
+  function getResultDomId(workerId, runId) {
+    return "result-row-" + getResultKey(workerId, runId).replace(/[^\w-]/g, "_");
+  }
+
+  function ensureWorkerCard(id, runId) {
+    const cardId = getWorkerDomId(id, runId);
+    const runLabel = getRunLabel(runId);
+    let card = document.getElementById(cardId);
     if (!card) {
       card = document.createElement("div");
-      card.id = `worker-${id}`;
+      card.id = cardId;
+      card.dataset.workerKey = getWorkerKey(id, runId);
+      card.dataset.runId = runId || "";
       card.className = "window-card";
       card.innerHTML = `
         <div class="window-card-header">
           <div class="window-card-left">
             <span class="window-dot"></span>
             <span class="window-title">Window #${id + 1}</span>
+            ${runLabel ? `<span class="window-run-badge">${runLabel}</span>` : ""}
             <span class="window-proxy-badge hidden"></span>
           </div>
           <span class="window-card-badge queued">&#9201; Queued</span>
@@ -776,7 +806,9 @@
   }
 
   function updateWorkerCard(msg) {
-    const card = ensureWorkerCard(msg.worker_id);
+    const runId = msg.run_id || null;
+    const workerKey = getWorkerKey(msg.worker_id, runId);
+    const card = ensureWorkerCard(msg.worker_id, runId);
     const dot = card.querySelector(".window-dot");
     const badge = card.querySelector(".window-card-badge");
     const fill = card.querySelector(".window-progress-fill");
@@ -790,15 +822,15 @@
     }
 
     // Track start times
-    if (!workerStartTimes[msg.worker_id] && msg.state !== "idle") {
-      workerStartTimes[msg.worker_id] = Date.now();
+    if (!workerStartTimes[workerKey] && msg.state !== "idle") {
+      workerStartTimes[workerKey] = Date.now();
     }
 
     // Update progress
     fill.style.width = `${msg.progress_pct}%`;
 
     // Store worker data
-    workerData[msg.worker_id] = {
+    workerData[workerKey] = {
       state: msg.state,
       progress_pct: msg.progress_pct,
       message: msg.message || "",
@@ -811,8 +843,8 @@
     dot.className = "window-dot";
     badge.className = "window-card-badge";
 
-    const elapsed = workerStartTimes[msg.worker_id]
-      ? Math.round((Date.now() - workerStartTimes[msg.worker_id]) / 1000)
+    const elapsed = workerStartTimes[workerKey]
+      ? Math.round((Date.now() - workerStartTimes[workerKey]) / 1000)
       : 0;
 
     if (msg.state === "complete") {
@@ -863,8 +895,8 @@
     }
   }
 
-  function highlightWorker(id, cls) {
-    const card = ensureWorkerCard(id);
+  function highlightWorker(id, cls, runId) {
+    const card = ensureWorkerCard(id, runId);
     card.classList.add(`state-${cls}`);
   }
 
@@ -872,13 +904,15 @@
   // Results Table (Live Updates)
   // ══════════════════════════════════════
 
-  function ensureResultRow(id) {
-    let row = document.getElementById(`result-row-${id}`);
+  function ensureResultRow(id, runId) {
+    const resultId = getResultDomId(id, runId);
+    const runLabel = getRunLabel(runId);
+    let row = document.getElementById(resultId);
     if (!row) {
       row = document.createElement("tr");
-      row.id = `result-row-${id}`;
+      row.id = resultId;
       row.innerHTML = `
-        <td class="row-num">W${id + 1}</td>
+        <td class="row-num">${runLabel ? runLabel + "-" : ""}W${id + 1}</td>
         <td class="col-model-a text-queued">Queued</td>
         <td class="col-model-b text-queued">Queued</td>
         <td class="col-time">&mdash;</td>
@@ -894,15 +928,17 @@
   }
 
   function updateResultRow(msg) {
-    const row = ensureResultRow(msg.worker_id);
+    const runId = msg.run_id || null;
+    const workerKey = getWorkerKey(msg.worker_id, runId);
+    const row = ensureResultRow(msg.worker_id, runId);
     const colA = row.querySelector(".col-model-a");
     const colB = row.querySelector(".col-model-b");
     const colTime = row.querySelector(".col-time");
     const colTokens = row.querySelector(".col-tokens");
     const colStatus = row.querySelector(".col-status");
 
-    const elapsed = workerStartTimes[msg.worker_id]
-      ? Math.round((Date.now() - workerStartTimes[msg.worker_id]) / 1000)
+    const elapsed = workerStartTimes[workerKey]
+      ? Math.round((Date.now() - workerStartTimes[workerKey]) / 1000)
       : 0;
 
     if (msg.state === "complete") {
@@ -950,7 +986,7 @@
     }
   }
 
-  function buildResultCellHTML(modelName, responseText, workerId, side) {
+  function buildResultCellHTML(modelName, responseText, workerId, side, runId) {
     const name = modelName || "\u2014";
     const text = responseText || "\u2014";
     const hasResponse = responseText && responseText !== "\u2014";
@@ -959,15 +995,15 @@
         <span class="response-model-name">${escapeHtml(name)}</span>
         <span class="response-text-preview">${escapeHtml(truncate(text, 80))}</span>
         ${hasResponse ? `<div class="response-actions">
-          <button class="btn-view-response" data-worker-id="${workerId}" data-side="${side}">&#128065; View</button>
-          <button class="btn-copy-inline" data-worker-id="${workerId}" data-side="${side}">&#128203; Copy</button>
+          <button class="btn-view-response" data-worker-id="${workerId}" data-run-id="${escapeAttr(runId || "")}" data-side="${side}">&#128065; View</button>
+          <button class="btn-copy-inline" data-worker-id="${workerId}" data-run-id="${escapeAttr(runId || "")}" data-side="${side}">&#128203; Copy</button>
         </div>` : ""}
       </div>
     `;
   }
 
   function updateResultRowWithData(result) {
-    const row = ensureResultRow(result.worker_id);
+    const row = ensureResultRow(result.worker_id, result.run_id || null);
     const colA = row.querySelector(".col-model-a");
     const colB = row.querySelector(".col-model-b");
     const colTime = row.querySelector(".col-time");
@@ -975,10 +1011,10 @@
     const colStatus = row.querySelector(".col-status");
 
     colA.className = "col-model-a";
-    colA.innerHTML = buildResultCellHTML(result.model_a_name, result.model_a_response, result.worker_id, "a");
+    colA.innerHTML = buildResultCellHTML(result.model_a_name, result.model_a_response, result.worker_id, "a", result.run_id || null);
 
     colB.className = "col-model-b";
-    colB.innerHTML = buildResultCellHTML(result.model_b_name, result.model_b_response, result.worker_id, "b");
+    colB.innerHTML = buildResultCellHTML(result.model_b_name, result.model_b_response, result.worker_id, "b", result.run_id || null);
 
     colTime.textContent = result.elapsed_seconds ? result.elapsed_seconds.toFixed(0) + "s" : "\u2014";
 
@@ -997,13 +1033,16 @@
   }
 
   function onWorkerResult(result) {
-    incrementalResults[result.worker_id] = result;
+    const key = getResultKey(result.worker_id, result.run_id || null);
+    incrementalResults[key] = result;
     updateResultRowWithData(result);
     if (tabHtml.classList.contains("active")) renderHtmlPreviews();
   }
 
   function onWorkerPartialResult(partial) {
-    var row = ensureResultRow(partial.worker_id);
+    const runId = partial.run_id || null;
+    const key = getResultKey(partial.worker_id, runId);
+    var row = ensureResultRow(partial.worker_id, runId);
     var side = partial.slide;
     var col = row.querySelector(side === "a" ? ".col-model-a" : ".col-model-b");
     var colStatus = row.querySelector(".col-status");
@@ -1013,17 +1052,18 @@
       partial.model_name,
       partial.response,
       partial.worker_id,
-      side
+      side,
+      runId
     );
 
     if (!colStatus.querySelector(".badge-done")) {
       colStatus.innerHTML = '<span class="badge badge-partial">&#189; Partial</span>';
     }
 
-    if (!incrementalResults[partial.worker_id]) {
-      incrementalResults[partial.worker_id] = { worker_id: partial.worker_id };
+    if (!incrementalResults[key]) {
+      incrementalResults[key] = { worker_id: partial.worker_id, run_id: runId };
     }
-    var ir = incrementalResults[partial.worker_id];
+    var ir = incrementalResults[key];
     if (side === "a") {
       ir.model_a_name = partial.model_name;
       ir.model_a_response = partial.response;
@@ -1039,11 +1079,14 @@
     }
   }
 
-  function populateFinalResults(results) {
-    resultsBody.innerHTML = "";
+  function populateFinalResults(results, append) {
+    if (!append) {
+      resultsBody.innerHTML = "";
+    }
     results.forEach((r) => {
-      incrementalResults[r.worker_id] = r;
-      ensureResultRow(r.worker_id);
+      const key = getResultKey(r.worker_id, r.run_id || null);
+      incrementalResults[key] = r;
+      ensureResultRow(r.worker_id, r.run_id || null);
       updateResultRowWithData(r);
     });
   }
@@ -1089,24 +1132,39 @@
   // Run Complete
   // ══════════════════════════════════════
 
-  function onRunComplete(msg) {
-    resetRunControlState();
+  function onRunComplete(msg, options) {
+    const append = !!(options && options.append);
+    if (!append) {
+      resetRunControlState();
+    }
     exportBtn.disabled = false;
-    progressFill.style.width = "100%";
-    progressPct.textContent = "100%";
-    etaText.textContent = "Complete";
+    if (!append) {
+      progressFill.style.width = "100%";
+      progressPct.textContent = "100%";
+      etaText.textContent = "Complete";
+    }
 
     // Store results for JSON view
-    runResults = msg.results;
+    if (!append) {
+      runResults = msg.results;
+    } else {
+      runResults = (runResults || []).concat(msg.results || []);
+    }
+
+    const enrichedResults = (msg.results || []).map((r) => ({
+      ...r,
+      run_id: r.run_id || msg.run_id || null,
+    }));
 
     // Populate final results table
-    populateFinalResults(msg.results);
+    populateFinalResults(enrichedResults, append);
 
     // Reconcile worker cards with final results in case a worker missed a
     // terminal state event during orchestrator-side recovery handling.
-    msg.results.forEach((r) => {
+    enrichedResults.forEach((r) => {
       updateWorkerCard({
         worker_id: r.worker_id,
+        run_id: r.run_id || msg.run_id || null,
         state: r.error ? "error" : "complete",
         progress_pct: 100,
         message: r.error || "",
@@ -1115,7 +1173,7 @@
     });
 
     // Update JSON view
-    resultsJsonPre.textContent = JSON.stringify(msg.results, null, 2);
+    resultsJsonPre.textContent = JSON.stringify(runResults, null, 2);
 
     // Update footer stats
     updateStats(msg);
@@ -1123,13 +1181,16 @@
     // Refresh HTML previews if HTML tab is active
     if (tabHtml.classList.contains("active")) renderHtmlPreviews();
 
-    const failed = msg.results.filter((r) => !!r.error).length;
-    const succeeded = msg.results.length - failed;
+    const failed = enrichedResults.filter((r) => !!r.error).length;
+    const succeeded = enrichedResults.length - failed;
+    const runPrefix = msg.run_id ? `[${getRunLabel(msg.run_id) || msg.run_id}] ` : "";
+    const hasTurns = enrichedResults.some((r) => (r.turn_index || 0) > 0);
+    const unitLabel = hasTurns ? "result(s)" : "window(s)";
     appendLog(
       failed > 0 ? "warning" : "info",
       failed > 0
-        ? `Run complete \u2014 ${succeeded} succeeded, ${failed} failed in ${msg.total_elapsed_seconds.toFixed(1)}s`
-        : `Run complete \u2014 ${msg.results.length} window(s) finished in ${msg.total_elapsed_seconds.toFixed(1)}s`
+        ? `${runPrefix}Run complete \u2014 ${succeeded} succeeded, ${failed} failed in ${msg.total_elapsed_seconds.toFixed(1)}s`
+        : `${runPrefix}Run complete \u2014 ${enrichedResults.length} ${unitLabel} finished in ${msg.total_elapsed_seconds.toFixed(1)}s`
     );
   }
 
@@ -1282,6 +1343,7 @@
       margin: parseInt(tileMarginInput.value, 10) || 0,
       proxies: parseProxyList(proxyListInput.value),
       proxy_on_challenge: proxyOnChallengeInput.checked,
+      windows_per_proxy: parseInt(windowsPerProxyInput.value, 10) || 4,
     });
 
     if (isFileMode) {
@@ -1351,6 +1413,18 @@
 
   exportDropdown.addEventListener("click", () => {
     exportDropdown.classList.add("hidden");
+  });
+
+  document.querySelectorAll(".export-option").forEach((link) => {
+    link.addEventListener("click", () => {
+      const raw = link.getAttribute("href") || "";
+      const basePath = raw.split("?")[0];
+      const url = new URL(basePath, window.location.origin);
+      if (promptMode === "instruction") {
+        url.searchParams.set("scope", "all");
+      }
+      link.setAttribute("href", url.pathname + url.search);
+    });
   });
 
   // ══════════════════════════════════════
@@ -1859,8 +1933,10 @@
     const viewBtn = e.target.closest(".btn-view-response");
     if (viewBtn) {
       const workerId = parseInt(viewBtn.dataset.workerId, 10);
+      const runId = viewBtn.dataset.runId || null;
       const side = viewBtn.dataset.side;
-      const result = incrementalResults[workerId] || (runResults && runResults.find(r => r.worker_id === workerId));
+      const key = getResultKey(workerId, runId);
+      const result = incrementalResults[key] || (runResults && runResults.find(r => r.worker_id === workerId && (r.run_id || null) === runId));
       if (result) {
         const name = side === "a" ? result.model_a_name : result.model_b_name;
         const text = side === "a" ? result.model_a_response : result.model_b_response;
@@ -1872,8 +1948,10 @@
     const copyBtn = e.target.closest(".btn-copy-inline");
     if (copyBtn) {
       const workerId = parseInt(copyBtn.dataset.workerId, 10);
+      const runId = copyBtn.dataset.runId || null;
       const side = copyBtn.dataset.side;
-      const result = incrementalResults[workerId] || (runResults && runResults.find(r => r.worker_id === workerId));
+      const key = getResultKey(workerId, runId);
+      const result = incrementalResults[key] || (runResults && runResults.find(r => r.worker_id === workerId && (r.run_id || null) === runId));
       if (result) {
         const text = side === "a" ? result.model_a_response : result.model_b_response;
         try {
@@ -2017,7 +2095,7 @@
 
   // ── HTML Preview Modal — Carousel ──
   let htmlBlocksCache = {};
-  let previewWorkerIds = [];
+  let previewEntryKeys = [];
   let previewIndex = 0;
   let previewMode = "both"; // "a" | "b" | "both"
   let previewZoom = "fit";  // "fit" | "1" | "0.75" | "0.5"
@@ -2031,6 +2109,33 @@
   const htmlModeB = document.getElementById("html-mode-b");
   const htmlModeBoth = document.getElementById("html-mode-both");
 
+  function buildHtmlPreviewKey(result, seq) {
+    const runId = result.run_id || "default";
+    const wid = Number.isFinite(result.worker_id) ? result.worker_id : -1;
+    const batch = Number.isFinite(result.batch_index) ? result.batch_index : 0;
+    const turn = Number.isFinite(result.turn_index) ? result.turn_index : 0;
+    return `${runId}::b${batch}::t${turn}::w${wid}::s${seq}`;
+  }
+
+  function getRunSortIndex(runId) {
+    if (!runId) return Number.MAX_SAFE_INTEGER;
+    const card = promptCards[runId];
+    if (card && Number.isFinite(card.index)) return card.index;
+    return Number.MAX_SAFE_INTEGER;
+  }
+
+  function formatPreviewLabelSafe(meta) {
+    const runLabel = getRunLabel(meta.run_id);
+    const left = runLabel ? `${runLabel} | ` : "";
+    return `${left}W${meta.worker_id + 1} | T${meta.turn_index + 1}`;
+  }
+
+  function formatPreviewLabel(meta) {
+    const runLabel = getRunLabel(meta.run_id);
+    const left = runLabel ? `${runLabel} · ` : "";
+    return `${left}W${meta.worker_id + 1} · T${meta.turn_index + 1}`;
+  }
+
   function renderHtmlPreviews() {
     htmlResultsList.innerHTML = "";
     htmlBlocksCache = {};
@@ -2041,33 +2146,48 @@
     }
 
     let hasAnyHtml = false;
-    results.forEach((r) => {
+    results.forEach((r, seq) => {
       const blocksA = extractHtmlBlocks(r.model_a_response_html);
       const blocksB = extractHtmlBlocks(r.model_b_response_html);
       if (blocksA.length === 0 && blocksB.length === 0) return;
       hasAnyHtml = true;
 
-      htmlBlocksCache[r.worker_id] = { a: blocksA, b: blocksB,
-        nameA: r.model_a_name || "Model A", nameB: r.model_b_name || "Model B" };
+      const previewKey = buildHtmlPreviewKey(r, seq);
+      htmlBlocksCache[previewKey] = {
+        a: blocksA,
+        b: blocksB,
+        nameA: r.model_a_name || "Model A",
+        nameB: r.model_b_name || "Model B",
+        meta: {
+          key: previewKey,
+          seq: seq,
+          run_id: r.run_id || null,
+          worker_id: Number.isFinite(r.worker_id) ? r.worker_id : 0,
+          batch_index: Number.isFinite(r.batch_index) ? r.batch_index : 0,
+          turn_index: Number.isFinite(r.turn_index) ? r.turn_index : 0,
+        },
+      };
+      const meta = htmlBlocksCache[previewKey].meta;
+      const previewLabel = formatPreviewLabelSafe(meta);
 
       const card = document.createElement("div");
       card.className = "html-result-card";
       const row = document.createElement("div");
       row.className = "html-result-row";
       row.innerHTML = `
-        <span class="html-result-window">Window #${r.worker_id + 1}</span>
+        <span class="html-result-window">${escapeHtml(previewLabel)}</span>
         <div class="html-result-models">
-          <button class="btn-html-preview" data-worker="${r.worker_id}" data-side="a"
+          <button class="btn-html-preview" data-preview-key="${escapeAttr(previewKey)}" data-side="a"
             ${blocksA.length === 0 ? "disabled" : ""}>
             ${escapeHtml(r.model_a_name || "Model A")}
             ${blocksA.length > 0 ? "&#8212; " + blocksA.length + " block(s)" : "&#8212; no HTML"}
           </button>
-          <button class="btn-html-preview" data-worker="${r.worker_id}" data-side="b"
+          <button class="btn-html-preview" data-preview-key="${escapeAttr(previewKey)}" data-side="b"
             ${blocksB.length === 0 ? "disabled" : ""}>
             ${escapeHtml(r.model_b_name || "Model B")}
             ${blocksB.length > 0 ? "&#8212; " + blocksB.length + " block(s)" : "&#8212; no HTML"}
           </button>
-          <button class="btn-html-preview btn-html-compare" data-worker="${r.worker_id}" data-side="both"
+          <button class="btn-html-preview btn-html-compare" data-preview-key="${escapeAttr(previewKey)}" data-side="both"
             ${blocksA.length === 0 && blocksB.length === 0 ? "disabled" : ""}>
             &#9881; Compare
           </button>
@@ -2086,31 +2206,44 @@
   htmlResultsList.addEventListener("click", (e) => {
     const btn = e.target.closest(".btn-html-preview");
     if (!btn || btn.disabled) return;
-    const workerId = parseInt(btn.dataset.worker, 10);
+    const previewKey = btn.dataset.previewKey || "";
     const side = btn.dataset.side;
-    openHtmlPreviewModal(workerId, side);
+    openHtmlPreviewModal(previewKey, side);
   });
 
-  function openHtmlPreviewModal(workerId, side) {
-    // Build ordered list of worker IDs that have HTML
-    previewWorkerIds = Object.keys(htmlBlocksCache).map(Number).sort((a, b) => a - b);
-    previewIndex = Math.max(0, previewWorkerIds.indexOf(workerId));
+  function openHtmlPreviewModal(previewKey, side) {
+    // Build ordered list of all result entries that have HTML (across runs/turns).
+    previewEntryKeys = Object.keys(htmlBlocksCache).sort((a, b) => {
+      const ma = htmlBlocksCache[a] && htmlBlocksCache[a].meta;
+      const mb = htmlBlocksCache[b] && htmlBlocksCache[b].meta;
+      if (!ma && !mb) return 0;
+      if (!ma) return 1;
+      if (!mb) return -1;
+      const runCmp = getRunSortIndex(ma.run_id) - getRunSortIndex(mb.run_id);
+      if (runCmp !== 0) return runCmp;
+      if (ma.batch_index !== mb.batch_index) return ma.batch_index - mb.batch_index;
+      if (ma.turn_index !== mb.turn_index) return ma.turn_index - mb.turn_index;
+      if (ma.worker_id !== mb.worker_id) return ma.worker_id - mb.worker_id;
+      return ma.seq - mb.seq;
+    });
+    previewIndex = Math.max(0, previewEntryKeys.indexOf(previewKey));
     previewMode = side;
     renderPreview();
     htmlPreviewModal.classList.remove("hidden");
   }
 
   function renderPreview() {
-    const wid = previewWorkerIds[previewIndex];
-    const cache = htmlBlocksCache[wid];
+    const entryKey = previewEntryKeys[previewIndex];
+    const cache = htmlBlocksCache[entryKey];
     if (!cache) return;
+    const previewLabel = formatPreviewLabelSafe(cache.meta);
 
     // Update page info
-    htmlPageInfo.textContent = `Window ${previewIndex + 1} / ${previewWorkerIds.length}`;
+    htmlPageInfo.textContent = `${previewLabel} (${previewIndex + 1}/${previewEntryKeys.length})`;
 
     // Update nav button states
     htmlPrevBtn.disabled = previewIndex === 0;
-    htmlNextBtn.disabled = previewIndex === previewWorkerIds.length - 1;
+    htmlNextBtn.disabled = previewIndex === previewEntryKeys.length - 1;
 
     // Update mode button labels + active state
     htmlModeA.textContent = cache.nameA;
@@ -2169,7 +2302,7 @@
     const sideLeft = document.getElementById("html-side-prev");
     const sideRight = document.getElementById("html-side-next");
     sideLeft.classList.toggle("hidden", previewIndex === 0);
-    sideRight.classList.toggle("hidden", previewIndex === previewWorkerIds.length - 1);
+    sideRight.classList.toggle("hidden", previewIndex === previewEntryKeys.length - 1);
   }
 
   function buildPreviewIframe(blocks) {
@@ -2263,7 +2396,7 @@ html, body { margin: 0; padding: 0; background: #fff; color: #111;
 
   // Navigation buttons (top bar + side arrows)
   function prevWindow() { if (previewIndex > 0) { previewIndex--; renderPreview(); } }
-  function nextWindow() { if (previewIndex < previewWorkerIds.length - 1) { previewIndex++; renderPreview(); } }
+  function nextWindow() { if (previewIndex < previewEntryKeys.length - 1) { previewIndex++; renderPreview(); } }
 
   htmlPrevBtn.addEventListener("click", prevWindow);
   htmlNextBtn.addEventListener("click", nextWindow);
@@ -2288,8 +2421,8 @@ html, body { margin: 0; padding: 0; background: #fff; color: #111;
 
   // Copy HTML source — called by floating buttons inside preview panes
   async function copyModelHtml(side) {
-    const wid = previewWorkerIds[previewIndex];
-    const cache = htmlBlocksCache[wid];
+    const entryKey = previewEntryKeys[previewIndex];
+    const cache = htmlBlocksCache[entryKey];
     if (!cache) return;
     const blocks = side === "a" ? cache.a : cache.b;
     const name = side === "a" ? cache.nameA : cache.nameB;
@@ -2377,6 +2510,254 @@ html, body { margin: 0; padding: 0; background: #fff; color: #111;
   // Multi-Prompt Cards
   // ══════════════════════════════════════
 
+  // ── Process a single image file into {data, mime_type, filename, objectUrl} ──
+  function processImageFile(file) {
+    return new Promise(function (resolve, reject) {
+      if (!file.type.match(/^image\/(png|jpeg|webp|gif)$/)) {
+        reject(new Error("Unsupported format: " + file.name));
+        return;
+      }
+      if (file.size > MAX_IMAGE_SIZE) {
+        reject(new Error(file.name + " exceeds 5 MB limit"));
+        return;
+      }
+      var reader = new FileReader();
+      reader.onerror = function () { reject(new Error("Read failed")); };
+      reader.onload = function () {
+        var img = new Image();
+        img.onerror = function () { reject(new Error("Image load failed")); };
+        img.onload = function () {
+          var w = img.width, h = img.height;
+          if (w > MAX_IMAGE_DIM || h > MAX_IMAGE_DIM) {
+            var scale = MAX_IMAGE_DIM / Math.max(w, h);
+            w = Math.round(w * scale);
+            h = Math.round(h * scale);
+          }
+          var canvas = document.createElement("canvas");
+          canvas.width = w;
+          canvas.height = h;
+          canvas.getContext("2d").drawImage(img, 0, 0, w, h);
+          var outType = file.type === "image/png" ? "image/png" : "image/jpeg";
+          var quality = outType === "image/jpeg" ? 0.85 : undefined;
+          var dataUrl = canvas.toDataURL(outType, quality);
+          resolve({
+            data: dataUrl.split(",")[1],
+            mime_type: outType,
+            filename: file.name,
+            objectUrl: URL.createObjectURL(file),
+          });
+        };
+        img.src = reader.result;
+      };
+      reader.readAsDataURL(file);
+    });
+  }
+
+  // ── Build a single turn DOM section ──
+  function buildTurnHtml(turnIndex, removable) {
+    return (
+      '<div class="card-turn" data-turn-index="' + turnIndex + '">' +
+        '<div class="card-turn-header">' +
+          '<span class="card-turn-label">Turn ' + (turnIndex + 1) + '</span>' +
+          (removable
+            ? '<button class="btn-remove-turn" title="Remove turn">&times;</button>'
+            : '') +
+        '</div>' +
+        '<textarea class="card-turn-prompt" rows="2" placeholder="Turn ' + (turnIndex + 1) + ' prompt..."></textarea>' +
+        '<div class="card-turn-image-area">' +
+          '<div class="card-turn-image-drop" title="Click or drop images here">+ Images</div>' +
+          '<input type="file" class="card-turn-image-input" accept="image/png,image/jpeg,image/webp,image/gif" multiple style="display:none" />' +
+          '<div class="card-turn-thumbs"></div>' +
+        '</div>' +
+      '</div>'
+    );
+  }
+
+  // ── Wire events for a single turn section inside a card ──
+  function wireTurnEvents(cardId, turnEl) {
+    var turnIndex = parseInt(turnEl.getAttribute("data-turn-index"), 10);
+    var card = promptCards[cardId];
+    var cardEl = turnEl.closest(".prompt-card");
+
+    // Image drop zone
+    var dropZone = turnEl.querySelector(".card-turn-image-drop");
+    var fileInput = turnEl.querySelector(".card-turn-image-input");
+
+    dropZone.addEventListener("click", function () { fileInput.click(); });
+    dropZone.addEventListener("dragover", function (e) { e.preventDefault(); dropZone.classList.add("drag-over"); });
+    dropZone.addEventListener("dragleave", function () { dropZone.classList.remove("drag-over"); });
+    dropZone.addEventListener("drop", function (e) {
+      e.preventDefault();
+      dropZone.classList.remove("drag-over");
+      if (e.dataTransfer.files.length) handleCardTurnImages(cardId, turnIndex, e.dataTransfer.files);
+    });
+    fileInput.addEventListener("change", function () {
+      if (fileInput.files.length) handleCardTurnImages(cardId, turnIndex, fileInput.files);
+      fileInput.value = "";
+    });
+
+    // Remove turn button
+    var removeBtn = turnEl.querySelector(".btn-remove-turn");
+    if (removeBtn) {
+      removeBtn.addEventListener("click", function (e) {
+        e.stopPropagation();
+        removeTurnFromCard(cardId, turnIndex);
+      });
+    }
+
+    // Preview update on prompt input
+    turnEl.querySelector(".card-turn-prompt").addEventListener("input", function () {
+      updateCardPreview(cardId);
+    });
+  }
+
+  // ── Handle image files dropped/selected on a card turn ──
+  function handleCardTurnImages(cardId, turnIndex, fileList) {
+    var card = promptCards[cardId];
+    if (!card || !card.turns[turnIndex]) return;
+    var turn = card.turns[turnIndex];
+    var remaining = MAX_IMAGES - turn._uploadedImages.length;
+    if (remaining <= 0) { showToast("Max " + MAX_IMAGES + " images per turn", "warning"); return; }
+    var files = Array.from(fileList).slice(0, remaining);
+    files.forEach(function (file) {
+      processImageFile(file).then(function (imgData) {
+        card.turns[turnIndex]._uploadedImages.push(imgData);
+        renderCardTurnThumbs(cardId, turnIndex);
+      }).catch(function (err) {
+        showToast(err.message, "warning");
+      });
+    });
+  }
+
+  // ── Render image thumbnails for a card turn ──
+  function renderCardTurnThumbs(cardId, turnIndex) {
+    var card = promptCards[cardId];
+    if (!card || !card.turns[turnIndex]) return;
+    var images = card.turns[turnIndex]._uploadedImages;
+    var cardEl = document.querySelector('.prompt-card[data-card-id="' + cardId + '"]');
+    if (!cardEl) return;
+    var turnEls = cardEl.querySelectorAll(".card-turn");
+    var turnEl = null;
+    for (var i = 0; i < turnEls.length; i++) {
+      if (parseInt(turnEls[i].getAttribute("data-turn-index"), 10) === turnIndex) {
+        turnEl = turnEls[i];
+        break;
+      }
+    }
+    if (!turnEl) return;
+    var thumbsContainer = turnEl.querySelector(".card-turn-thumbs");
+    thumbsContainer.innerHTML = "";
+    images.forEach(function (img, idx) {
+      var thumb = document.createElement("div");
+      thumb.className = "image-thumb";
+      thumb.innerHTML =
+        '<img src="' + (img.objectUrl || "data:" + img.mime_type + ";base64," + img.data) + '" alt="' + escapeAttr(img.filename) + '" />' +
+        '<button class="image-thumb-remove" data-img-idx="' + idx + '">&times;</button>' +
+        '<span class="image-thumb-name">' + escapeHtml(truncate(img.filename, 12)) + '</span>';
+      thumbsContainer.appendChild(thumb);
+    });
+    thumbsContainer.querySelectorAll(".image-thumb-remove").forEach(function (btn) {
+      btn.addEventListener("click", function (e) {
+        e.stopPropagation();
+        var imgIdx = parseInt(btn.getAttribute("data-img-idx"), 10);
+        var turnImgs = card.turns[turnIndex]._uploadedImages;
+        if (turnImgs[imgIdx] && turnImgs[imgIdx].objectUrl) URL.revokeObjectURL(turnImgs[imgIdx].objectUrl);
+        turnImgs.splice(imgIdx, 1);
+        renderCardTurnThumbs(cardId, turnIndex);
+      });
+    });
+  }
+
+  // ── Add a turn to a card ──
+  function addTurnToCard(cardId) {
+    var card = promptCards[cardId];
+    if (!card) return -1;
+    if (card.turns.length >= 10) { showToast("Max 10 turns per card", "warning"); return -1; }
+    var turnIndex = card.turns.length;
+    card.turns.push({ text: "", _uploadedImages: [] });
+    var cardEl = document.querySelector('.prompt-card[data-card-id="' + cardId + '"]');
+    if (!cardEl) return turnIndex;
+    var container = cardEl.querySelector(".card-turns-container");
+    var turnHtml = buildTurnHtml(turnIndex, true);
+    var temp = document.createElement("div");
+    temp.innerHTML = turnHtml;
+    var turnEl = temp.firstElementChild;
+    container.appendChild(turnEl);
+    wireTurnEvents(cardId, turnEl);
+    updateCardPreview(cardId);
+    return turnIndex;
+  }
+
+  // ── Remove a turn from a card ──
+  function removeTurnFromCard(cardId, turnIndex) {
+    var card = promptCards[cardId];
+    if (!card || card.turns.length <= 1) return;
+    // Revoke object URLs
+    var removed = card.turns.splice(turnIndex, 1)[0];
+    if (removed) removed._uploadedImages.forEach(function (img) {
+      if (img.objectUrl) URL.revokeObjectURL(img.objectUrl);
+    });
+    // Rebuild turns DOM
+    rebuildTurnsDOM(cardId);
+    updateCardPreview(cardId);
+  }
+
+  // ── Rebuild the turns DOM from card.turns state ──
+  function rebuildTurnsDOM(cardId) {
+    var card = promptCards[cardId];
+    if (!card) return;
+    var cardEl = document.querySelector('.prompt-card[data-card-id="' + cardId + '"]');
+    if (!cardEl) return;
+    var container = cardEl.querySelector(".card-turns-container");
+    container.innerHTML = "";
+    card.turns.forEach(function (turn, idx) {
+      var turnHtml = buildTurnHtml(idx, idx > 0);
+      var temp = document.createElement("div");
+      temp.innerHTML = turnHtml;
+      var turnEl = temp.firstElementChild;
+      container.appendChild(turnEl);
+      // Restore prompt text
+      turnEl.querySelector(".card-turn-prompt").value = turn.text || "";
+      wireTurnEvents(cardId, turnEl);
+      // Restore image thumbnails
+      if (turn._uploadedImages.length > 0) renderCardTurnThumbs(cardId, idx);
+    });
+  }
+
+  // ── Update card preview text ──
+  function updateCardPreview(cardId) {
+    var card = promptCards[cardId];
+    if (!card) return;
+    var cardEl = document.querySelector('.prompt-card[data-card-id="' + cardId + '"]');
+    if (!cardEl) return;
+
+    // Sync turn texts from DOM
+    var turnEls = cardEl.querySelectorAll(".card-turn-prompt");
+    for (var i = 0; i < turnEls.length && i < card.turns.length; i++) {
+      card.turns[i].text = turnEls[i].value;
+    }
+
+    var preview = cardEl.querySelector(".prompt-card-preview");
+    var firstText = (card.turns[0] && card.turns[0].text || "").trim();
+    if (card.turns.length > 1) {
+      preview.textContent = card.turns.length + " turns: " + (firstText ? (firstText.length > 60 ? firstText.substring(0, 60) + "..." : firstText) : "No prompt");
+    } else {
+      preview.textContent = firstText ? (firstText.length > 80 ? firstText.substring(0, 80) + "..." : firstText) : "No prompt";
+    }
+    preview.title = firstText || "";
+
+    // Tags
+    var tags = cardEl.querySelector(".prompt-card-tags");
+    var w = cardEl.querySelector(".card-window-count").value;
+    var a = cardEl.querySelector(".card-model-a").value.trim();
+    var b = cardEl.querySelector(".card-model-b").value.trim();
+    var parts = [w + "w"];
+    if (card.turns.length > 1) parts.push(card.turns.length + "t");
+    if (a) parts.push(a);
+    if (b) parts.push(b);
+    tags.textContent = parts.join(" \u00b7 ");
+  }
+
   function createPromptCard(cardId) {
     if (!cardId) {
       cardId = generateCardId();
@@ -2395,8 +2776,7 @@ html, body { margin: 0; padding: 0; background: #fff; color: #111;
       workerData: {},
       incrementalResults: {},
       runResults: null,
-      images: [],
-      _uploadedImages: [],
+      turns: [{ text: "", _uploadedImages: [] }],
       settings: {
         prompt: "",
         system_prompt: "",
@@ -2433,7 +2813,10 @@ html, body { margin: 0; padding: 0; background: #fff; color: #111;
       '</div>' +
       // ── Body (hidden by default, shown on expand) ──
       '<div class="prompt-card-body collapsed">' +
-        '<textarea class="card-prompt" rows="3" placeholder="Enter prompt..."></textarea>' +
+        '<div class="card-turns-container">' +
+          buildTurnHtml(0, false) +
+        '</div>' +
+        '<button class="btn-add-turn" title="Add another turn to this conversation">+ Add Turn</button>' +
         '<div class="card-settings-row">' +
           '<label>Win <input type="number" class="card-window-count" value="4" min="1" max="12" /></label>' +
           '<label>Gap <input type="number" class="card-gap" value="30" min="5" max="300" /></label>' +
@@ -2455,22 +2838,15 @@ html, body { margin: 0; padding: 0; background: #fff; color: #111;
     var container = document.getElementById("instruction-cards-container");
     if (container) container.appendChild(el);
 
-    // ── Update preview text from prompt ──
-    function updatePreview() {
-      var text = el.querySelector(".card-prompt").value.trim();
-      var preview = el.querySelector(".prompt-card-preview");
-      preview.textContent = text ? (text.length > 80 ? text.substring(0, 80) + "..." : text) : "No prompt";
-      preview.title = text || "";
-      // Update tags
-      var tags = el.querySelector(".prompt-card-tags");
-      var w = el.querySelector(".card-window-count").value;
-      var a = el.querySelector(".card-model-a").value.trim();
-      var b = el.querySelector(".card-model-b").value.trim();
-      var parts = [w + "w"];
-      if (a) parts.push(a);
-      if (b) parts.push(b);
-      tags.textContent = parts.join(" · ");
-    }
+    // Wire turn 0 events
+    var turnEl = el.querySelector(".card-turn");
+    if (turnEl) wireTurnEvents(cardId, turnEl);
+
+    // Add Turn button
+    el.querySelector(".btn-add-turn").addEventListener("click", function (e) {
+      e.stopPropagation();
+      addTurnToCard(cardId);
+    });
 
     // ── Event listeners ──
     el.querySelector(".btn-card-run").addEventListener("click", function (e) {
@@ -2507,14 +2883,13 @@ html, body { margin: 0; padding: 0; background: #fff; color: #111;
     // Click header to toggle too
     el.querySelector(".prompt-card-header").addEventListener("click", toggleBody);
 
-    // Sync preview on input changes
-    el.querySelector(".card-prompt").addEventListener("input", updatePreview);
-    el.querySelector(".card-window-count").addEventListener("input", updatePreview);
-    el.querySelector(".card-model-a").addEventListener("input", updatePreview);
-    el.querySelector(".card-model-b").addEventListener("input", updatePreview);
+    // Sync preview on settings changes
+    el.querySelector(".card-window-count").addEventListener("input", function () { updateCardPreview(cardId); });
+    el.querySelector(".card-model-a").addEventListener("input", function () { updateCardPreview(cardId); });
+    el.querySelector(".card-model-b").addEventListener("input", function () { updateCardPreview(cardId); });
 
     // Init preview
-    updatePreview();
+    updateCardPreview(cardId);
 
     return cardId;
   }
@@ -2524,9 +2899,18 @@ html, body { margin: 0; padding: 0; background: #fff; color: #111;
     if (!card || card.running) return;
 
     var el = document.querySelector('.prompt-card[data-card-id="' + cardId + '"]');
-    var promptText = el.querySelector(".card-prompt").value.trim();
-    if (!promptText) {
-      el.querySelector(".card-prompt").focus();
+
+    // Sync turn texts from DOM
+    var turnEls = el.querySelectorAll(".card-turn-prompt");
+    for (var i = 0; i < turnEls.length && i < card.turns.length; i++) {
+      card.turns[i].text = turnEls[i].value;
+    }
+
+    // Validate: at least the first turn must have text
+    var firstText = (card.turns[0] && card.turns[0].text || "").trim();
+    if (!firstText) {
+      var firstPrompt = el.querySelector(".card-turn-prompt");
+      if (firstPrompt) firstPrompt.focus();
       return;
     }
 
@@ -2538,7 +2922,6 @@ html, body { margin: 0; padding: 0; background: #fff; color: #111;
     card.workerData = {};
     card.incrementalResults = {};
     card.runResults = null;
-    card.images = getCardImages(cardId);
 
     // Read per-card settings
     var windowCount = parseInt(el.querySelector(".card-window-count").value, 10) || 4;
@@ -2550,22 +2933,18 @@ html, body { margin: 0; padding: 0; background: #fff; color: #111;
     var clearCookies = el.querySelector(".card-clear-cookies").checked;
     var incognito = el.querySelector(".card-incognito").checked;
     var simultaneous = el.querySelector(".card-simultaneous").checked;
-    var systemPrompt = "";
-    var combineFirst = false;
 
     // Read global settings
     var monW = parseInt(monitorWidthInput.value, 10) || screen.availWidth || 1920;
     var monH = parseInt(monitorHeightInput.value, 10) || screen.availHeight || 1080;
 
-    // Update UI
-    updateCardRunState(cardId);
-
-    send({
+    // Build message
+    var msg = {
       type: "start_run",
       run_id: cardId,
-      prompt: promptText,
-      system_prompt: systemPrompt,
-      combine_with_first: combineFirst,
+      prompt: firstText,
+      system_prompt: "",
+      combine_with_first: false,
       window_count: windowCount,
       submission_gap_seconds: gap,
       model_a: modelA,
@@ -2573,7 +2952,6 @@ html, body { margin: 0; padding: 0; background: #fff; color: #111;
       retain_output: retain,
       clear_cookies: clearCookies,
       incognito: incognito,
-      images: card.images.length > 0 ? card.images.map(function (img) { return { data: img.data, mime_type: img.mime_type, filename: img.filename }; }) : null,
       simultaneous_start: simultaneous,
       zoom_pct: zoom,
       monitor_count: parseInt(monitorCountInput.value, 10) || 1,
@@ -2583,9 +2961,38 @@ html, body { margin: 0; padding: 0; background: #fff; color: #111;
       margin: parseInt(tileMarginInput.value, 10) || 0,
       proxies: parseProxyList(proxyListInput.value),
       proxy_on_challenge: proxyOnChallengeInput.checked,
-    });
+      windows_per_proxy: parseInt(windowsPerProxyInput.value, 10) || 4,
+    };
 
-    appendLog("info", "[Prompt #" + card.index + "] Starting run with " + windowCount + " window(s)...");
+    // Build turns array
+    var nonEmptyTurns = card.turns.filter(function (t) { return (t.text || "").trim(); });
+    if (nonEmptyTurns.length > 1) {
+      // Multi-turn: send turns array
+      msg.turns = nonEmptyTurns.map(function (t) {
+        var entry = { text: t.text.trim() };
+        if (t._uploadedImages && t._uploadedImages.length > 0) {
+          entry.images = t._uploadedImages.map(function (img) {
+            return { data: img.data, mime_type: img.mime_type, filename: img.filename };
+          });
+        }
+        return entry;
+      });
+    } else {
+      // Single turn: send prompt + images (backward compat)
+      var firstTurn = nonEmptyTurns[0] || card.turns[0];
+      if (firstTurn._uploadedImages && firstTurn._uploadedImages.length > 0) {
+        msg.images = firstTurn._uploadedImages.map(function (img) {
+          return { data: img.data, mime_type: img.mime_type, filename: img.filename };
+        });
+      }
+    }
+
+    // Update UI
+    updateCardRunState(cardId);
+    send(msg);
+
+    var turnInfo = nonEmptyTurns.length > 1 ? " (" + nonEmptyTurns.length + " turns)" : "";
+    appendLog("info", "[Prompt #" + card.index + "] Starting run with " + windowCount + " window(s)" + turnInfo + "...");
   }
 
   function stopCardRun(cardId) {
@@ -2609,7 +3016,10 @@ html, body { margin: 0; padding: 0; background: #fff; color: #111;
   }
 
   function getCardImages(cardId) {
-    return promptCards[cardId] ? promptCards[cardId]._uploadedImages : [];
+    var card = promptCards[cardId];
+    if (!card) return [];
+    // Return images from the first turn (backward compat)
+    return card.turns && card.turns[0] ? card.turns[0]._uploadedImages : [];
   }
 
   function updateCardRunState(cardId) {
@@ -2666,9 +3076,9 @@ html, body { margin: 0; padding: 0; background: #fff; color: #111;
     }
 
     // Also update the global worker cards (in sidebar)
-    updateWorkerCard(msg);
+    updateWorkerCard({ ...msg, run_id: runId });
     // And the global results table
-    updateResultRow(msg);
+    updateResultRow({ ...msg, run_id: runId });
   }
 
   function onCardWorkerResult(runId, result) {
@@ -2685,7 +3095,7 @@ html, body { margin: 0; padding: 0; background: #fff; color: #111;
     }
 
     // Also update global results table
-    onWorkerResult(result);
+    onWorkerResult({ ...result, run_id: runId });
   }
 
   function onCardPartialResult(runId, partial) {
@@ -2707,7 +3117,7 @@ html, body { margin: 0; padding: 0; background: #fff; color: #111;
     }
 
     // Also update global
-    onWorkerPartialResult(partial);
+    onWorkerPartialResult({ ...partial, run_id: runId });
   }
 
   function updateCardProgress(runId, msg) {
@@ -2763,7 +3173,7 @@ html, body { margin: 0; padding: 0; background: #fff; color: #111;
     updateStopAllState();
 
     // Update global results
-    onRunComplete(msg);
+    onRunComplete(msg, { append: true });
   }
 
   function onCardRunCancelled(runId) {
@@ -2817,9 +3227,12 @@ html, body { margin: 0; padding: 0; background: #fff; color: #111;
   let instructionRunQueue = [];
   let currentInstructionCardId = null;
 
-  function handleInstructionUpload(file) {
+  function handleInstructionUpload(fileOrFiles) {
     var formData = new FormData();
-    formData.append("file", file);
+    // Accept a single file, FileList, or array of files
+    var fileList = fileOrFiles instanceof FileList ? Array.from(fileOrFiles)
+      : Array.isArray(fileOrFiles) ? fileOrFiles : [fileOrFiles];
+    fileList.forEach(function (f) { formData.append("files", f); });
 
     fetch("/upload-instructions", { method: "POST", body: formData })
       .then(function (res) {
@@ -2840,7 +3253,7 @@ html, body { margin: 0; padding: 0; background: #fff; color: #111;
         }
 
         // Show info
-        instructionFileName.textContent = data.filename || file.name;
+        instructionFileName.textContent = data.filename || (fileList[0] && fileList[0].name) || "instructions";
         instructionCountSpan.textContent = loadedInstructions.length + " instruction(s)";
         instructionUploadArea.classList.add("hidden");
         instructionInfoDiv.classList.remove("hidden");
@@ -2853,9 +3266,77 @@ html, body { margin: 0; padding: 0; background: #fff; color: #111;
         // Generate cards from instructions
         loadedInstructions.forEach(function (inst) {
           var cardId = createPromptCard();
+          var card = promptCards[cardId];
           var el = document.querySelector('.prompt-card[data-card-id="' + cardId + '"]');
-          if (!el) return;
-          if (inst.prompt) el.querySelector(".card-prompt").value = inst.prompt;
+          if (!el || !card) return;
+
+          // Populate turns
+          if (inst.turns && inst.turns.length > 0) {
+            // Multi-turn instruction
+            inst.turns.forEach(function (turn, idx) {
+              if (idx === 0) {
+                // First turn already exists
+                card.turns[0].text = turn.text || "";
+                el.querySelector(".card-turn-prompt").value = turn.text || "";
+                // Pre-populate images from file
+                if (turn.images && Array.isArray(turn.images)) {
+                  turn.images.forEach(function (img) {
+                    if (img.data && img.mime_type) {
+                      card.turns[0]._uploadedImages.push({
+                        data: img.data,
+                        mime_type: img.mime_type,
+                        filename: img.filename || "",
+                        objectUrl: "",
+                      });
+                    }
+                  });
+                  if (card.turns[0]._uploadedImages.length > 0) renderCardTurnThumbs(cardId, 0);
+                }
+              } else {
+                // Add subsequent turns
+                var turnIdx = addTurnToCard(cardId);
+                if (turnIdx >= 0) {
+                  card.turns[turnIdx].text = turn.text || "";
+                  var turnPrompts = el.querySelectorAll(".card-turn-prompt");
+                  if (turnPrompts[turnIdx]) turnPrompts[turnIdx].value = turn.text || "";
+                  // Pre-populate images
+                  if (turn.images && Array.isArray(turn.images)) {
+                    turn.images.forEach(function (img) {
+                      if (img.data && img.mime_type) {
+                        card.turns[turnIdx]._uploadedImages.push({
+                          data: img.data,
+                          mime_type: img.mime_type,
+                          filename: img.filename || "",
+                          objectUrl: "",
+                        });
+                      }
+                    });
+                    if (card.turns[turnIdx]._uploadedImages.length > 0) renderCardTurnThumbs(cardId, turnIdx);
+                  }
+                }
+              }
+            });
+          } else if (inst.prompt) {
+            // Single-turn (backward compat)
+            card.turns[0].text = inst.prompt;
+            el.querySelector(".card-turn-prompt").value = inst.prompt;
+            // Pre-populate images for single-turn
+            if (inst.images && Array.isArray(inst.images)) {
+              inst.images.forEach(function (img) {
+                if (img && img.data && img.mime_type) {
+                  card.turns[0]._uploadedImages.push({
+                    data: img.data,
+                    mime_type: img.mime_type,
+                    filename: img.filename || "",
+                    objectUrl: "",
+                  });
+                }
+              });
+              if (card.turns[0]._uploadedImages.length > 0) renderCardTurnThumbs(cardId, 0);
+            }
+          }
+
+          // Populate settings
           if (inst.window_count) el.querySelector(".card-window-count").value = inst.window_count;
           if (inst.submission_gap_seconds) el.querySelector(".card-gap").value = inst.submission_gap_seconds;
           if (inst.model_a) el.querySelector(".card-model-a").value = inst.model_a;
@@ -2865,15 +3346,12 @@ html, body { margin: 0; padding: 0; background: #fff; color: #111;
           if (inst.clear_cookies !== undefined) el.querySelector(".card-clear-cookies").checked = !!inst.clear_cookies;
           if (inst.incognito !== undefined) el.querySelector(".card-incognito").checked = !!inst.incognito;
           if (inst.simultaneous_start !== undefined) el.querySelector(".card-simultaneous").checked = !!inst.simultaneous_start;
-          // Trigger preview update (setting .value doesn't fire input events)
-          el.querySelector(".card-prompt").dispatchEvent(new Event("input"));
-          el.querySelector(".card-window-count").dispatchEvent(new Event("input"));
-          el.querySelector(".card-model-a").dispatchEvent(new Event("input"));
-          el.querySelector(".card-model-b").dispatchEvent(new Event("input"));
+
+          updateCardPreview(cardId);
         });
 
         updateInstructionOverallProgress();
-        appendLog("info", "Loaded " + loadedInstructions.length + " instruction(s) from " + file.name);
+        appendLog("info", "Loaded " + loadedInstructions.length + " instruction(s) from " + (data.filename || "file"));
       })
       .catch(function (err) {
         showToast("Failed to parse instruction file: " + err.message, "error");
@@ -2914,25 +3392,32 @@ html, body { margin: 0; padding: 0; background: #fff; color: #111;
     instructionRunBtn.disabled = true;
     instructionStopBtn.disabled = false;
 
-    runNextInstruction();
+    // Start all pending instruction cards in parallel.
+    instructionRunQueue.forEach(function (cardId) {
+      startCardRun(cardId);
+    });
+    currentInstructionCardId = null;
+    updateInstructionOverallProgress();
   }
 
   function runNextInstruction() {
-    if (instructionStopRequested || instructionRunQueue.length === 0) {
-      onInstructionSequenceComplete();
+    var anyRunning = Object.values(promptCards).some(function (c) {
+      return c.running;
+    });
+    if (anyRunning) {
+      updateInstructionOverallProgress();
       return;
     }
-
-    currentInstructionCardId = instructionRunQueue.shift();
-    startCardRun(currentInstructionCardId);
-    updateInstructionOverallProgress();
+    onInstructionSequenceComplete();
   }
 
   function stopInstructionSequence() {
     instructionStopRequested = true;
-    if (currentInstructionCardId) {
-      stopCardRun(currentInstructionCardId);
-    }
+    Object.keys(promptCards).forEach(function (cid) {
+      if (promptCards[cid] && promptCards[cid].running) {
+        stopCardRun(cid);
+      }
+    });
   }
 
   function onInstructionSequenceComplete() {
@@ -2972,12 +3457,12 @@ html, body { margin: 0; padding: 0; background: #fff; color: #111;
     instructionUploadArea.addEventListener("drop", function (e) {
       e.preventDefault();
       instructionUploadArea.classList.remove("dragover");
-      if (e.dataTransfer.files.length > 0) handleInstructionUpload(e.dataTransfer.files[0]);
+      if (e.dataTransfer.files.length > 0) handleInstructionUpload(e.dataTransfer.files);
     });
   }
   if (instructionFileInput) {
     instructionFileInput.addEventListener("change", function () {
-      if (instructionFileInput.files.length > 0) handleInstructionUpload(instructionFileInput.files[0]);
+      if (instructionFileInput.files.length > 0) handleInstructionUpload(instructionFileInput.files);
       instructionFileInput.value = "";
     });
   }
@@ -3216,9 +3701,10 @@ html, body { margin: 0; padding: 0; background: #fff; color: #111;
           workersContainer.innerHTML = "";
           layoutWindowsGrid(workerCount);
           state.workers.forEach(w => {
-            ensureWorkerCard(w.worker_id);
+            ensureWorkerCard(w.worker_id, state.run_id);
             updateWorkerCard({
               worker_id: w.worker_id,
+              run_id: state.run_id,
               state: w.state,
               progress_pct: w.progress_pct,
               message: "",
@@ -3230,9 +3716,10 @@ html, body { margin: 0; padding: 0; background: #fff; color: #111;
         // Restore result rows
         if (state.results && state.results.length > 0) {
           state.results.forEach(r => {
-            ensureResultRow(r.worker_id);
+            ensureResultRow(r.worker_id, state.run_id || null);
+            r.run_id = r.run_id || state.run_id || null;
             updateResultRowWithData(r);
-            incrementalResults[r.worker_id] = r;
+            incrementalResults[getResultKey(r.worker_id, r.run_id || null)] = r;
           });
           exportBtn.disabled = false;
         }

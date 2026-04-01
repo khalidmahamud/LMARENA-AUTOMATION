@@ -13,7 +13,7 @@ from src.core.events import Event, EventBus, EventType
 from src.core.exceptions import AllWorkersFailedError, RunCancelledError
 from src.export.excel_exporter import export_to_csv, export_to_excel, export_to_json
 from src.models.config import AppConfig, DisplayConfig
-from src.models.messages import StartRunRequest
+from src.models.messages import PromptTurn, StartRunRequest
 from src.models.results import RunResult, WindowResult
 from src.models.worker import WorkerState
 from src.workers.arena_worker import ArenaWorker
@@ -83,6 +83,11 @@ class RunOrchestrator:
             else None
         )
 
+        # Resolve multi-turn conversation
+        turn_list: Optional[List[PromptTurn]] = None
+        if request.turns and len(request.turns) > 0:
+            turn_list = list(request.turns)
+
         if resume_checkpoint:
             # Restore state from checkpoint
             run_id = resume_checkpoint.run_id
@@ -104,21 +109,33 @@ class RunOrchestrator:
             restored_results = []
 
             # Determine all prompts and chunk into batches
-            all_prompts = request.prompts if request.prompts else [request.prompt]
+            if turn_list:
+                # Multi-turn: use first turn text for batching/progress
+                all_prompts = [turn_list[0].text]
+                if combine_with_first:
+                    turn_list[0] = PromptTurn(
+                        text=f"{system_prompt}\n\n{turn_list[0].text}",
+                        images=turn_list[0].images,
+                    )
+                    all_prompts = [turn_list[0].text]
+                    system_prompt = ""
+            else:
+                all_prompts = request.prompts if request.prompts else [request.prompt]
+                if combine_with_first:
+                    all_prompts = [f"{system_prompt}\n\n{p}" for p in all_prompts]
+                    system_prompt = ""  # Skip Phase 1 entirely
 
             # Single prompt with multiple windows: replicate across all windows
             if len(all_prompts) == 1 and count > 1:
                 all_prompts = all_prompts * count
-
-            if combine_with_first:
-                all_prompts = [f"{system_prompt}\n\n{p}" for p in all_prompts]
-                system_prompt = ""  # Skip Phase 1 entirely
 
         batches: List[List[str]] = [
             all_prompts[i : i + count]
             for i in range(0, len(all_prompts), count)
         ]
         total_batches = len(batches)
+        turn_count = len(turn_list) if turn_list and len(turn_list) > 0 else 1
+        expected_result_slots = len(all_prompts) * turn_count
         self._active_request = request
         self._active_run_id = run_id
         self._active_started_at = started_at
@@ -138,6 +155,7 @@ class RunOrchestrator:
                     "window_count": count,
                     "prompt": all_prompts[0][:200],
                     "total_prompts": len(all_prompts),
+                    "total_result_slots": expected_result_slots,
                     "total_batches": total_batches,
                     "resumed_from_batch": start_batch_idx if resume_checkpoint else None,
                 },
@@ -182,6 +200,7 @@ class RunOrchestrator:
             incognito=request.incognito,
             proxies=proxy_list,
             proxy_on_challenge=request.proxy_on_challenge,
+            windows_per_proxy=request.windows_per_proxy,
             zoom_pct=request.zoom_pct,
             run_id=run_id,
         )
@@ -196,6 +215,13 @@ class RunOrchestrator:
         def _proxy_reporter(index: int) -> None:
             self._browser_manager.report_proxy_success(index, run_id=run_id)
 
+        def _proxy_failure_reporter(index: int, reason: str) -> None:
+            self._browser_manager.report_proxy_failure(
+                index,
+                run_id=run_id,
+                reason=reason,
+            )
+
         # Phase 2: Create workers
         self._workers = [
             ArenaWorker(
@@ -206,6 +232,7 @@ class RunOrchestrator:
                 context_recreator=_recreator,
                 proxy_getter=_proxy_getter,
                 proxy_success_reporter=_proxy_reporter,
+                proxy_failure_reporter=_proxy_failure_reporter,
                 run_id=run_id,
             )
             for i in range(count)
@@ -221,7 +248,7 @@ class RunOrchestrator:
             return_exceptions=True,
         )
         for i, result in enumerate(nav_results):
-            if isinstance(result, Exception):
+            if isinstance(result, BaseException):
                 logger.error("Worker %d navigation failed: %s", i, result)
 
         if request.clear_cookies:
@@ -296,7 +323,7 @@ class RunOrchestrator:
                     return_exceptions=True,
                 )
                 for i, result in enumerate(nav_results):
-                    if isinstance(result, Exception):
+                    if isinstance(result, BaseException):
                         logger.error(
                             "Worker %d re-navigation failed (batch %d): %s",
                             i, batch_idx, result,
@@ -413,7 +440,7 @@ class RunOrchestrator:
                         prompt,
                         _,
                     ), result in zip(pending_system_prepare, system_results):
-                        if isinstance(result, Exception):
+                        if isinstance(result, BaseException):
                             logger.error(
                                 "Worker %d system prompt preparation failed (batch %d): %s",
                                 worker_idx,
@@ -589,7 +616,7 @@ class RunOrchestrator:
                         baseline_responses,
                         _,
                     ), result in zip(pending_prepare, submission_results):
-                        if isinstance(result, Exception):
+                        if isinstance(result, BaseException):
                             logger.error(
                                 "Worker %d preparation failed (batch %d): %s",
                                 worker_idx, batch_idx, result,
@@ -633,7 +660,7 @@ class RunOrchestrator:
                         Event(
                             type=EventType.RUN_PROGRESS,
                             data={
-                                "total_workers": len(all_prompts),
+                                "total_workers": expected_result_slots,
                                 "submitted": completed_prompts,
                                 "phase": "submitting",
                                 "batch": batch_idx + 1,
@@ -697,7 +724,7 @@ class RunOrchestrator:
                         Event(
                             type=EventType.RUN_PROGRESS,
                             data={
-                                "total_workers": len(all_prompts),
+                                "total_workers": expected_result_slots,
                                 "submitted": completed_prompts,
                                 "phase": "submitting",
                                 "batch": batch_idx + 1,
@@ -780,12 +807,25 @@ class RunOrchestrator:
                 for (widx, worker, prompt), recovery_out in zip(
                     all_failures, recovery_results
                 ):
-                    if isinstance(recovery_out, Exception):
+                    if isinstance(recovery_out, BaseException):
+                        if isinstance(recovery_out, asyncio.CancelledError):
+                            if self._cancelled:
+                                error_text = (
+                                    "Recovery cancelled (run cancelled)"
+                                )
+                            else:
+                                error_text = (
+                                    "Recovery cancelled unexpectedly"
+                                )
+                        else:
+                            error_text = (
+                                f"Recovery raised exception: {recovery_out}"
+                            )
                         failed_result = self._failed_result(
                             worker_id=widx,
                             prompt=prompt,
                             batch_idx=batch_idx,
-                            error=f"Recovery raised exception: {recovery_out}",
+                            error=error_text,
                         )
                         await self._publish_failed_worker_result(
                             worker, failed_result
@@ -816,6 +856,195 @@ class RunOrchestrator:
 
             batch_results.sort(key=lambda item: item.worker_id)
             all_window_results.extend(batch_results)
+
+            # ── Multi-turn: subsequent turns in the same conversation ──
+            if turn_list and len(turn_list) > 1 and not self._cancelled:
+                # Determine surviving workers from turn 0
+                surviving: dict[int, ArenaWorker] = {}
+                for r in batch_results:
+                    if r.success and r.worker_id < len(self._workers):
+                        surviving[r.worker_id] = self._workers[r.worker_id]
+
+                for turn_idx in range(1, len(turn_list)):
+                    if not surviving or self._cancelled:
+                        break
+
+                    turn = turn_list[turn_idx]
+                    turn_image_dicts = (
+                        [img.model_dump() for img in turn.images]
+                        if turn.images
+                        else None
+                    )
+
+                    await self._publish(
+                        Event(
+                            type=EventType.LOG,
+                            data={
+                                "level": "info",
+                                "text": (
+                                    f"Batch {batch_idx + 1}/{total_batches}: "
+                                    f"Turn {turn_idx + 1}/{len(turn_list)}"
+                                ),
+                            },
+                        )
+                    )
+
+                    # Prepare all surviving workers for follow-up
+                    followup_baselines: dict[int, Tuple[str, str]] = {}
+                    for wid in list(surviving.keys()):
+                        worker = surviving[wid]
+                        try:
+                            followup_baselines[wid] = (
+                                await worker.prepare_for_followup_prompt()
+                            )
+                        except Exception as exc:
+                            logger.error(
+                                "Worker %d follow-up prep failed (turn %d): %s",
+                                wid, turn_idx, exc,
+                            )
+                            failed = self._failed_result(
+                                worker_id=wid,
+                                prompt=turn.text,
+                                batch_idx=batch_idx,
+                                error=f"Follow-up prep failed: {exc}",
+                                turn_index=turn_idx,
+                            )
+                            await self._publish_failed_worker_result(
+                                worker, failed
+                            )
+                            all_window_results.append(failed)
+                            del surviving[wid]
+
+                    if not surviving or self._cancelled:
+                        break
+
+                    # Submit turn to all surviving workers (sequential)
+                    turn_submitted: List[
+                        Tuple[int, ArenaWorker, Optional[Tuple[str, str]]]
+                    ] = []
+                    submit_idx = 0
+                    for wid in list(surviving.keys()):
+                        await self._wait_if_paused()
+                        if self._cancelled:
+                            break
+
+                        worker = surviving[wid]
+                        try:
+                            await worker.submit_prompt(
+                                prompt=turn.text,
+                                model_a=None,
+                                model_b=None,
+                                pause_event=self._resume_event,
+                                images=turn_image_dicts,
+                            )
+                            turn_submitted.append(
+                                (wid, worker, followup_baselines.get(wid))
+                            )
+                        except Exception as exc:
+                            logger.error(
+                                "Worker %d turn %d submission failed: %s",
+                                wid, turn_idx, exc,
+                            )
+                            failed = self._failed_result(
+                                worker_id=wid,
+                                prompt=turn.text,
+                                batch_idx=batch_idx,
+                                error=f"Turn {turn_idx} submission failed: {exc}",
+                                turn_index=turn_idx,
+                            )
+                            await self._publish_failed_worker_result(
+                                worker, failed
+                            )
+                            all_window_results.append(failed)
+                            surviving.pop(wid, None)
+
+                        submit_idx += 1
+                        if (
+                            submit_idx < len(surviving)
+                            and not self._cancelled
+                        ):
+                            jittered = self._apply_jitter(gap)
+                            await self._sleep_with_pause(jittered)
+
+                    if not turn_submitted or self._cancelled:
+                        # Record failures for remaining turns
+                        for remaining_turn in range(
+                            turn_idx if not turn_submitted else turn_idx + 1,
+                            len(turn_list),
+                        ):
+                            for wid in surviving:
+                                failed = self._failed_result(
+                                    worker_id=wid,
+                                    prompt=turn_list[remaining_turn].text,
+                                    batch_idx=batch_idx,
+                                    error="Skipped (earlier turn failed or cancelled)",
+                                    turn_index=remaining_turn,
+                                )
+                                all_window_results.append(failed)
+                        break
+
+                    # Poll all submitted workers for this turn
+                    turn_poll_tasks = [
+                        asyncio.create_task(
+                            self._poll_worker_for_batch(
+                                worker=worker,
+                                prompt=turn.text,
+                                batch_idx=batch_idx,
+                                retain=request.retain_output,
+                                baseline_responses=baseline,
+                                turn_index=turn_idx,
+                            )
+                        )
+                        for wid, worker, baseline in turn_submitted
+                    ]
+                    if turn_poll_tasks:
+                        await asyncio.gather(
+                            *turn_poll_tasks, return_exceptions=True
+                        )
+
+                    await self._wait_if_paused()
+
+                    # Collect turn results
+                    turn_results: List[WindowResult] = []
+                    for wid, worker, _ in turn_submitted:
+                        result = self._live_results.get((batch_idx, wid))
+                        if result:
+                            turn_results.append(result)
+                            if not result.success:
+                                surviving.pop(wid, None)
+                        else:
+                            surviving.pop(wid, None)
+                            failed = self._failed_result(
+                                worker_id=wid,
+                                prompt=turn.text,
+                                batch_idx=batch_idx,
+                                error=f"Turn {turn_idx} polling returned no result",
+                                turn_index=turn_idx,
+                            )
+                            turn_results.append(failed)
+
+                    all_window_results.extend(turn_results)
+
+                    # Update progress
+                    self._completed_results = list(all_window_results)
+                    self._live_results = {}
+                    self._refresh_current_run()
+
+                    await self._publish(
+                        Event(
+                            type=EventType.RUN_PROGRESS,
+                            data={
+                                "total_workers": expected_result_slots,
+                                "submitted": len(all_window_results),
+                                "phase": "turn_complete",
+                                "batch": batch_idx + 1,
+                                "total_batches": total_batches,
+                                "turn": turn_idx + 1,
+                                "total_turns": len(turn_list),
+                            },
+                        )
+                    )
+
             self._completed_results = list(all_window_results)
             self._live_results = {}
             self._current_batch_index = None
@@ -836,7 +1065,7 @@ class RunOrchestrator:
                 Event(
                     type=EventType.RUN_PROGRESS,
                     data={
-                        "total_workers": len(all_prompts),
+                        "total_workers": expected_result_slots,
                         "submitted": len(all_window_results),
                         "phase": "batch_complete",
                         "batch": batch_idx + 1,
@@ -852,7 +1081,8 @@ class RunOrchestrator:
                         "level": "info",
                         "text": (
                             f"Batch {batch_idx + 1}/{total_batches} complete "
-                            f"— {len(all_window_results)}/{len(all_prompts)} prompts done"
+                            f"— {len(all_window_results)}/{expected_result_slots} "
+                            f"{'responses' if turn_count > 1 else 'prompts'} done"
                         ),
                     },
                 )
@@ -1014,8 +1244,12 @@ class RunOrchestrator:
         started_at: datetime,
         window_results: List[WindowResult],
     ) -> RunResult:
-        successful = sum(1 for r in window_results if r.success)
-        failed = sum(1 for r in window_results if not r.success)
+        stamped_results = [
+            wr.model_copy(update={"run_id": run_id})
+            for wr in window_results
+        ]
+        successful = sum(1 for r in stamped_results if r.success)
+        failed = sum(1 for r in stamped_results if not r.success)
         now = datetime.now(timezone.utc)
         return RunResult(
             run_id=run_id,
@@ -1025,8 +1259,8 @@ class RunOrchestrator:
             started_at=started_at,
             completed_at=now,
             total_elapsed_seconds=(now - started_at).total_seconds(),
-            window_results=window_results,
-            total_windows=len(window_results),
+            window_results=stamped_results,
+            total_windows=len(stamped_results),
             successful_windows=successful,
             failed_windows=failed,
         )
@@ -1048,6 +1282,7 @@ class RunOrchestrator:
         batch_idx: int,
         retain: str,
         baseline_responses: Optional[Tuple[str, str]] = None,
+        turn_index: int = 0,
     ) -> WindowResult:
         result = await worker.poll_for_completion(
             baseline_responses=baseline_responses,
@@ -1055,6 +1290,7 @@ class RunOrchestrator:
         )
         result.prompt = prompt
         result.batch_index = batch_idx
+        result.turn_index = turn_index
         if retain == "model_a":
             result.model_b_name = None
             result.model_b_response = None
@@ -1168,11 +1404,13 @@ class RunOrchestrator:
         batch_idx: int,
         error: str,
         source: Optional[WindowResult] = None,
+        turn_index: int = 0,
     ) -> WindowResult:
         return WindowResult(
             worker_id=worker_id,
             prompt=prompt,
             batch_index=batch_idx,
+            turn_index=turn_index,
             model_a_name=source.model_a_name if source else None,
             model_b_name=source.model_b_name if source else None,
             started_at=source.started_at if source else None,
@@ -1227,21 +1465,70 @@ class RunOrchestrator:
 
         await self._wait_if_paused()
 
-        try:
-            await worker.reset_with_fresh_context(
-                zoom_pct=request.zoom_pct,
-                clear_cookies=request.clear_cookies,
-                pause_event=self._resume_event,
-            )
-        except Exception as exc:
-            result = self._failed_result(
-                worker_id=worker_idx,
-                prompt=prompt,
-                batch_idx=batch_idx,
-                error=f"Recovery failed (context recreation): {exc}",
-            )
-            await self._publish_failed_worker_result(worker, result)
-            return result
+        max_context_retries = 3
+        for attempt in range(1, max_context_retries + 1):
+            await self._wait_if_paused()
+            if self._cancelled:
+                result = self._failed_result(
+                    worker_id=worker_idx,
+                    prompt=prompt,
+                    batch_idx=batch_idx,
+                    error="Recovery skipped: run was cancelled",
+                )
+                await self._publish_failed_worker_result(worker, result)
+                return result
+
+            try:
+                await worker.reset_with_fresh_context(
+                    zoom_pct=request.zoom_pct,
+                    clear_cookies=request.clear_cookies,
+                    pause_event=self._resume_event,
+                )
+                if attempt > 1:
+                    await self._publish(
+                        Event(
+                            type=EventType.LOG,
+                            worker_id=worker_idx,
+                            data={
+                                "level": "info",
+                                "text": (
+                                    f"Worker {worker_idx}: recovery context "
+                                    f"recreated on retry {attempt}/{max_context_retries}"
+                                ),
+                            },
+                        )
+                    )
+                break
+            except Exception as exc:
+                if attempt >= max_context_retries:
+                    result = self._failed_result(
+                        worker_id=worker_idx,
+                        prompt=prompt,
+                        batch_idx=batch_idx,
+                        error=(
+                            "Recovery failed (context recreation): "
+                            f"{exc} (after {max_context_retries} attempts)"
+                        ),
+                    )
+                    await self._publish_failed_worker_result(worker, result)
+                    return result
+
+                wait_s = min(2.0 * attempt, 5.0)
+                await self._publish(
+                    Event(
+                        type=EventType.LOG,
+                        worker_id=worker_idx,
+                        data={
+                            "level": "warning",
+                            "text": (
+                                f"Worker {worker_idx}: recovery context recreation "
+                                f"failed (attempt {attempt}/{max_context_retries}): {exc} "
+                                f"— retrying in {wait_s:.1f}s"
+                            ),
+                        },
+                    )
+                )
+                await self._sleep_with_pause(wait_s)
 
         try:
             # System prompt phase (if applicable)
@@ -1350,12 +1637,20 @@ class RunOrchestrator:
             })
 
         run = self._current_run
+        turn_count = (
+            len(self._active_request.turns)
+            if self._active_request and self._active_request.turns
+            else 1
+        )
+        total_prompt_slots = (
+            (len(run.prompts) if run.prompts else 0) * max(turn_count, 1)
+        )
         return {
             "run_id": run.run_id,
             "running": True,
             "paused": self._paused,
             "cancelled": self._cancelled,
-            "total_prompts": len(run.prompts) if run.prompts else 0,
+            "total_prompts": total_prompt_slots,
             "completed_prompts": len(run.window_results),
             "total_batches": run.total_batches,
             "workers": workers_snapshot,

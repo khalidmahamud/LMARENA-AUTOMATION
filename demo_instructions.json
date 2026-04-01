@@ -1,42 +1,42 @@
 [
   {
-    "prompt": "Write a short poem about the ocean at sunset. Use vivid imagery and sensory details.",
+    "prompt": "Make something beautiful using HTML and CSS. Create a minimal pricing card with a title, price, three feature bullets, and a button. No Gradient or Glass.\nGive me the output in html code block.\n**STRICTLY, DO NOT PROVIDE ANY OTHER TEXTS/EXPLANATION EXCEPT FOR THE CODE BLOCK**",
     "window_count": 2,
     "submission_gap_seconds": 30,
-    "model_a": "gpt-4o",
-    "model_b": "claude-sonnet-4-20250514",
+    "model_a": "gpt-5.1",
+    "model_b": "gpt-5.2",
     "retain_output": "both",
     "clear_cookies": false,
     "incognito": false,
     "simultaneous_start": false,
-    "zoom_pct": 100
+    "zoom_pct": 50
   },
   {
-    "prompt": "Explain the difference between TCP and UDP protocols. Include when to use each one.",
+    "prompt": "Make something beautiful using HTML and CSS. Create a simple user profile card with an avatar circle, name, role, and social icons row. No Gradient or Glass.\nGive me the output in html code block.\n**STRICTLY, DO NOT PROVIDE ANY OTHER TEXTS/EXPLANATION EXCEPT FOR THE CODE BLOCK**",
     "window_count": 4,
     "submission_gap_seconds": 15,
-    "model_a": "gemini-2.5-pro",
-    "model_b": "gpt-4o",
+    "model_a": "gpt-5.2",
+    "model_b": "gpt-5.1",
     "retain_output": "both",
     "clear_cookies": false,
     "incognito": false,
     "simultaneous_start": false,
-    "zoom_pct": 100
+    "zoom_pct": 50
   },
   {
-    "prompt": "Solve this step by step: A train leaves Station A at 60 km/h. Another train leaves Station B (300 km away) at 80 km/h heading toward Station A. When and where do they meet?",
+    "prompt": "Make something beautiful using HTML and CSS. Create a clean 404 error page with a large number, a short message, and a home button. No Gradient or Glass.\nGive me the output in html code block.\n**STRICTLY, DO NOT PROVIDE ANY OTHER TEXTS/EXPLANATION EXCEPT FOR THE CODE BLOCK**",
     "window_count": 2,
     "submission_gap_seconds": 30,
-    "model_a": "claude-opus-4-20250514",
+    "model_a": "gpt-5.1",
     "model_b": "",
     "retain_output": "model_a",
     "clear_cookies": true,
     "incognito": false,
     "simultaneous_start": false,
-    "zoom_pct": 110
+    "zoom_pct": 50
   },
   {
-    "prompt": "Write a Python function that implements binary search on a sorted list. Include docstring, type hints, and edge case handling.",
+    "prompt": "Make something beautiful using HTML and CSS. Create a weather widget showing a city name, temperature, a weather icon using emoji, and a short forecast. No Gradient or Glass.\nGive me the output in html code block.\n**STRICTLY, DO NOT PROVIDE ANY OTHER TEXTS/EXPLANATION EXCEPT FOR THE CODE BLOCK**",
     "window_count": 3,
     "submission_gap_seconds": 20,
     "model_a": "",
@@ -45,18 +45,54 @@
     "clear_cookies": false,
     "incognito": true,
     "simultaneous_start": true,
-    "zoom_pct": 100
+    "zoom_pct": 50
   },
   {
-    "prompt": "Compare and contrast the Renaissance and the Enlightenment periods. Cover art, science, philosophy, and social impact.",
+    "prompt": "Make something beautiful using HTML and CSS. Create a testimonial card with a quote, author name, star rating using unicode stars, and a subtle border. No Gradient or Glass.\nGive me the output in html code block.\n**STRICTLY, DO NOT PROVIDE ANY OTHER TEXTS/EXPLANATION EXCEPT FOR THE CODE BLOCK**",
     "window_count": 2,
     "submission_gap_seconds": 25,
-    "model_a": "gpt-4o",
-    "model_b": "gemini-2.5-pro",
+    "model_a": "gpt-5.1",
+    "model_b": "gpt-5.2",
     "retain_output": "both",
     "clear_cookies": false,
     "incognito": false,
     "simultaneous_start": false,
-    "zoom_pct": 90
+    "zoom_pct": 50
+  },
+  {
+    "prompt": "Recreate this UI design using only HTML and CSS. Match the layout, spacing, and colors as closely as possible. No Gradient or Glass.\nGive me the output in html code block.\n**STRICTLY, DO NOT PROVIDE ANY OTHER TEXTS/EXPLANATION EXCEPT FOR THE CODE BLOCK**",
+    "images": ["mockup.jpg"],
+    "window_count": 2,
+    "submission_gap_seconds": 30,
+    "retain_output": "both",
+    "zoom_pct": 50
+  },
+  {
+    "turns": [
+      { "text": "Make something beautiful using HTML and CSS. Create a simple login form with email, password fields and a submit button. No Gradient or Glass.\nGive me the output in html code block.\n**STRICTLY, DO NOT PROVIDE ANY OTHER TEXTS/EXPLANATION EXCEPT FOR THE CODE BLOCK**" },
+      { "text": "Now add a \"Remember me\" checkbox and a \"Forgot password?\" link below the form. Keep the same style.\nGive me the updated full html code block.\n**STRICTLY, DO NOT PROVIDE ANY OTHER TEXTS/EXPLANATION EXCEPT FOR THE CODE BLOCK**" },
+      { "text": "Now add a dark mode toggle switch in the top-right corner that actually toggles the colors. Keep it simple.\nGive me the updated full html code block.\n**STRICTLY, DO NOT PROVIDE ANY OTHER TEXTS/EXPLANATION EXCEPT FOR THE CODE BLOCK**" }
+    ],
+    "window_count": 2,
+    "submission_gap_seconds": 30,
+    "model_a": "gpt-5.1",
+    "model_b": "gpt-5.2",
+    "retain_output": "both",
+    "zoom_pct": 50
+  },
+  {
+    "turns": [
+      {
+        "text": "Recreate this UI component using HTML and CSS. Match the layout and style as closely as possible. No Gradient or Glass.\nGive me the output in html code block.\n**STRICTLY, DO NOT PROVIDE ANY OTHER TEXTS/EXPLANATION EXCEPT FOR THE CODE BLOCK**",
+        "images": ["reference_ui.jpg"]
+      },
+      {
+        "text": "Now make it responsive so it stacks vertically on screens below 600px. Keep the same style.\nGive me the updated full html code block.\n**STRICTLY, DO NOT PROVIDE ANY OTHER TEXTS/EXPLANATION EXCEPT FOR THE CODE BLOCK**"
+      }
+    ],
+    "window_count": 2,
+    "submission_gap_seconds": 30,
+    "retain_output": "both",
+    "zoom_pct": 50
   }
 ]
