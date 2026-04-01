@@ -1,0 +1,20 @@
+{
+  "manifest_version": 3,
+  "name": "LMArena Browser Zoom",
+  "version": "1.0.0",
+  "description": "Applies real browser zoom for LM Arena tabs.",
+  "permissions": [
+    "storage",
+    "tabs"
+  ],
+  "host_permissions": [
+    "http://arena.ai/*",
+    "https://arena.ai/*",
+    "http://www.arena.ai/*",
+    "https://www.arena.ai/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "incognito": "split"
+}

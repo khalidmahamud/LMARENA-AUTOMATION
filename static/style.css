@@ -742,6 +742,7 @@ body {
 }
 
 .proxy-row-dot.green { background: var(--green); color: var(--green); }
+.proxy-row-dot.amber { background: var(--orange); color: var(--orange); }
 .proxy-row-dot.red { background: var(--red); color: var(--red); }
 
 .proxy-row-addr {
@@ -770,7 +771,7 @@ body {
 
 .proxy-row-lat {
   color: var(--text-muted);
-  width: 45px;
+  width: 52px;
   text-align: right;
   flex-shrink: 0;
 }
@@ -2608,16 +2609,16 @@ textarea::placeholder {
 
 .btn-copy-floating {
   position: absolute;
-  bottom: 0.75rem;
+  top: 0.75rem;
   right: 0.75rem;
   z-index: 10;
   font-family: var(--display);
-  font-size: 0.7rem;
+  font-size: 0.85rem;
   font-weight: 600;
   color: var(--text);
   background: var(--surface-3);
   border: 1px solid var(--border-light);
-  padding: 0.35rem 0.65rem;
+  padding: 0.45rem 0.85rem;
   border-radius: var(--radius);
   cursor: pointer;
   opacity: 0.55;

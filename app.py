@@ -91,8 +91,8 @@ async def lifespan(application: FastAPI):
     logger.info("Server ready — open http://localhost:8000")
     yield
 
-    # Shutdown: stop auto-refresh and save proxy pool
-    await proxy_pool.stop_auto_refresh()
+    # Shutdown: stop the task but preserve the saved auto-refresh preference
+    await proxy_pool.stop_auto_refresh(clear_enabled=False)
     proxy_pool.save_to_file()
     await browser_manager.close_all()
     logger.info("Shutdown complete")
@@ -219,7 +219,7 @@ PROXIFLY_URL = (
 TEST_URL = "https://arena.ai/"
 
 
-def _check_proxy(proxy_server: str, timeout: int = 8) -> float:
+def _check_proxy(proxy_server: str, timeout: int = 5) -> float:
     """Test if a proxy can HTTPS-tunnel to arena.ai. Returns latency in ms, or -1.0 on failure."""
     import socket
     import ssl
@@ -315,10 +315,16 @@ async def fetch_free_proxies(
     candidates = [entry["proxy"] for entry in data[:pool_size] if "proxy" in entry]
     logger.info("Testing %d proxies to find %d working ones...", len(candidates), limit)
 
+    # Check in batches of 20 to avoid overwhelming the network
     loop = asyncio.get_event_loop()
-    results = await asyncio.gather(
-        *(loop.run_in_executor(None, _check_proxy, proxy) for proxy in candidates)
-    )
+    results = []
+    batch_size = 20
+    for i in range(0, len(candidates), batch_size):
+        batch = candidates[i : i + batch_size]
+        batch_results = await asyncio.gather(
+            *(loop.run_in_executor(None, _check_proxy, proxy) for proxy in batch)
+        )
+        results.extend(batch_results)
 
     alive = [
         {"server": proxy, "latency_ms": round(latency, 1)}
@@ -346,7 +352,14 @@ async def proxy_pool_status():
         return proxy_pool.get_status()
     except Exception as exc:
         logger.error("proxy_pool_status error: %s", exc)
-        return {"total": 0, "healthy": 0, "unhealthy": 0, "auto_refresh_active": False, "proxies": []}
+        return {
+            "total": 0,
+            "healthy": 0,
+            "unhealthy": 0,
+            "auto_refresh_enabled": False,
+            "auto_refresh_active": False,
+            "proxies": [],
+        }
 
 
 @app.post("/api/proxy-pool/save")

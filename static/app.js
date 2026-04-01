@@ -293,19 +293,20 @@
         return r.json();
       })
       .then(function (data) {
-        // Count from proxy list to stay in sync with what's rendered
-        var h = data.proxies ? data.proxies.filter(function (p) { return p.healthy; }).length : (typeof data.healthy === "number" ? data.healthy : 0);
-        var t = data.proxies ? data.proxies.length : (typeof data.total === "number" ? data.total : 0);
+        var h = typeof data.healthy === "number" ? data.healthy : 0;
+        var d = typeof data.degraded === "number" ? data.degraded : 0;
+        var t = typeof data.total === "number" ? data.total : (data.proxies ? data.proxies.length : 0);
         var m = typeof data.max_healthy === "number" ? data.max_healthy : 50;
         var maxLat = typeof data.max_latency_ms === "number" ? data.max_latency_ms : 5000;
         var avgLat = data.avg_latency_ms;
+        var isEnabled = data.auto_refresh_enabled || false;
         var isActive = data.auto_refresh_active || false;
 
         // Update settings modal
         proxyPoolCounts.textContent = h + " healthy / " + t + " total";
-        proxyPoolCounts.style.color = h > 0 ? "var(--green)" : "var(--text-dim)";
+        proxyPoolCounts.style.color = h > 0 ? "var(--green)" : d > 0 ? "var(--orange)" : "var(--text-dim)";
         if (autoRefreshToggle) {
-          autoRefreshToggle.checked = isActive;
+          autoRefreshToggle.checked = isEnabled;
         }
         if (poolMaxSizeInput && poolMaxSizeInput !== document.activeElement) {
           poolMaxSizeInput.value = m;
@@ -363,7 +364,9 @@
         // Render per-proxy list
         if (proxyListEl && data.proxies) {
           var proxies = data.proxies.slice().sort(function (a, b) {
-            if (a.healthy !== b.healthy) return a.healthy ? -1 : 1;
+            var rankA = a.healthy ? 0 : a.degraded ? 1 : 2;
+            var rankB = b.healthy ? 0 : b.degraded ? 1 : 2;
+            if (rankA !== rankB) return rankA - rankB;
             var la = a.latency_ms != null ? a.latency_ms : 99999;
             var lb = b.latency_ms != null ? b.latency_ms : 99999;
             return la - lb;
@@ -374,16 +377,18 @@
             var addr = p.server.replace(/^https?:\/\//, "").replace(/^socks[45]:\/\//, "");
             var lat = p.healthy && p.latency_ms != null ? Math.round(p.latency_ms) : null;
             var barPct = lat != null && maxLat > 0 ? Math.min(100, Math.round((lat / maxLat) * 100)) : 0;
-            var barColor = !p.healthy ? "var(--red)" :
+            var barColor = p.degraded ? "var(--orange)" :
+              !p.healthy ? "var(--red)" :
               lat != null && lat < maxLat * 0.3 ? "var(--green)" :
               lat != null && lat < maxLat * 0.6 ? "#a3d977" :
               lat != null && lat < maxLat * 0.8 ? "var(--orange)" : "var(--red)";
-            var statusDot = p.healthy ? "green" : "red";
+            var statusDot = p.healthy ? "green" : p.degraded ? "amber" : "red";
+            var latText = lat != null ? lat + "ms" : p.degraded ? "retry" : "--";
             html += '<div class="proxy-row">' +
               '<span class="proxy-row-dot ' + statusDot + '"></span>' +
               '<span class="proxy-row-addr" title="' + p.server + '">' + addr + '</span>' +
               '<div class="proxy-row-bar"><div class="proxy-row-bar-fill" style="width:' + barPct + '%;background:' + barColor + '"></div></div>' +
-              '<span class="proxy-row-lat">' + (lat != null ? lat + "ms" : "--") + '</span>' +
+              '<span class="proxy-row-lat">' + latText + '</span>' +
               '</div>';
           }
           proxyListEl.innerHTML = html;
@@ -501,6 +506,37 @@
           proxyPoolStatusEl.textContent = "Error: " + err.message;
           proxyPoolStatusEl.style.color = "var(--red)";
         });
+    });
+  }
+
+  if (poolRefreshIntervalInput) {
+    var _intervalTimer = null;
+    poolRefreshIntervalInput.addEventListener("input", function () {
+      var el = this;
+      clearTimeout(_intervalTimer);
+      _intervalTimer = setTimeout(function () {
+        var intervalMin = parseInt(el.value, 10);
+        if (!intervalMin || intervalMin < 1) return;
+        intervalMin = Math.min(60, Math.max(1, intervalMin));
+        el.value = intervalMin;
+        // Only restart if auto-refresh is currently active
+        if (autoRefreshToggle && autoRefreshToggle.checked) {
+          var intervalSec = intervalMin * 60;
+          var protocol = proxyProtocolInput.value;
+          fetch("/api/proxy-pool/auto-refresh/start?protocol=" + encodeURIComponent(protocol) + "&limit=20&interval=" + intervalSec, { method: "POST" })
+            .then(function (r) { return r.json(); })
+            .then(function () {
+              proxyPoolStatusEl.textContent = "Auto-refresh interval updated (" + intervalMin + "min)";
+              proxyPoolStatusEl.style.color = "var(--green)";
+              appendProxyLog("info", "Auto-refresh interval updated to " + intervalMin + "min");
+              refreshPoolStatus();
+            })
+            .catch(function (err) {
+              proxyPoolStatusEl.textContent = "Error: " + err.message;
+              proxyPoolStatusEl.style.color = "var(--red)";
+            });
+        }
+      }, 800);
     });
   }
 
@@ -1004,6 +1040,18 @@
     // Populate final results table
     populateFinalResults(msg.results);
 
+    // Reconcile worker cards with final results in case a worker missed a
+    // terminal state event during orchestrator-side recovery handling.
+    msg.results.forEach((r) => {
+      updateWorkerCard({
+        worker_id: r.worker_id,
+        state: r.error ? "error" : "complete",
+        progress_pct: 100,
+        message: r.error || "",
+        error: r.error || null,
+      });
+    });
+
     // Update JSON view
     resultsJsonPre.textContent = JSON.stringify(msg.results, null, 2);
 
@@ -1013,7 +1061,14 @@
     // Refresh HTML previews if HTML tab is active
     if (tabHtml.classList.contains("active")) renderHtmlPreviews();
 
-    appendLog("info", `Run complete \u2014 ${msg.results.length} window(s) finished in ${msg.total_elapsed_seconds.toFixed(1)}s`);
+    const failed = msg.results.filter((r) => !!r.error).length;
+    const succeeded = msg.results.length - failed;
+    appendLog(
+      failed > 0 ? "warning" : "info",
+      failed > 0
+        ? `Run complete \u2014 ${succeeded} succeeded, ${failed} failed in ${msg.total_elapsed_seconds.toFixed(1)}s`
+        : `Run complete \u2014 ${msg.results.length} window(s) finished in ${msg.total_elapsed_seconds.toFixed(1)}s`
+    );
   }
 
   // ══════════════════════════════════════

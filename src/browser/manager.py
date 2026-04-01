@@ -6,7 +6,7 @@ import tempfile
 from pathlib import Path
 from typing import Dict, List, Optional
 
-from playwright.async_api import BrowserContext, Playwright, async_playwright
+from playwright.async_api import BrowserContext, Playwright, Worker, async_playwright
 
 from src.core.tiling import TileLayout, compute_tile_positions
 from src.models.config import AppConfig, DisplayConfig
@@ -37,6 +37,8 @@ class BrowserManager:
         self._proxy_on_challenge: bool = False
         self._proxy_assign_counter: int = 0
         self._context_proxies: Dict[int, Optional[str]] = {}
+        self._zoom_pct: int = 100
+        self._zoom_extension_dir = (Path(__file__).with_name("zoom_extension")).resolve()
 
     async def start(self) -> None:
         """Initialise the Playwright engine (call once at server startup)."""
@@ -52,6 +54,7 @@ class BrowserManager:
         incognito: Optional[bool] = None,
         proxies: Optional[List[dict]] = None,
         proxy_on_challenge: bool = False,
+        zoom_pct: int = 100,
     ) -> List[BrowserContext]:
         """Launch *count* isolated persistent browser contexts.
 
@@ -82,6 +85,7 @@ class BrowserManager:
         self._proxy_on_challenge = proxy_on_challenge
         self._proxy_assign_counter = 0
         self._context_proxies.clear()
+        self._zoom_pct = max(25, min(200, int(zoom_pct)))
 
         # Seed the pool with manually provided proxies
         if self._proxies and self._proxy_pool:
@@ -219,16 +223,56 @@ class BrowserManager:
         if server and self._proxy_pool:
             self._proxy_pool.mark_healthy(server)
 
+    async def _get_zoom_service_worker(self, ctx: BrowserContext) -> Optional[Worker]:
+        workers = ctx.service_workers
+        if workers:
+            return workers[0]
+        try:
+            return await ctx.wait_for_event("serviceworker", timeout=10000)
+        except Exception as exc:
+            logger.warning("Zoom extension service worker unavailable: %s", exc)
+            return None
+
+    async def _configure_browser_zoom_extension(self, ctx: BrowserContext) -> None:
+        worker = await self._get_zoom_service_worker(ctx)
+        if worker is None:
+            return
+        try:
+            result = await worker.evaluate(
+                """async zoomPct => {
+                    if (typeof globalThis.configureManagedZoom !== "function") {
+                        return { ok: false, error: "configureManagedZoom missing" };
+                    }
+                    return await globalThis.configureManagedZoom(zoomPct);
+                }""",
+                self._zoom_pct,
+            )
+            logger.info("Browser zoom extension configured: %s", result)
+            if self._incognito_mode and result and not result.get("incognitoAllowed", True):
+                logger.warning(
+                    "Browser zoom extension is not allowed in incognito windows; "
+                    "launching with an isolated temporary profile instead of --incognito"
+                )
+        except Exception as exc:
+            logger.warning("Failed to configure browser zoom extension: %s", exc)
+
     def _launch_args(self, tile: TileLayout) -> List[str]:
         args = [
             "--disable-blink-features=AutomationControlled",
             "--disable-dev-shm-usage",
             "--no-first-run",
+            f"--disable-extensions-except={self._zoom_extension_dir}",
+            f"--load-extension={self._zoom_extension_dir}",
             f"--window-position={tile.x},{tile.y}",
             f"--window-size={tile.width},{tile.height}",
         ]
-        if self._incognito_mode:
+        if self._incognito_mode and self._zoom_pct == 100:
             args.insert(0, "--incognito")
+        elif self._incognito_mode and self._zoom_pct != 100:
+            logger.info(
+                "Skipping --incognito so the browser zoom extension can control Chromium zoom. "
+                "Windows still use isolated temporary profiles."
+            )
         return args
 
     async def _launch_context(
@@ -249,6 +293,7 @@ class BrowserManager:
             logger.info("Launching context with proxy: %s", proxy.get("server", "???"))
 
         ctx = await self._playwright.chromium.launch_persistent_context(**launch_kwargs)
+        await self._configure_browser_zoom_extension(ctx)
 
         # Apply stealth to existing and future pages
         from src.browser.stealth import apply_stealth

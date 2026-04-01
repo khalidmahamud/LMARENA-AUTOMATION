@@ -26,7 +26,6 @@ from src.workers.response_poller import ResponsePoller
 
 logger = logging.getLogger(__name__)
 
-
 class ArenaWorker:
     """Full lifecycle manager for a single Arena browser window.
 
@@ -376,11 +375,6 @@ class ArenaWorker:
     ) -> None:
         assert self._page is not None
         await self._ensure_active(pause_event)
-
-        if self._zoom_pct != 100:
-            await self._page.evaluate(
-                "z => document.body.style.zoom = z + '%'", self._zoom_pct
-            )
 
         await self._install_arena_page_guards()
         await self._dismiss_known_dialogs(

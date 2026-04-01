@@ -71,23 +71,40 @@ class ProxyPool:
 
     # ── Core API ──
 
+    @staticmethod
+    def _is_usable(entry: ProxyEntry) -> bool:
+        """A proxy is usable only after a successful recent latency check."""
+        return entry.healthy and entry.latency_ms is not None
+
+    @staticmethod
+    def _entry_rank(entry: ProxyEntry) -> tuple:
+        """Return a rank where lower is better."""
+        if entry.healthy and entry.latency_ms is not None:
+            state_rank = 0
+        elif entry.healthy:
+            state_rank = 1
+        else:
+            state_rank = 2
+        latency_rank = entry.latency_ms if entry.latency_ms is not None else float("inf")
+        source_rank = 0 if entry.source == "manual" else 1
+        return (state_rank, latency_rank, source_rank, entry.server)
+
+    def _trim_pool_to_cap(self) -> int:
+        """Keep only the best entries up to the configured cap."""
+        ranked = sorted(self._entries.values(), key=self._entry_rank)
+        keep = {entry.server for entry in ranked[: self._max_healthy]}
+        to_remove = [server for server in self._entries if server not in keep]
+        for server in to_remove:
+            del self._entries[server]
+        return len(to_remove)
+
     def set_max_healthy(self, limit: int) -> None:
-        """Update the max healthy proxies cap and trim excess."""
+        """Update the pool cap and trim excess entries."""
         self._max_healthy = max(1, limit)
-        # Keep lowest-latency proxies; prioritize manual over auto_fetch at same latency
-        healthy = sorted(
-            [e for e in self._entries.values() if e.healthy],
-            key=lambda e: (
-                e.latency_ms if e.latency_ms is not None else float("inf"),
-                0 if e.source == "manual" else 1,
-            ),
-        )
-        excess = healthy[self._max_healthy:]
-        for entry in excess:
-            del self._entries[entry.server]
-        if excess:
-            logger.info("Trimmed %d excess proxies (new max: %d)", len(excess), self._max_healthy)
-        logger.info("Max healthy proxies set to %d", self._max_healthy)
+        removed = self._trim_pool_to_cap()
+        if removed:
+            logger.info("Trimmed %d excess proxies (new max: %d)", removed, self._max_healthy)
+        logger.info("Max proxy pool size set to %d", self._max_healthy)
 
     def set_max_latency(self, ms: float) -> None:
         """Update the max latency threshold and remove proxies exceeding it."""
@@ -107,9 +124,6 @@ class ProxyPool:
         """Merge proxies into pool. Returns count of newly added."""
         added = 0
         for p in proxies:
-            if self.healthy_count >= self._max_healthy:
-                logger.debug("Pool at max healthy cap (%d), skipping remaining", self._max_healthy)
-                break
             server = p.get("server", "")
             if not server:
                 continue
@@ -123,14 +137,25 @@ class ProxyPool:
                 latency_ms=p.get("latency_ms"),
             )
             added += 1
+        removed = self._trim_pool_to_cap()
         if added:
-            logger.info("Added %d new proxies to pool (total: %d, max: %d)", added, len(self._entries), self._max_healthy)
+            logger.info(
+                "Added %d proxies to pool, removed %d slower/worse entries (total: %d, max: %d)",
+                added,
+                removed,
+                len(self._entries),
+                self._max_healthy,
+            )
         return added
 
     def get_next_healthy(self) -> Optional[dict]:
-        """Round-robin through healthy proxies sorted by latency (fastest first)."""
+        """Round-robin through healthy proxies sorted by latency (fastest first).
+
+        Each call returns a different proxy so that separate browser windows
+        get distinct IPs.
+        """
         healthy = sorted(
-            [e for e in self._entries.values() if e.healthy],
+            [e for e in self._entries.values() if self._is_usable(e)],
             key=lambda e: (e.latency_ms if e.latency_ms is not None else float("inf")),
         )
         if not healthy:
@@ -166,20 +191,11 @@ class ProxyPool:
     # ── Persistence ──
 
     def save_to_file(self, path: Optional[Path] = None) -> Path:
-        """Serialize pool to JSON. Caps saved healthy proxies to max_healthy."""
+        """Serialize pool to JSON."""
         path = path or self.PERSIST_PATH
         path.parent.mkdir(parents=True, exist_ok=True)
-
-        # Separate healthy and unhealthy; sort by latency (fastest first)
-        healthy = sorted(
-            [e for e in self._entries.values() if e.healthy],
-            key=lambda e: (
-                e.latency_ms if e.latency_ms is not None else float("inf"),
-                0 if e.source == "manual" else 1,
-            ),
-        )
-        unhealthy = [e for e in self._entries.values() if not e.healthy]
-        capped_healthy = healthy[: self._max_healthy]
+        self._trim_pool_to_cap()
+        ranked = sorted(self._entries.values(), key=self._entry_rank)
 
         data = {
             "version": 1,
@@ -189,10 +205,10 @@ class ProxyPool:
             "auto_refresh_enabled": self._auto_refresh_enabled,
             "auto_refresh_protocol": self._auto_refresh_protocol,
             "auto_refresh_interval": self._auto_refresh_interval,
-            "proxies": [asdict(e) for e in capped_healthy + unhealthy],
+            "proxies": [asdict(e) for e in ranked],
         }
         path.write_text(json.dumps(data, indent=2))
-        logger.info("Proxy pool saved to %s (%d proxies)", path, len(capped_healthy) + len(unhealthy))
+        logger.info("Proxy pool saved to %s (%d proxies)", path, len(ranked))
         return path
 
     def load_from_file(self, path: Optional[Path] = None) -> int:
@@ -231,6 +247,7 @@ class ProxyPool:
                     latency_ms=p.get("latency_ms"),
                 )
                 loaded += 1
+            self._trim_pool_to_cap()
             logger.info("Loaded %d proxies from %s (total: %d, max: %d)", loaded, path, len(self._entries), self._max_healthy)
             return loaded
         except Exception as exc:
@@ -256,10 +273,15 @@ class ProxyPool:
         )
         logger.info("Auto-refresh started (protocol=%s, interval=%.0fs)", protocol, interval)
 
-    async def stop_auto_refresh(self) -> None:
-        """Cancel the background refresh task."""
+    async def stop_auto_refresh(self, clear_enabled: bool = True) -> None:
+        """Cancel the background refresh task.
+
+        When shutting down the app, keep the persisted preference so auto-refresh
+        can resume on the next startup.
+        """
         self._running = False
-        self._auto_refresh_enabled = False
+        if clear_enabled:
+            self._auto_refresh_enabled = False
         if self._refresh_task and not self._refresh_task.done():
             self._refresh_task.cancel()
             try:
@@ -287,6 +309,18 @@ class ProxyPool:
             except asyncio.CancelledError:
                 break
 
+    async def _check_in_batches(self, proxies, timeout=5, batch_size=20):
+        """Check proxies in batches to avoid overwhelming the network."""
+        loop = asyncio.get_event_loop()
+        all_results = []
+        for i in range(0, len(proxies), batch_size):
+            batch = proxies[i : i + batch_size]
+            results = await asyncio.gather(
+                *(loop.run_in_executor(None, self._check_fn, p, timeout) for p in batch)
+            )
+            all_results.extend(results)
+        return all_results
+
     async def maintain_pool(self, protocol: str = "http") -> dict:
         """Self-healing pool maintenance: re-check all, purge dead, fill gaps.
 
@@ -301,11 +335,11 @@ class ProxyPool:
             "avg_latency_ms": None,
         }
 
-        # ── Step 1: Re-check ALL existing proxies ──
+        # ── Step 1: Re-check ALL existing proxies (in batches of 20) ──
         if self._check_fn and self._entries:
             entries = list(self._entries.values())
-            results = await asyncio.gather(
-                *(loop.run_in_executor(None, self._check_fn, e.server, 8) for e in entries)
+            results = await self._check_in_batches(
+                [e.server for e in entries], timeout=5
             )
             stats["checked"] = len(entries)
             latencies = []
@@ -348,12 +382,20 @@ class ProxyPool:
             del self._entries[server]
         if to_remove:
             logger.info("Pruned %d stale unhealthy proxies", len(to_remove))
+        trimmed = self._trim_pool_to_cap()
+        if trimmed:
+            logger.info("Trimmed %d excess proxies after health check", trimmed)
 
-        # ── Step 3: Fill gap — fetch new proxies if below max_healthy ──
+        # ── Step 3: Fetch challengers to fill gaps or replace slower proxies ──
         gap = self._max_healthy - self.healthy_count
-        if gap > 0 and self._check_fn:
-            logger.info("Pool has %d/%d healthy — fetching %d replacements",
-                        self.healthy_count, self._max_healthy, gap)
+        challenger_count = gap if gap > 0 else min(3, max(1, self._max_healthy // 3))
+        if challenger_count > 0 and self._check_fn:
+            logger.info(
+                "Pool has %d/%d healthy — testing %d challenger proxies",
+                self.healthy_count,
+                self._max_healthy,
+                challenger_count,
+            )
             url = PROXIFLY_URL.format(protocol=protocol)
             try:
                 def _fetch():
@@ -365,15 +407,13 @@ class ProxyPool:
                 random.shuffle(data)
                 # Test more candidates than needed to find enough good ones
                 candidates = [
-                    entry["proxy"] for entry in data[: gap * 10]
+                    entry["proxy"] for entry in data[: challenger_count * 10]
                     if "proxy" in entry and entry["proxy"] not in self._entries
                 ]
                 stats["fetched"] = len(candidates)
 
                 if candidates:
-                    results = await asyncio.gather(
-                        *(loop.run_in_executor(None, self._check_fn, proxy, 8) for proxy in candidates)
-                    )
+                    results = await self._check_in_batches(candidates, timeout=5)
                     good = sorted(
                         [
                             {"server": proxy, "latency_ms": round(latency, 1)}
@@ -405,23 +445,28 @@ class ProxyPool:
     # ── Status ──
 
     def get_status(self) -> dict:
-        healthy_entries = [e for e in self._entries.values() if e.healthy]
+        healthy_entries = [e for e in self._entries.values() if self._is_usable(e)]
+        degraded_entries = [e for e in self._entries.values() if e.healthy and e.latency_ms is None]
+        unhealthy_entries = [e for e in self._entries.values() if not e.healthy]
         latencies = [e.latency_ms for e in healthy_entries if e.latency_ms is not None]
         avg_latency = round(sum(latencies) / len(latencies), 1) if latencies else None
         return {
             "total": len(self._entries),
             "healthy": len(healthy_entries),
-            "unhealthy": len(self._entries) - len(healthy_entries),
+            "degraded": len(degraded_entries),
+            "unhealthy": len(unhealthy_entries),
             "max_healthy": self._max_healthy,
             "max_latency_ms": self._max_latency_ms,
             "avg_latency_ms": avg_latency,
+            "auto_refresh_enabled": self._auto_refresh_enabled,
             "auto_refresh_active": self._running,
             "auto_refresh_interval": self._auto_refresh_interval,
             "last_refresh": self._last_refresh,
             "proxies": [
                 {
                     "server": e.server,
-                    "healthy": e.healthy,
+                    "healthy": self._is_usable(e),
+                    "degraded": e.healthy and e.latency_ms is None,
                     "fail_count": e.fail_count,
                     "last_checked": e.last_checked,
                     "source": e.source,
@@ -442,7 +487,7 @@ class ProxyPool:
 
     @property
     def healthy_count(self) -> int:
-        return sum(1 for e in self._entries.values() if e.healthy)
+        return sum(1 for e in self._entries.values() if self._is_usable(e))
 
     @property
     def total_count(self) -> int:
@@ -450,4 +495,4 @@ class ProxyPool:
 
     def to_proxy_list(self) -> List[dict]:
         """Return all healthy proxies as Playwright-compatible dicts."""
-        return [e.to_playwright_dict() for e in self._entries.values() if e.healthy]
+        return [e.to_playwright_dict() for e in self._entries.values() if self._is_usable(e)]

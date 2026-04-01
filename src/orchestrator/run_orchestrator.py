@@ -182,6 +182,7 @@ class RunOrchestrator:
             incognito=request.incognito,
             proxies=proxy_list,
             proxy_on_challenge=request.proxy_on_challenge,
+            zoom_pct=request.zoom_pct,
         )
 
         # Phase 2: Create workers
@@ -757,24 +758,27 @@ class RunOrchestrator:
                         batch_idx=batch_idx,
                         request=request,
                         system_prompt=system_prompt,
+                        image_dicts=image_dicts,
                     )
                     for widx, worker, prompt in all_failures
                 ]
                 recovery_results = await asyncio.gather(
                     *recovery_tasks, return_exceptions=True
                 )
-                for (widx, _, prompt), recovery_out in zip(
+                for (widx, worker, prompt), recovery_out in zip(
                     all_failures, recovery_results
                 ):
                     if isinstance(recovery_out, Exception):
-                        batch_results.append(
-                            self._failed_result(
-                                worker_id=widx,
-                                prompt=prompt,
-                                batch_idx=batch_idx,
-                                error=f"Recovery raised exception: {recovery_out}",
-                            )
+                        failed_result = self._failed_result(
+                            worker_id=widx,
+                            prompt=prompt,
+                            batch_idx=batch_idx,
+                            error=f"Recovery raised exception: {recovery_out}",
                         )
+                        await self._publish_failed_worker_result(
+                            worker, failed_result
+                        )
+                        batch_results.append(failed_result)
                     else:
                         if recovery_out.success:
                             if retain == "model_a":
@@ -1172,6 +1176,7 @@ class RunOrchestrator:
         batch_idx: int,
         request: StartRunRequest,
         system_prompt: str,
+        image_dicts: Optional[list[dict]],
     ) -> WindowResult:
         """Attempt a single orchestrator-level retry for a failed worker.
 
@@ -1179,12 +1184,14 @@ class RunOrchestrator:
         re-submits the same prompt.  Returns the result (success or failure).
         """
         if self._cancelled:
-            return self._failed_result(
+            result = self._failed_result(
                 worker_id=worker_idx,
                 prompt=prompt,
                 batch_idx=batch_idx,
                 error="Recovery skipped: run was cancelled",
             )
+            await self._publish_failed_worker_result(worker, result)
+            return result
 
         await self._event_bus.publish(
             Event(
@@ -1209,12 +1216,14 @@ class RunOrchestrator:
                 pause_event=self._resume_event,
             )
         except Exception as exc:
-            return self._failed_result(
+            result = self._failed_result(
                 worker_id=worker_idx,
                 prompt=prompt,
                 batch_idx=batch_idx,
                 error=f"Recovery failed (context recreation): {exc}",
             )
+            await self._publish_failed_worker_result(worker, result)
+            return result
 
         try:
             # System prompt phase (if applicable)
@@ -1231,7 +1240,7 @@ class RunOrchestrator:
                     pause_event=self._resume_event,
                 )
                 if not sys_result.success:
-                    return self._failed_result(
+                    result = self._failed_result(
                         worker_id=worker_idx,
                         prompt=prompt,
                         batch_idx=batch_idx,
@@ -1241,6 +1250,8 @@ class RunOrchestrator:
                         ),
                         source=sys_result,
                     )
+                    await self._publish_failed_worker_result(worker, result)
+                    return result
                 await self._wait_if_paused()
                 recovery_baseline = await worker.prepare_for_followup_prompt()
 
@@ -1261,15 +1272,51 @@ class RunOrchestrator:
             )
             result.prompt = prompt
             result.batch_index = batch_idx
+            if not result.success:
+                await self._publish_failed_worker_result(worker, result)
             return result
 
         except Exception as exc:
-            return self._failed_result(
+            result = self._failed_result(
                 worker_id=worker_idx,
                 prompt=prompt,
                 batch_idx=batch_idx,
                 error=f"Recovery failed (retry attempt): {exc}",
             )
+            await self._publish_failed_worker_result(worker, result)
+            return result
+
+    async def _publish_failed_worker_result(
+        self,
+        worker: ArenaWorker,
+        result: WindowResult,
+    ) -> None:
+        """Push a terminal failure state/result to the UI for orchestrator-side failures."""
+        error_text = result.error or "Worker failed"
+        try:
+            if not worker.state_machine.is_terminal:
+                await worker.state_machine.force_error(error_text)
+        except Exception as exc:
+            logger.warning(
+                "Failed to transition worker %d to error state: %s",
+                result.worker_id,
+                exc,
+            )
+
+        await self._event_bus.publish(
+            Event(
+                type=EventType.WORKER_ERROR,
+                worker_id=result.worker_id,
+                data={"error": error_text},
+            )
+        )
+        await self._event_bus.publish(
+            Event(
+                type=EventType.WORKER_COMPLETE,
+                worker_id=result.worker_id,
+                data={"result": result.model_dump(mode="json")},
+            )
+        )
 
     def get_run_snapshot(self) -> Optional[dict]:
         """Return a snapshot of the current run state for UI sync."""
