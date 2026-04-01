@@ -162,12 +162,12 @@ async def upload_prompts(file: UploadFile):
 
 
 INSTRUCTION_FIELDS = {
-    "prompt", "system_prompt", "combine_with_first", "window_count",
+    "prompt", "window_count",
     "submission_gap_seconds", "model_a", "model_b", "retain_output",
     "clear_cookies", "incognito", "simultaneous_start", "zoom_pct",
 }
 
-BOOL_FIELDS = {"combine_with_first", "clear_cookies", "incognito", "simultaneous_start"}
+BOOL_FIELDS = {"clear_cookies", "incognito", "simultaneous_start"}
 INT_FIELDS = {"window_count": (1, 12), "zoom_pct": (25, 200)}
 FLOAT_FIELDS = {"submission_gap_seconds": (5.0, 300.0)}
 

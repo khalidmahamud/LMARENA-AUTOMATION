@@ -1,6 +1,6 @@
-prompt,system_prompt,combine_with_first,window_count,submission_gap_seconds,model_a,model_b,retain_output,clear_cookies,incognito,simultaneous_start,zoom_pct
-"Write a short poem about the ocean at sunset. Use vivid imagery and sensory details.","You are a creative poet who writes concise, evocative poetry.",false,2,30,gpt-4o,claude-sonnet-4-20250514,both,false,false,false,100
-"Explain the difference between TCP and UDP protocols. Include when to use each one.",,false,4,15,gemini-2.5-pro,gpt-4o,both,false,false,false,100
-"Solve this step by step: A train leaves Station A at 60 km/h. Another at 80 km/h from 300km away. When do they meet?","You are a math tutor. Show all work clearly.",true,2,30,claude-opus-4-20250514,,model_a,true,false,false,110
-"Write a Python binary search function with docstring, type hints, and edge case handling.","You are a senior Python developer. Write clean, production-ready code.",false,3,20,,,both,false,true,true,100
-"Compare and contrast the Renaissance and the Enlightenment periods. Cover art, science, philosophy, and social impact.",,false,2,25,gpt-4o,gemini-2.5-pro,both,false,false,false,90
+prompt,window_count,submission_gap_seconds,model_a,model_b,retain_output,clear_cookies,incognito,simultaneous_start,zoom_pct
+"Write a short poem about the ocean at sunset. Use vivid imagery and sensory details.",2,30,gpt-4o,claude-sonnet-4-20250514,both,false,false,false,100
+"Explain the difference between TCP and UDP protocols. Include when to use each one.",4,15,gemini-2.5-pro,gpt-4o,both,false,false,false,100
+"Solve this step by step: A train leaves Station A at 60 km/h. Another at 80 km/h from 300km away. When do they meet?",2,30,claude-opus-4-20250514,,model_a,true,false,false,110
+"Write a Python binary search function with docstring, type hints, and edge case handling.",3,20,,,both,false,true,true,100
+"Compare and contrast the Renaissance and the Enlightenment periods. Cover art, science, philosophy, and social impact.",2,25,gpt-4o,gemini-2.5-pro,both,false,false,false,90

@@ -1370,7 +1370,7 @@
     clearBtn.style.display = mode === "manual" ? "" : "none";
     // Show/hide system prompt details (manual + file modes only)
     var sysDet = document.getElementById("system-prompt-details");
-    if (sysDet) sysDet.style.display = mode === "instruction" ? "none" : "";
+    if (sysDet) sysDet.style.display = mode === "file" ? "" : "none";
     // Show/hide global start/stop (not in instruction mode — it has its own)
     var promptControls = document.querySelector(".prompt-controls");
     if (promptControls) promptControls.style.display = mode === "instruction" ? "none" : "";
@@ -2434,11 +2434,6 @@ html, body { margin: 0; padding: 0; background: #fff; color: #111;
       // ── Body (hidden by default, shown on expand) ──
       '<div class="prompt-card-body collapsed">' +
         '<textarea class="card-prompt" rows="3" placeholder="Enter prompt..."></textarea>' +
-        '<div class="card-sys-row">' +
-          '<label class="card-sys-label">System</label>' +
-          '<input type="text" class="card-system-prompt" placeholder="System prompt (optional)" />' +
-          '<label class="card-combine-label"><input type="checkbox" class="card-combine-first" /> Combine</label>' +
-        '</div>' +
         '<div class="card-settings-row">' +
           '<label>Win <input type="number" class="card-window-count" value="4" min="1" max="12" /></label>' +
           '<label>Gap <input type="number" class="card-gap" value="30" min="5" max="300" /></label>' +
@@ -2555,8 +2550,8 @@ html, body { margin: 0; padding: 0; background: #fff; color: #111;
     var clearCookies = el.querySelector(".card-clear-cookies").checked;
     var incognito = el.querySelector(".card-incognito").checked;
     var simultaneous = el.querySelector(".card-simultaneous").checked;
-    var systemPrompt = el.querySelector(".card-system-prompt").value.trim() || "";
-    var combineFirst = el.querySelector(".card-combine-first").checked;
+    var systemPrompt = "";
+    var combineFirst = false;
 
     // Read global settings
     var monW = parseInt(monitorWidthInput.value, 10) || screen.availWidth || 1920;
@@ -2861,8 +2856,6 @@ html, body { margin: 0; padding: 0; background: #fff; color: #111;
           var el = document.querySelector('.prompt-card[data-card-id="' + cardId + '"]');
           if (!el) return;
           if (inst.prompt) el.querySelector(".card-prompt").value = inst.prompt;
-          if (inst.system_prompt) el.querySelector(".card-system-prompt").value = inst.system_prompt;
-          if (inst.combine_with_first !== undefined) el.querySelector(".card-combine-first").checked = !!inst.combine_with_first;
           if (inst.window_count) el.querySelector(".card-window-count").value = inst.window_count;
           if (inst.submission_gap_seconds) el.querySelector(".card-gap").value = inst.submission_gap_seconds;
           if (inst.model_a) el.querySelector(".card-model-a").value = inst.model_a;
