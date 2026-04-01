@@ -1297,24 +1297,28 @@
     appendLog("warning", "Stop requested...");
   });
 
-  // Paste button
-  pasteBtn.addEventListener("click", async () => {
-    try {
-      const text = await navigator.clipboard.readText();
-      promptInput.value = text;
-      promptInput.dispatchEvent(new Event("input"));
-    } catch {
-      appendLog("warning", "Clipboard access denied \u2014 paste manually");
-    }
-  });
+  // Paste button (may not exist in multi-prompt mode)
+  if (pasteBtn) {
+    pasteBtn.addEventListener("click", async () => {
+      try {
+        const text = await navigator.clipboard.readText();
+        promptInput.value = text;
+        promptInput.dispatchEvent(new Event("input"));
+      } catch {
+        appendLog("warning", "Clipboard access denied \u2014 paste manually");
+      }
+    });
+  }
 
-  // Clear button
-  clearBtn.addEventListener("click", () => {
-    promptInput.value = "";
-    promptInput.dispatchEvent(new Event("input"));
-    clearImages();
-    promptInput.focus();
-  });
+  // Clear button (may not exist in multi-prompt mode)
+  if (clearBtn) {
+    clearBtn.addEventListener("click", () => {
+      promptInput.value = "";
+      promptInput.dispatchEvent(new Event("input"));
+      clearImages();
+      promptInput.focus();
+    });
+  }
 
   // Export dropdown
   const exportDropdown = document.getElementById("export-dropdown");
@@ -1341,11 +1345,11 @@
     promptMode = mode;
     modeManualBtn.classList.toggle("active", mode === "manual");
     modeFileBtn.classList.toggle("active", mode === "file");
-    manualSection.classList.toggle("hidden", mode !== "manual");
+    if (manualSection) manualSection.classList.toggle("hidden", mode !== "manual");
     fileSection.classList.toggle("hidden", mode !== "file");
     // Show/hide paste & clear buttons (only for manual mode)
-    pasteBtn.style.display = mode === "manual" ? "" : "none";
-    clearBtn.style.display = mode === "manual" ? "" : "none";
+    if (pasteBtn) pasteBtn.style.display = mode === "manual" ? "" : "none";
+    if (clearBtn) clearBtn.style.display = mode === "manual" ? "" : "none";
     // Show/hide prompt cards vs file mode
     const cardsContainer = document.getElementById("prompt-cards-container");
     const cardsToolbar = document.getElementById("prompt-cards-toolbar");
@@ -1486,32 +1490,36 @@
   const MAX_IMAGE_DIM = 2048;
 
   // Attach button opens file picker (not the whole area)
-  document.getElementById("btn-attach").addEventListener("click", () => imageFileInput.click());
+  var _btnAttach = document.getElementById("btn-attach");
+  if (_btnAttach) _btnAttach.addEventListener("click", () => imageFileInput.click());
 
-  // Drag-drop images onto the prompt input area
-  imageUploadArea.addEventListener("dragover", (e) => {
-    e.preventDefault();
-    imageUploadArea.classList.add("dragover");
-  });
+  // Drag-drop images onto the prompt input area (only if element exists)
+  if (imageUploadArea) {
+    imageUploadArea.addEventListener("dragover", (e) => {
+      e.preventDefault();
+      imageUploadArea.classList.add("dragover");
+    });
 
-  imageUploadArea.addEventListener("dragleave", () => {
-    imageUploadArea.classList.remove("dragover");
-  });
+    imageUploadArea.addEventListener("dragleave", () => {
+      imageUploadArea.classList.remove("dragover");
+    });
 
-  imageUploadArea.addEventListener("drop", (e) => {
-    e.preventDefault();
-    imageUploadArea.classList.remove("dragover");
-    // Only handle image files from the drop
-    const imageFiles = Array.from(e.dataTransfer.files).filter(f => f.type.startsWith("image/"));
-    if (imageFiles.length > 0) {
-      handleImageFiles(imageFiles);
-    }
-  });
+    imageUploadArea.addEventListener("drop", (e) => {
+      e.preventDefault();
+      imageUploadArea.classList.remove("dragover");
+      const imageFiles = Array.from(e.dataTransfer.files).filter(f => f.type.startsWith("image/"));
+      if (imageFiles.length > 0) {
+        handleImageFiles(imageFiles);
+      }
+    });
+  }
 
-  imageFileInput.addEventListener("change", () => {
-    handleImageFiles(imageFileInput.files);
-    imageFileInput.value = "";
-  });
+  if (imageFileInput) {
+    imageFileInput.addEventListener("change", () => {
+      handleImageFiles(imageFileInput.files);
+      imageFileInput.value = "";
+    });
+  }
 
   function handleImageFiles(fileList) {
     const files = Array.from(fileList);
@@ -1576,6 +1584,7 @@
   }
 
   function renderImageThumbnails() {
+    if (!imageThumbnails) return;
     imageThumbnails.innerHTML = "";
     uploadedImages.forEach((img, idx) => {
       const thumb = document.createElement("div");
@@ -2367,8 +2376,10 @@ html, body { margin: 0; padding: 0; background: #fff; color: #111;
   // ══════════════════════════════════════
 
   function createPromptCard(cardId) {
-    if (!cardId) cardId = generateCardId();
-    var index = nextCardIndex - 1; // generateCardId already incremented
+    if (!cardId) {
+      cardId = generateCardId();
+    }
+    var index = nextCardIndex - 1;
     if (promptCards[cardId]) return cardId; // already exists
 
     var card = {
@@ -3211,8 +3222,9 @@ html, body { margin: 0; padding: 0; background: #fff; color: #111;
   updateStartButton();
 
   // Auto-expand system prompt if it has saved content
-  if (systemPromptInput.value.trim()) {
-    document.getElementById("system-prompt-details").open = true;
+  var _sysDet = document.getElementById("system-prompt-details");
+  if (_sysDet && systemPromptInput && systemPromptInput.value.trim()) {
+    _sysDet.open = true;
   }
 
   // Restore file upload state if present
