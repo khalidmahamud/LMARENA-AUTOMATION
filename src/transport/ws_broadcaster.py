@@ -65,9 +65,11 @@ class WsBroadcaster:
     def _event_to_message(self, event: Event) -> Optional[OutboundMessage]:
         """Map an internal event to an outbound WebSocket message."""
         d = event.data
+        rid = event.run_id or d.get("run_id")
 
         if event.type == EventType.WORKER_STATE_CHANGED:
             return WorkerUpdateMessage(
+                run_id=rid,
                 worker_id=event.worker_id or 0,
                 state=d.get("new_state", ""),
                 progress_pct=d.get("progress", 0),
@@ -77,6 +79,7 @@ class WsBroadcaster:
 
         if event.type == EventType.WORKER_ERROR:
             return WorkerUpdateMessage(
+                run_id=rid,
                 worker_id=event.worker_id or 0,
                 state="error",
                 progress_pct=100.0,
@@ -86,6 +89,7 @@ class WsBroadcaster:
 
         if event.type == EventType.WORKER_PARTIAL_RESULT:
             return WorkerPartialResultMessage(
+                run_id=rid,
                 result=WorkerPartialResultPayload(
                     worker_id=event.worker_id or 0,
                     slide=d.get("slide", "a"),
@@ -98,6 +102,7 @@ class WsBroadcaster:
         if event.type == EventType.WORKER_COMPLETE:
             result_data = d.get("result", {})
             return WorkerResultMessage(
+                run_id=rid,
                 result=WindowResultPayload(**result_data),
             )
 
@@ -105,6 +110,7 @@ class WsBroadcaster:
             total = d.get("total_workers", 1)
             submitted = d.get("submitted", 0)
             return RunProgressMessage(
+                run_id=rid,
                 total_workers=total,
                 completed_workers=submitted,
                 overall_pct=submitted / max(total, 1) * 100,
@@ -120,6 +126,7 @@ class WsBroadcaster:
                 for wr in run_data.get("window_results", [])
             ]
             return RunCompleteMessage(
+                run_id=rid,
                 results=results,
                 total_elapsed_seconds=run_data.get(
                     "total_elapsed_seconds", 0
@@ -128,16 +135,17 @@ class WsBroadcaster:
             )
 
         if event.type == EventType.RUN_CANCELLED:
-            return RunCancelledMessage()
+            return RunCancelledMessage(run_id=rid)
 
         if event.type == EventType.RUN_PAUSED:
-            return RunPausedMessage()
+            return RunPausedMessage(run_id=rid)
 
         if event.type == EventType.RUN_RESUMED:
-            return RunResumedMessage()
+            return RunResumedMessage(run_id=rid)
 
         if event.type == EventType.CHALLENGE_DETECTED:
             return ChallengeDetectedMessage(
+                run_id=rid,
                 worker_id=event.worker_id or 0,
                 challenge_type=d.get("challenge_type", "unknown"),
                 message=(
@@ -154,6 +162,7 @@ class WsBroadcaster:
 
         if event.type == EventType.LOG:
             return LogMessage(
+                run_id=rid,
                 level=d.get("level", "info"),
                 text=d.get("text", ""),
                 worker_id=event.worker_id,

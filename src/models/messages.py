@@ -33,10 +33,19 @@ class ImagePayload(BaseModel):
         return v
 
 
+class PromptTurn(BaseModel):
+    """A single turn in a multi-turn conversation."""
+
+    text: str = Field(max_length=50_000)
+    images: Optional[List[ImagePayload]] = Field(default=None, max_length=10)
+
+
 class StartRunRequest(BaseModel):
     type: Literal["start_run"] = "start_run"
+    run_id: Optional[str] = None
     prompt: str = Field(default="", max_length=50_000)
     prompts: Optional[List[str]] = Field(default=None)
+    turns: Optional[List[PromptTurn]] = Field(default=None, max_length=10)
     system_prompt: str = Field(default="", max_length=100_000)
     combine_with_first: bool = False
     window_count: int = Field(default=2, ge=1, le=12)
@@ -59,13 +68,22 @@ class StartRunRequest(BaseModel):
     # Proxy list — each dict: {"server": "http://host:port", "username": "...", "password": "..."}
     proxies: Optional[List[dict]] = Field(default=None)
     proxy_on_challenge: bool = False
+    windows_per_proxy: int = Field(default=4, ge=1, le=50)
 
     @model_validator(mode="after")
     def validate_has_prompt(self):
+        # Clean up turns: drop entries with empty text
+        if self.turns:
+            self.turns = [t for t in self.turns if t.text.strip()]
         if self.prompts:
             self.prompts = [p for p in self.prompts if p.strip()]
-        if not self.prompt and not self.prompts:
-            raise ValueError("Either 'prompt' or 'prompts' must be provided")
+        has_turns = self.turns and len(self.turns) > 0
+        has_prompt = bool(self.prompt)
+        has_prompts = self.prompts and len(self.prompts) > 0
+        if not has_turns and not has_prompt and not has_prompts:
+            raise ValueError(
+                "Either 'prompt', 'prompts', or 'turns' must be provided"
+            )
         return self
 
     def get_prompt_for_worker(self, worker_index: int) -> str:
@@ -78,14 +96,17 @@ class StartRunRequest(BaseModel):
 
 class StopRunRequest(BaseModel):
     type: Literal["stop_run"] = "stop_run"
+    run_id: Optional[str] = None
 
 
 class PauseRunRequest(BaseModel):
     type: Literal["pause_run"] = "pause_run"
+    run_id: Optional[str] = None
 
 
 class ResumeRunRequest(BaseModel):
     type: Literal["resume_run"] = "resume_run"
+    run_id: Optional[str] = None
 
 
 class PingRequest(BaseModel):
@@ -112,6 +133,7 @@ InboundMessage = Union[
 
 class WorkerUpdateMessage(BaseModel):
     type: Literal["worker_update"] = "worker_update"
+    run_id: Optional[str] = None
     worker_id: int
     state: str
     progress_pct: float
@@ -122,6 +144,7 @@ class WorkerUpdateMessage(BaseModel):
 
 class RunProgressMessage(BaseModel):
     type: Literal["run_progress"] = "run_progress"
+    run_id: Optional[str] = None
     total_workers: int
     completed_workers: int
     overall_pct: float
@@ -132,6 +155,7 @@ class RunProgressMessage(BaseModel):
 
 class LogMessage(BaseModel):
     type: Literal["log"] = "log"
+    run_id: Optional[str] = None
     level: str  # "info", "warning", "error"
     text: str
     timestamp: datetime = Field(
@@ -144,6 +168,7 @@ class WindowResultPayload(BaseModel):
     worker_id: int
     prompt: Optional[str] = None
     batch_index: Optional[int] = None
+    turn_index: Optional[int] = None
     model_a_name: Optional[str] = None
     model_a_response: Optional[str] = None
     model_b_name: Optional[str] = None
@@ -164,16 +189,19 @@ class WorkerPartialResultPayload(BaseModel):
 
 class WorkerPartialResultMessage(BaseModel):
     type: Literal["worker_partial_result"] = "worker_partial_result"
+    run_id: Optional[str] = None
     result: WorkerPartialResultPayload
 
 
 class WorkerResultMessage(BaseModel):
     type: Literal["worker_result"] = "worker_result"
+    run_id: Optional[str] = None
     result: WindowResultPayload
 
 
 class RunCompleteMessage(BaseModel):
     type: Literal["run_complete"] = "run_complete"
+    run_id: Optional[str] = None
     results: List[WindowResultPayload]
     total_elapsed_seconds: float
     export_available: bool
@@ -181,18 +209,22 @@ class RunCompleteMessage(BaseModel):
 
 class RunCancelledMessage(BaseModel):
     type: Literal["run_cancelled"] = "run_cancelled"
+    run_id: Optional[str] = None
 
 
 class RunPausedMessage(BaseModel):
     type: Literal["run_paused"] = "run_paused"
+    run_id: Optional[str] = None
 
 
 class RunResumedMessage(BaseModel):
     type: Literal["run_resumed"] = "run_resumed"
+    run_id: Optional[str] = None
 
 
 class ChallengeDetectedMessage(BaseModel):
     type: Literal["challenge_detected"] = "challenge_detected"
+    run_id: Optional[str] = None
     worker_id: int
     challenge_type: str  # "turnstile", "recaptcha", "login_wall"
     message: str

@@ -14,6 +14,7 @@ from src.core.exceptions import (
     ChallengeDetectedError,
     LoginDialogError,
     NavigationError,
+    PollingTimeoutError,
     RateLimitError,
     SubmissionError,
 )
@@ -39,6 +40,8 @@ class ArenaWorker:
     ProxyGetter = Callable[[int], Optional[str]]
     # Callback type: (worker_index) -> None
     ProxySuccessReporter = Callable[[int], None]
+    # Callback type: (worker_index, reason) -> None
+    ProxyFailureReporter = Callable[[int, str], None]
 
     def __init__(
         self,
@@ -49,14 +52,18 @@ class ArenaWorker:
         context_recreator: Optional[ContextRecreator] = None,
         proxy_getter: Optional[ProxyGetter] = None,
         proxy_success_reporter: Optional[ProxySuccessReporter] = None,
+        proxy_failure_reporter: Optional[ProxyFailureReporter] = None,
+        run_id: Optional[str] = None,
     ) -> None:
         self._id = worker_id
         self._context = context
         self._config = config
         self._event_bus = event_bus
+        self._run_id = run_id
         self._context_recreator = context_recreator
         self._proxy_getter = proxy_getter
         self._proxy_success_reporter = proxy_success_reporter
+        self._proxy_failure_reporter = proxy_failure_reporter
         self._page: Optional[Page] = None
         self._result: Optional[WindowResult] = None
         self._started_at: Optional[datetime] = None
@@ -77,11 +84,17 @@ class ArenaWorker:
 
     # ── Event publishing ──
 
+    async def _publish(self, event: Event) -> None:
+        """Publish an event, automatically stamping the run_id."""
+        if event.run_id is None:
+            event.run_id = self._run_id
+        await self._event_bus.publish(event)
+
     async def _on_state_transition(
         self, old: WorkerState, new: WorkerState, wid: int
     ) -> None:
         proxy = self._proxy_getter(self._id) if self._proxy_getter else None
-        await self._event_bus.publish(
+        await self._publish(
             Event(
                 type=EventType.WORKER_STATE_CHANGED,
                 worker_id=wid,
@@ -95,13 +108,101 @@ class ArenaWorker:
         )
 
     async def _log(self, level: str, text: str) -> None:
-        await self._event_bus.publish(
+        await self._publish(
             Event(
                 type=EventType.LOG,
                 worker_id=self._id,
                 data={"level": level, "text": text},
             )
         )
+
+    async def _log_current_proxy(self, context: str = "Current proxy") -> None:
+        """Emit the currently assigned proxy for this worker."""
+        if not self._proxy_getter:
+            return
+        proxy = self._proxy_getter(self._id)
+        if proxy:
+            await self._log("info", f"{context}: {proxy}")
+        else:
+            await self._log("debug", f"{context}: direct/no proxy")
+
+    @staticmethod
+    def _is_navigation_timeout(exc: Exception) -> bool:
+        text = str(exc).lower()
+        return "page.goto" in text and "timeout" in text
+
+    def _report_proxy_navigation_failure(self, reason: str) -> None:
+        if not self._proxy_failure_reporter:
+            return
+        try:
+            self._proxy_failure_reporter(self._id, reason)
+        except Exception:
+            logger.debug(
+                "Worker %d proxy failure reporter failed",
+                self._id,
+                exc_info=True,
+            )
+
+    async def _goto_arena_with_retries(
+        self,
+        pause_event: Optional[asyncio.Event],
+        max_attempts: int = 3,
+    ) -> None:
+        """Navigate to Arena with timeout-aware retries and context refresh."""
+        assert self._page is not None
+        timeout_schedule = (30_000, 45_000, 60_000)
+        attempts = max(1, min(max_attempts, len(timeout_schedule)))
+        last_exc: Optional[Exception] = None
+
+        for attempt in range(1, attempts + 1):
+            timeout_ms = timeout_schedule[attempt - 1]
+            try:
+                await self._ensure_active(pause_event)
+                await self._page.goto(
+                    self._config.arena_url,
+                    wait_until="domcontentloaded",
+                    timeout=timeout_ms,
+                )
+                return
+            except Exception as exc:
+                last_exc = exc
+                timeout_hit = self._is_navigation_timeout(exc)
+                self._report_proxy_navigation_failure(
+                    "goto_timeout" if timeout_hit else "goto_error"
+                )
+
+                if attempt >= attempts:
+                    await self.state_machine.force_error(str(exc))
+                    raise NavigationError(str(exc), self._id) from exc
+
+                if self._context_recreator is not None:
+                    await self._log(
+                        "warning",
+                        (
+                            f"Arena navigation attempt {attempt}/{attempts} failed; "
+                            "reopening window and retrying"
+                        ),
+                    )
+                    self._context = await self._context_recreator(self._id)
+                    self._page = (
+                        self._context.pages[0]
+                        if self._context.pages
+                        else await self._context.new_page()
+                    )
+                    await self._log_current_proxy("Navigation retry proxy")
+                else:
+                    await self._log(
+                        "warning",
+                        (
+                            f"Arena navigation attempt {attempt}/{attempts} failed; "
+                            "retrying in current window"
+                        ),
+                    )
+                await self._sleep_with_controls(min(1.5 * attempt, 4.0), pause_event)
+
+        if last_exc is not None:
+            await self.state_machine.force_error(str(last_exc))
+            raise NavigationError(str(last_exc), self._id) from last_exc
 
     @staticmethod
     def _normalize_text(value: Optional[str]) -> str:
@@ -414,32 +515,37 @@ class ArenaWorker:
             self._page = await self._context.new_page()
 
         await self.state_machine.transition(WorkerState.NAVIGATING)
-        try:
-            await self._ensure_active(pause_event)
-            await self._page.goto(
-                self._config.arena_url,
-                wait_until="domcontentloaded",
-                timeout=60_000,
-            )
-        except Exception as exc:
-            await self.state_machine.force_error(str(exc))
-            raise NavigationError(str(exc), self._id)
-
-        await self._stabilize_loaded_page(
+        await self._goto_arena_with_retries(
             pause_event=pause_event,
-            dialog_wait_seconds=5.0,
+            max_attempts=3,
         )
+
+        pre_challenge = ChallengeType.NONE
+        try:
+            await self._stabilize_loaded_page(
+                pause_event=pause_event,
+                dialog_wait_seconds=5.0,
+            )
+        except ChallengeDetectedError as exc:
+            if exc.challenge_type == "terms_blocked":
+                pre_challenge = ChallengeType.SECURITY_MODAL
+            else:
+                raise
         if clear_cookies:
             await self._show_in_browser_toast("Cookies cleared successfully")
 
         # Check for challenges (including login dialog) — retry by reopening window
         await self._ensure_active(pause_event)
-        challenge = await detect_challenge(self._page)
+        challenge = (
+            pre_challenge
+            if pre_challenge != ChallengeType.NONE
+            else await detect_challenge(self._page)
+        )
         if challenge != ChallengeType.NONE:
             await self.state_machine.transition(
                 WorkerState.WAITING_FOR_CHALLENGE
             )
-            await self._event_bus.publish(
+            await self._publish(
                 Event(
                     type=EventType.CHALLENGE_DETECTED,
                     worker_id=self._id,
@@ -577,6 +683,225 @@ class ArenaWorker:
             selector_key="voting_onboarding_got_it_button",
         )
 
+    async def _find_terms_of_use_button(self) -> Optional[ElementHandle]:
+        """Find the Terms-of-Use accept/agree button with stricter matching.
+
+        The selector fallback in config can be broad. This helper validates
+        the dialog text so we do not keep clicking unrelated submit buttons.
+        """
+        assert self._page is not None
+
+        # 1) Prefer configured selector, but only if its dialog looks like ToS.
+        try:
+            selector = self._selectors.get("tos_agree_button")
+            button = await self._find_visible_dialog_button(selector)
+            if button is not None:
+                is_tos = await button.evaluate(
+                    """btn => {
+                        const dialog = btn && btn.closest('[role="dialog"]');
+                        const text = (dialog && dialog.innerText ? dialog.innerText : '').toLowerCase();
+                        return (
+                            text.includes('terms of use') ||
+                            text.includes('terms') ||
+                            text.includes('privacy policy') ||
+                            text.includes('policy')
+                        );
+                    }"""
+                )
+                if is_tos:
+                    return button
+        except Exception:
+            pass
+
+        # 2) Robust fallback by dialog + button text heuristics.
+        handle = await self._page.evaluate_handle(
+            """() => {
+                const isVisible = (el) => {
+                    if (!el) return false;
+                    const style = window.getComputedStyle(el);
+                    const rect = el.getBoundingClientRect();
+                    return (
+                        style.display !== 'none' &&
+                        style.visibility !== 'hidden' &&
+                        rect.width > 0 &&
+                        rect.height > 0
+                    );
+                };
+
+                const normalize = (s) => (s || '').trim().toLowerCase();
+                const dialogs = Array.from(document.querySelectorAll('[role="dialog"]'))
+                    .filter(isVisible);
+
+                for (const dialog of dialogs) {
+                    const text = normalize(dialog.innerText);
+                    const looksLikeTos =
+                        text.includes('terms of use') ||
+                        text.includes('terms') ||
+                        text.includes('privacy policy') ||
+                        text.includes('policy');
+                    if (!looksLikeTos) continue;
+
+                    const button = Array.from(dialog.querySelectorAll('button')).find((btn) => {
+                        if (!isVisible(btn)) return false;
+                        const t = normalize(btn.innerText);
+                        return (
+                            t === 'agree' ||
+                            t === 'i agree' ||
+                            t === 'accept' ||
+                            t === 'continue'
+                        );
+                    });
+                    if (button) return button;
+                }
+                return null;
+            }"""
+        )
+        return handle.as_element()
+
+    async def _is_terms_button_clickable(
+        self,
+        button: ElementHandle,
+    ) -> bool:
+        """Best-effort check whether the Terms Agree button is actionable."""
+        try:
+            return bool(
+                await button.evaluate(
+                    """btn => {
+                        const isVisible = (el) => {
+                            if (!el) return false;
+                            const style = window.getComputedStyle(el);
+                            const rect = el.getBoundingClientRect();
+                            return (
+                                style.display !== "none" &&
+                                style.visibility !== "hidden" &&
+                                rect.width > 0 &&
+                                rect.height > 0
+                            );
+                        };
+
+                        if (!isVisible(btn)) return false;
+                        if (btn.disabled) return false;
+                        if (btn.getAttribute("aria-disabled") === "true") return false;
+                        if (window.getComputedStyle(btn).pointerEvents === "none") return false;
+
+                        const rect = btn.getBoundingClientRect();
+                        const cx = rect.left + rect.width / 2;
+                        const cy = rect.top + rect.height / 2;
+                        const topEl = document.elementFromPoint(cx, cy);
+                        if (!topEl) return false;
+                        return btn.contains(topEl) || topEl.contains(btn);
+                    }"""
+                )
+            )
+        except Exception:
+            return False
+
+    async def _click_dialog_button(
+        self,
+        button: ElementHandle,
+        selector_key: str,
+        pause_event: Optional[asyncio.Event] = None,
+    ) -> bool:
+        """Click a dialog button with resilient fallbacks.
+
+        Returns ``True`` if any click strategy executed without raising.
+        """
+        assert self._page is not None
+        errors: list[str] = []
+
+        try:
+            await button.click(force=True, timeout=3_000)
+            return True
+        except Exception as exc:
+            errors.append(str(exc))
+
+        try:
+            await button.evaluate(
+                """btn => {
+                    if (!btn) return;
+                    btn.dispatchEvent(new MouseEvent("click", {
+                        bubbles: true,
+                        cancelable: true,
+                        view: window,
+                    }));
+                    if (typeof btn.click === "function") {
+                        btn.click();
+                    }
+                }"""
+            )
+            await self._sleep_with_controls(0.1, pause_event)
+            return True
+        except Exception as exc:
+            errors.append(str(exc))
+
+        if selector_key == "cookie_accept_button":
+            try:
+                await self._page.keyboard.press("Enter")
+                await self._sleep_with_controls(0.1, pause_event)
+                return True
+            except Exception as exc:
+                errors.append(str(exc))
+
+        if errors:
+            await self._log(
+                "debug",
+                f"Dialog click failed for {selector_key}: {errors[-1]}",
+            )
+        return False
+
+    async def _accept_cookie_dialog_if_present(
+        self,
+        pause_event: Optional[asyncio.Event] = None,
+    ) -> bool:
+        """Aggressively accept the Arena cookie dialog when it is present."""
+        assert self._page is not None
+        try:
+            clicked = bool(
+                await self._page.evaluate(
+                    """() => {
+                        const isVisible = (el) => {
+                            if (!el) return false;
+                            const style = window.getComputedStyle(el);
+                            const rect = el.getBoundingClientRect();
+                            return (
+                                style.display !== "none" &&
+                                style.visibility !== "hidden" &&
+                                rect.width > 0 &&
+                                rect.height > 0
+                            );
+                        };
+                        const norm = (s) => (s || "").trim().toLowerCase();
+
+                        const dialogs = Array.from(document.querySelectorAll('[role="dialog"]'))
+                            .filter(isVisible);
+                        for (const dialog of dialogs) {
+                            const text = norm(dialog.innerText);
+                            if (!text.includes("this website uses cookies")) continue;
+                            const accept = Array.from(dialog.querySelectorAll("button")).find((btn) => {
+                                return isVisible(btn) && norm(btn.innerText) === "accept cookies";
+                            });
+                            if (!accept) continue;
+                            accept.dispatchEvent(new MouseEvent("click", {
+                                bubbles: true,
+                                cancelable: true,
+                                view: window,
+                            }));
+                            if (typeof accept.click === "function") {
+                                accept.click();
+                            }
+                            return true;
+                        }
+                        return false;
+                    }"""
+                )
+            )
+            if not clicked:
+                return False
+            await self._sleep_with_controls(0.2, pause_event)
+            return True
+        except Exception:
+            return False
+
     async def _dismiss_known_dialogs(
         self,
         wait_seconds: float = 0.0,
@@ -592,19 +917,45 @@ class ArenaWorker:
         handlers = [
             ("cookie_accept_button", "Accepted cookie dialog"),
             ("tos_agree_button", "Dismissed Terms of Use dialog"),
-            (
-                "voting_onboarding_got_it_button",
-                "Dismissed voting onboarding dialog",
-            ),
+            ("voting_onboarding_got_it_button", "Dismissed voting onboarding dialog"),
         ]
+        click_counts: dict[str, int] = {}
+        max_clicks_per_handler = {
+            "cookie_accept_button": 4,
+            "tos_agree_button": 2,
+            "voting_onboarding_got_it_button": 2,
+        }
 
         try:
             while True:
                 await self._ensure_active(pause_event)
                 dismissed_this_pass = False
+
+                if await self._accept_cookie_dialog_if_present(pause_event):
+                    click_counts["cookie_accept_button"] = (
+                        click_counts.get("cookie_accept_button", 0) + 1
+                    )
+                    still_present = (
+                        await self._find_cookie_accept_button()
+                    ) is not None
+                    if not still_present:
+                        if click_counts["cookie_accept_button"] == 1:
+                            await self._log("info", "Accepted cookie dialog")
+                        else:
+                            await self._log(
+                                "debug",
+                                "Accepted cookie dialog (retry "
+                                f"{click_counts['cookie_accept_button']})",
+                            )
+                        dismissed_any = True
+                        dismissed_this_pass = True
+                        continue
+
                 for selector_key, log_text in handlers:
                     if selector_key == "cookie_accept_button":
                         button = await self._find_cookie_accept_button()
+                    elif selector_key == "tos_agree_button":
+                        button = await self._find_terms_of_use_button()
                     elif selector_key == "voting_onboarding_got_it_button":
                         button = await self._find_voting_onboarding_button()
                     else:
@@ -612,9 +963,80 @@ class ArenaWorker:
                         button = await self._find_visible_dialog_button(selector)
                     if button is None:
                         continue
-                    await button.click(force=True)
+
+                    if selector_key == "tos_agree_button":
+                        clickable = await self._is_terms_button_clickable(button)
+                        if not clickable:
+                            await self._log(
+                                "warning",
+                                "Terms dialog detected but Agree is not clickable; "
+                                "treating as challenge and reopening with proxy",
+                            )
+                            raise ChallengeDetectedError(
+                                self._id, "terms_blocked"
+                            )
+
+                    attempts = click_counts.get(selector_key, 0)
+                    max_attempts = max_clicks_per_handler.get(selector_key, 2)
+                    if attempts >= max_attempts:
+                        continue
+
+                    clicked = await self._click_dialog_button(
+                        button=button,
+                        selector_key=selector_key,
+                        pause_event=pause_event,
+                    )
+                    if not clicked:
+                        continue
+
+                    click_counts[selector_key] = attempts + 1
                     await self._sleep_with_controls(0.5, pause_event)
-                    await self._log("info", log_text)
+
+                    if selector_key == "cookie_accept_button":
+                        still_present = (
+                            await self._find_cookie_accept_button()
+                        ) is not None
+                    elif selector_key == "tos_agree_button":
+                        still_present = (
+                            await self._find_terms_of_use_button()
+                        ) is not None
+                    elif selector_key == "voting_onboarding_got_it_button":
+                        still_present = (
+                            await self._find_voting_onboarding_button()
+                        ) is not None
+                    else:
+                        still_present = False
+
+                    if still_present:
+                        if (
+                            selector_key == "tos_agree_button"
+                            and click_counts[selector_key]
+                            >= max_attempts
+                        ):
+                            await self._log(
+                                "warning",
+                                "Terms dialog stayed after retries; "
+                                "treating as challenge and reopening with proxy",
+                            )
+                            raise ChallengeDetectedError(
+                                self._id, "terms_blocked"
+                            )
+                        if click_counts[selector_key] >= max_attempts:
+                            await self._log(
+                                "debug",
+                                f"{selector_key} dialog remained after retries",
+                            )
+                        continue
+
+                    # Log the first dismissal at info level; suppress repetitive spam.
+                    if click_counts[selector_key] == 1:
+                        await self._log("info", log_text)
+                    else:
+                        await self._log(
+                            "debug",
+                            f"{log_text} (retry {click_counts[selector_key]})",
+                        )
+
                     dismissed_any = True
                     dismissed_this_pass = True
                     break
@@ -627,6 +1049,8 @@ class ArenaWorker:
                         return dismissed_any
                     await self._sleep_with_controls(poll_interval, pause_event)
                     continue
+        except ChallengeDetectedError:
+            raise
         except Exception as exc:
             await self._log("debug", f"Dialog dismissal skipped: {exc}")
             return dismissed_any
@@ -659,7 +1083,7 @@ class ArenaWorker:
                 if self._cancelled:
                     return
                 if await detect_challenge(self._page) == ChallengeType.NONE:
-                    await self._event_bus.publish(
+                    await self._publish(
                         Event(type=EventType.CHALLENGE_RESOLVED, worker_id=self._id)
                     )
                     return
@@ -686,34 +1110,40 @@ class ArenaWorker:
                 if self._context.pages
                 else await self._context.new_page()
             )
+            await self._log_current_proxy("Challenge retry proxy")
 
             # Re-navigate
             await self.state_machine.transition(WorkerState.NAVIGATING)
             await self._log("info", "Fresh window opened; navigating back to Arena")
-            try:
-                await self._ensure_active(pause_event)
-                await self._page.goto(
-                    self._config.arena_url,
-                    wait_until="domcontentloaded",
-                    timeout=60_000,
-                )
-            except Exception as exc:
-                await self.state_machine.force_error(str(exc))
-                raise NavigationError(str(exc), self._id)
-
-            await self._stabilize_loaded_page(
+            await self._goto_arena_with_retries(
                 pause_event=pause_event,
-                dialog_wait_seconds=5.0,
+                max_attempts=2,
             )
+
+            pre_challenge = ChallengeType.NONE
+            try:
+                await self._stabilize_loaded_page(
+                    pause_event=pause_event,
+                    dialog_wait_seconds=5.0,
+                )
+            except ChallengeDetectedError as exc:
+                if exc.challenge_type == "terms_blocked":
+                    pre_challenge = ChallengeType.SECURITY_MODAL
+                else:
+                    raise
             if clear_cookies:
                 await self._show_in_browser_toast("Cookies cleared successfully")
 
             await self._ensure_active(pause_event)
-            challenge = await detect_challenge(self._page)
+            challenge = (
+                pre_challenge
+                if pre_challenge != ChallengeType.NONE
+                else await detect_challenge(self._page)
+            )
             if challenge == ChallengeType.NONE:
                 if self._proxy_success_reporter:
                     self._proxy_success_reporter(self._id)
-                await self._event_bus.publish(
+                await self._publish(
                     Event(type=EventType.CHALLENGE_RESOLVED, worker_id=self._id)
                 )
                 return
@@ -732,6 +1162,7 @@ class ArenaWorker:
         model_a: Optional[str] = None,
         model_b: Optional[str] = None,
         mark_started: bool = True,
+        retry_on_challenge: int = 1,
         pause_event: Optional[asyncio.Event] = None,
         images: Optional[list] = None,
     ) -> None:
@@ -746,10 +1177,36 @@ class ArenaWorker:
         self._last_model_a = model_a
         self._last_model_b = model_b
 
-        await self._dismiss_known_dialogs(
-            wait_seconds=1.0,
-            pause_event=pause_event,
-        )
+        try:
+            await self._dismiss_known_dialogs(
+                wait_seconds=1.0,
+                pause_event=pause_event,
+            )
+        except ChallengeDetectedError as exc:
+            if (
+                exc.challenge_type != "terms_blocked"
+                or retry_on_challenge <= 0
+                or self._context_recreator is None
+            ):
+                raise
+            await self._log(
+                "warning",
+                "Terms Agree is blocked; reopening window with proxy and retrying prepare",
+            )
+            await self.reset_with_fresh_context(
+                zoom_pct=self._zoom_pct,
+                clear_cookies=False,
+                pause_event=pause_event,
+            )
+            return await self.prepare_prompt(
+                prompt=prompt,
+                model_a=model_a,
+                model_b=model_b,
+                mark_started=mark_started,
+                retry_on_challenge=retry_on_challenge - 1,
+                pause_event=pause_event,
+                images=images,
+            )
 
         if model_a or model_b:
             await self.state_machine.transition(WorkerState.SELECTING_MODEL)
@@ -771,9 +1228,37 @@ class ArenaWorker:
         await self._ensure_active(pause_event)
         textarea_sel = self._selectors.get("prompt_textarea")
         has_images = bool(images)
-        prompt_element = await self._human.type_text(
-            self._page, textarea_sel, prompt, verify=not has_images,
-        )
+        try:
+            prompt_element = await self._human.type_text(
+                self._page, textarea_sel, prompt, verify=not has_images,
+            )
+        except RuntimeError as exc:
+            message = str(exc)
+            missing_composer = message.startswith("Element not found:")
+            if (
+                not missing_composer
+                or retry_on_challenge <= 0
+                or self._context_recreator is None
+            ):
+                raise
+            await self._log(
+                "warning",
+                "Prompt composer not found; reopening window with proxy and retrying prepare",
+            )
+            await self.reset_with_fresh_context(
+                zoom_pct=self._zoom_pct,
+                clear_cookies=False,
+                pause_event=pause_event,
+            )
+            return await self.prepare_prompt(
+                prompt=prompt,
+                model_a=model_a,
+                model_b=model_b,
+                mark_started=mark_started,
+                retry_on_challenge=retry_on_challenge - 1,
+                pause_event=pause_event,
+                images=images,
+            )
         await self._log("info", "Prompt pasted")
 
         # Paste images if provided
@@ -835,10 +1320,34 @@ class ArenaWorker:
                 submit_accepted = True
                 break
 
-            dialog_dismissed = await self._dismiss_known_dialogs(
-                wait_seconds=1.5,
-                pause_event=pause_event,
-            )
+            try:
+                dialog_dismissed = await self._dismiss_known_dialogs(
+                    wait_seconds=1.5,
+                    pause_event=pause_event,
+                )
+            except ChallengeDetectedError as exc:
+                if (
+                    exc.challenge_type != "terms_blocked"
+                    or retry_on_challenge <= 0
+                    or self._context_recreator is None
+                ):
+                    raise
+                await self._log(
+                    "warning",
+                    "Terms Agree is blocked after submit; reopening window with proxy and retrying",
+                )
+                await self.reset_with_fresh_context(
+                    zoom_pct=self._zoom_pct,
+                    clear_cookies=False,
+                    pause_event=pause_event,
+                )
+                return await self.submit_prompt(
+                    prompt=self._last_prompt,
+                    model_a=self._last_model_a,
+                    model_b=self._last_model_b,
+                    retry_on_challenge=retry_on_challenge - 1,
+                    pause_event=pause_event,
+                )
 
             await self._ensure_active(pause_event)
             challenge = await detect_challenge(self._page)
@@ -885,6 +1394,31 @@ class ArenaWorker:
                 break
 
             if attempt < 3:
+                # One extra grace window before re-clicking submit.
+                grace_snapshot = await self._wait_for_submission_acceptance(
+                    expected_prompt=self._last_prompt or "",
+                    pause_event=pause_event,
+                    timeout_seconds=4.0,
+                    poll_interval=0.4,
+                )
+                last_snapshot = grace_snapshot
+                if grace_snapshot.get("accepted"):
+                    submit_accepted = True
+                    await self._log(
+                        "info",
+                        "Submission accepted after a delayed UI update",
+                    )
+                    break
+
+                if not self._should_retry_submit(grace_snapshot):
+                    # Ambiguous state: avoid a duplicate send and move to polling.
+                    submit_accepted = True
+                    await self._log(
+                        "warning",
+                        "Submission state is ambiguous; skipping re-submit to avoid duplicate prompt",
+                    )
+                    break
+
                 reason = (
                     "dialog blocked the first submit"
                     if dialog_dismissed
@@ -1014,14 +1548,40 @@ class ArenaWorker:
         images: Optional[list] = None,
     ) -> None:
         """Select models (optional), paste prompt, and submit."""
-        await self.prepare_prompt(
-            prompt=prompt,
-            model_a=model_a,
-            model_b=model_b,
-            mark_started=True,
-            pause_event=pause_event,
-            images=images,
-        )
+        try:
+            await self.prepare_prompt(
+                prompt=prompt,
+                model_a=model_a,
+                model_b=model_b,
+                mark_started=True,
+                retry_on_challenge=retry_on_challenge,
+                pause_event=pause_event,
+                images=images,
+            )
+        except ChallengeDetectedError as exc:
+            if (
+                exc.challenge_type != "terms_blocked"
+                or retry_on_challenge <= 0
+                or self._context_recreator is None
+            ):
+                raise
+            await self._log(
+                "warning",
+                "Terms Agree is blocked; reopening window with proxy and retrying prompt",
+            )
+            await self.reset_with_fresh_context(
+                zoom_pct=self._zoom_pct,
+                clear_cookies=False,
+                pause_event=pause_event,
+            )
+            return await self.submit_prompt(
+                prompt=prompt,
+                model_a=model_a,
+                model_b=model_b,
+                retry_on_challenge=retry_on_challenge - 1,
+                pause_event=pause_event,
+                images=images,
+            )
         await self.submit_prepared_prompt(
             retry_on_challenge=retry_on_challenge,
             pause_event=pause_event,
@@ -1312,6 +1872,19 @@ class ArenaWorker:
                 return latest
             await self._sleep_with_controls(poll_interval, pause_event)
         return latest
+
+    @staticmethod
+    def _should_retry_submit(snapshot: Optional[dict]) -> bool:
+        """Return True only when we have strong evidence submit did not fire."""
+        if not snapshot:
+            return False
+        return bool(
+            snapshot.get("textarea_visible")
+            and snapshot.get("submit_visible")
+            and snapshot.get("submit_enabled")
+            and snapshot.get("prompt_matches_expected")
+            and not snapshot.get("stop_visible")
+        )
 
     async def _find_model_dropdown_button(
         self, index: int
@@ -1647,6 +2220,8 @@ class ArenaWorker:
         baseline_responses: Optional[tuple[str, str]] = None,
         pause_event: Optional[asyncio.Event] = None,
         _rate_limit_retries: int = 2,
+        _poll_timeout_retries: int = 1,
+        _poll_timeout_override_seconds: Optional[float] = None,
     ) -> WindowResult:
         """Poll DOM until both responses are stable. Returns result."""
         assert self._page is not None
@@ -1658,7 +2233,7 @@ class ArenaWorker:
             model_name: Optional[str],
         ) -> None:
             slide = "a" if slide_index == 0 else "b"
-            await self._event_bus.publish(
+            await self._publish(
                 Event(
                     type=EventType.WORKER_PARTIAL_RESULT,
                     worker_id=self._id,
@@ -1679,6 +2254,7 @@ class ArenaWorker:
                 cancel_event=self._cancel_event,
                 pause_event=pause_event,
                 baseline_responses=baseline_responses,
+                timeout_override_seconds=_poll_timeout_override_seconds,
                 on_slide_stable=_on_slide_stable,
             )
 
@@ -1710,7 +2286,7 @@ class ArenaWorker:
             )
 
             await self.state_machine.transition(WorkerState.COMPLETE)
-            await self._event_bus.publish(
+            await self._publish(
                 Event(
                     type=EventType.WORKER_COMPLETE,
                     worker_id=self._id,
@@ -1727,7 +2303,7 @@ class ArenaWorker:
                 "warning",
                 "Rate limit hit — closing window, reopening fresh, and retrying",
             )
-            await self._event_bus.publish(
+            await self._publish(
                 Event(
                     type=EventType.CHALLENGE_DETECTED,
                     worker_id=self._id,
@@ -1747,27 +2323,22 @@ class ArenaWorker:
                 if self._context.pages
                 else await self._context.new_page()
             )
+            await self._log_current_proxy("Rate-limit retry proxy")
 
             # Re-navigate
             await self.state_machine.transition(WorkerState.NAVIGATING)
             await self._log("info", "Fresh window opened; navigating back to Arena")
-            try:
-                await self._ensure_active(pause_event)
-                await self._page.goto(
-                    self._config.arena_url,
-                    wait_until="domcontentloaded",
-                    timeout=60_000,
-                )
-            except Exception as nav_exc:
-                await self.state_machine.force_error(str(nav_exc))
-                raise NavigationError(str(nav_exc), self._id)
+            await self._goto_arena_with_retries(
+                pause_event=pause_event,
+                max_attempts=2,
+            )
 
             await self._stabilize_loaded_page(
                 pause_event=pause_event,
                 dialog_wait_seconds=5.0,
             )
 
-            await self._event_bus.publish(
+            await self._publish(
                 Event(type=EventType.CHALLENGE_RESOLVED, worker_id=self._id)
             )
 
@@ -1785,6 +2356,8 @@ class ArenaWorker:
                 baseline_responses=baseline_responses,
                 pause_event=pause_event,
                 _rate_limit_retries=_rate_limit_retries - 1,
+                _poll_timeout_retries=_poll_timeout_retries,
+                _poll_timeout_override_seconds=_poll_timeout_override_seconds,
             )
 
         except LoginDialogError:
@@ -1795,7 +2368,7 @@ class ArenaWorker:
                 "warning",
                 "Login dialog detected — closing window, reopening fresh, and retrying",
             )
-            await self._event_bus.publish(
+            await self._publish(
                 Event(
                     type=EventType.CHALLENGE_DETECTED,
                     worker_id=self._id,
@@ -1813,26 +2386,21 @@ class ArenaWorker:
                 if self._context.pages
                 else await self._context.new_page()
             )
+            await self._log_current_proxy("Login-wall retry proxy")
 
             await self.state_machine.transition(WorkerState.NAVIGATING)
             await self._log("info", "Fresh window opened; navigating back to Arena")
-            try:
-                await self._ensure_active(pause_event)
-                await self._page.goto(
-                    self._config.arena_url,
-                    wait_until="domcontentloaded",
-                    timeout=60_000,
-                )
-            except Exception as nav_exc:
-                await self.state_machine.force_error(str(nav_exc))
-                raise NavigationError(str(nav_exc), self._id)
+            await self._goto_arena_with_retries(
+                pause_event=pause_event,
+                max_attempts=2,
+            )
 
             await self._stabilize_loaded_page(
                 pause_event=pause_event,
                 dialog_wait_seconds=5.0,
             )
 
-            await self._event_bus.publish(
+            await self._publish(
                 Event(type=EventType.CHALLENGE_RESOLVED, worker_id=self._id)
             )
 
@@ -1848,7 +2416,44 @@ class ArenaWorker:
                 baseline_responses=baseline_responses,
                 pause_event=pause_event,
                 _rate_limit_retries=_rate_limit_retries - 1,
+                _poll_timeout_retries=_poll_timeout_retries,
+                _poll_timeout_override_seconds=_poll_timeout_override_seconds,
             )
+
+        except PollingTimeoutError as exc:
+            if _poll_timeout_retries > 0:
+                await self._log(
+                    "warning",
+                    (
+                        "Polling timed out; waiting for late response and "
+                        "retrying poll once"
+                    ),
+                )
+                return await self.poll_for_completion(
+                    baseline_responses=baseline_responses,
+                    pause_event=pause_event,
+                    _rate_limit_retries=_rate_limit_retries,
+                    _poll_timeout_retries=_poll_timeout_retries - 1,
+                    _poll_timeout_override_seconds=120.0,
+                )
+
+            self._result = WindowResult(
+                worker_id=self._id,
+                prompt="",
+                success=False,
+                error=str(exc),
+                started_at=self._started_at,
+                completed_at=datetime.now(timezone.utc),
+            )
+            await self.state_machine.force_error(str(exc))
+            await self._publish(
+                Event(
+                    type=EventType.WORKER_ERROR,
+                    worker_id=self._id,
+                    data={"error": str(exc)},
+                )
+            )
+            return self._result
 
         except Exception as exc:
             self._result = WindowResult(
@@ -1860,7 +2465,7 @@ class ArenaWorker:
                 completed_at=datetime.now(timezone.utc),
             )
             await self.state_machine.force_error(str(exc))
-            await self._event_bus.publish(
+            await self._publish(
                 Event(
                     type=EventType.WORKER_ERROR,
                     worker_id=self._id,
@@ -1923,6 +2528,7 @@ class ArenaWorker:
         # 3. Recreate the browser context (closes old window, opens fresh one)
         await self._ensure_active(pause_event)
         self._context = await self._context_recreator(self._id)
+        await self._log_current_proxy("Recovery reset proxy")
 
         # 4. Navigate to Arena (handles challenges, TOS, login dialogs)
         await self.navigate_to_arena(

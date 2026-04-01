@@ -22,6 +22,7 @@ PROXIFLY_URL = (
 
 MAX_FAIL_COUNT = 3
 STALE_THRESHOLD = 3600.0  # prune auto-fetched unhealthy proxies after 1 hour
+CHALLENGER_RECHECK_COOLDOWN = 600.0  # avoid re-testing same challenger too frequently
 
 
 @dataclass
@@ -68,6 +69,8 @@ class ProxyPool:
         self._auto_refresh_protocol: str = "http"
         self._auto_refresh_enabled: bool = False
         self._auto_refresh_interval: float = 300.0
+        self._auto_refresh_fetch_limit: int = 20
+        self._challenger_recent_checks: Dict[str, float] = {}
 
     # ── Core API ──
 
@@ -205,6 +208,7 @@ class ProxyPool:
             "auto_refresh_enabled": self._auto_refresh_enabled,
             "auto_refresh_protocol": self._auto_refresh_protocol,
             "auto_refresh_interval": self._auto_refresh_interval,
+            "auto_refresh_fetch_limit": self._auto_refresh_fetch_limit,
             "proxies": [asdict(e) for e in ranked],
         }
         path.write_text(json.dumps(data, indent=2))
@@ -230,6 +234,8 @@ class ProxyPool:
                 self._auto_refresh_protocol = data["auto_refresh_protocol"]
             if "auto_refresh_interval" in data:
                 self._auto_refresh_interval = max(60.0, float(data["auto_refresh_interval"]))
+            if "auto_refresh_fetch_limit" in data:
+                self._auto_refresh_fetch_limit = max(1, int(data["auto_refresh_fetch_limit"]))
 
             loaded = 0
             for p in data.get("proxies", []):
@@ -268,10 +274,16 @@ class ProxyPool:
         self._auto_refresh_enabled = True
         self._auto_refresh_protocol = protocol
         self._auto_refresh_interval = interval
+        self._auto_refresh_fetch_limit = max(1, int(fetch_limit))
         self._refresh_task = asyncio.create_task(
-            self._refresh_loop(protocol, fetch_limit, interval)
+            self._refresh_loop(protocol, self._auto_refresh_fetch_limit, interval)
         )
-        logger.info("Auto-refresh started (protocol=%s, interval=%.0fs)", protocol, interval)
+        logger.info(
+            "Auto-refresh started (protocol=%s, fetch_limit=%d, interval=%.0fs)",
+            protocol,
+            self._auto_refresh_fetch_limit,
+            interval,
+        )
 
     async def stop_auto_refresh(self, clear_enabled: bool = True) -> None:
         """Cancel the background refresh task.
@@ -295,7 +307,8 @@ class ProxyPool:
     ) -> None:
         while self._running:
             try:
-                stats = await self.maintain_pool(protocol)
+                async with self._lock:
+                    stats = await self.maintain_pool(protocol, fetch_limit=fetch_limit)
                 logger.info(
                     "Pool maintenance: checked=%d, healthy=%d, dropped=%d, recovered=%d, added=%d",
                     stats["checked"], stats["healthy"], stats["dropped"],
@@ -321,13 +334,19 @@ class ProxyPool:
             all_results.extend(results)
         return all_results
 
-    async def maintain_pool(self, protocol: str = "http") -> dict:
+    async def maintain_pool(
+        self, protocol: str = "http", fetch_limit: Optional[int] = None
+    ) -> dict:
         """Self-healing pool maintenance: re-check all, purge dead, fill gaps.
 
         This is the single lifecycle method that keeps the pool healthy.
         Called by auto-refresh loop, health-check button, and on startup.
         """
         loop = asyncio.get_event_loop()
+        effective_fetch_limit = max(
+            1,
+            int(fetch_limit if fetch_limit is not None else self._auto_refresh_fetch_limit),
+        )
         stats = {
             "checked": 0, "healthy": 0, "unhealthy": 0,
             "dropped": 0, "recovered": 0,
@@ -390,11 +409,12 @@ class ProxyPool:
         gap = self._max_healthy - self.healthy_count
         challenger_count = gap if gap > 0 else min(3, max(1, self._max_healthy // 3))
         if challenger_count > 0 and self._check_fn:
+            candidate_budget = max(effective_fetch_limit, challenger_count * 5)
             logger.info(
-                "Pool has %d/%d healthy — testing %d challenger proxies",
+                "Pool has %d/%d healthy — testing up to %d challenger proxies",
                 self.healthy_count,
                 self._max_healthy,
-                challenger_count,
+                candidate_budget,
             )
             url = PROXIFLY_URL.format(protocol=protocol)
             try:
@@ -405,14 +425,39 @@ class ProxyPool:
 
                 data = await loop.run_in_executor(None, _fetch)
                 random.shuffle(data)
-                # Test more candidates than needed to find enough good ones
-                candidates = [
-                    entry["proxy"] for entry in data[: challenger_count * 10]
-                    if "proxy" in entry and entry["proxy"] not in self._entries
-                ]
+
+                # Keep a short cooldown so each cycle explores fresh candidates.
+                now = time.time()
+                cooldown_cutoff = now - CHALLENGER_RECHECK_COOLDOWN
+                if self._challenger_recent_checks:
+                    self._challenger_recent_checks = {
+                        proxy: ts
+                        for proxy, ts in self._challenger_recent_checks.items()
+                        if ts >= cooldown_cutoff
+                    }
+
+                seen = set()
+                candidates = []
+                for entry in data:
+                    proxy = entry.get("proxy") if isinstance(entry, dict) else None
+                    if (
+                        not proxy
+                        or proxy in seen
+                        or proxy in self._entries
+                        or self._challenger_recent_checks.get(proxy, 0) >= cooldown_cutoff
+                    ):
+                        continue
+                    seen.add(proxy)
+                    candidates.append(proxy)
+                    if len(candidates) >= candidate_budget:
+                        break
                 stats["fetched"] = len(candidates)
 
                 if candidates:
+                    checked_at = time.time()
+                    for proxy in candidates:
+                        self._challenger_recent_checks[proxy] = checked_at
+
                     results = await self._check_in_batches(candidates, timeout=5)
                     good = sorted(
                         [
@@ -440,7 +485,11 @@ class ProxyPool:
 
     async def health_check_all(self) -> dict:
         """Backward-compatible wrapper — runs full pool maintenance."""
-        return await self.maintain_pool(protocol=self._auto_refresh_protocol)
+        async with self._lock:
+            return await self.maintain_pool(
+                protocol=self._auto_refresh_protocol,
+                fetch_limit=self._auto_refresh_fetch_limit,
+            )
 
     # ── Status ──
 
@@ -453,6 +502,7 @@ class ProxyPool:
         return {
             "total": len(self._entries),
             "healthy": len(healthy_entries),
+            "raw_healthy": len([e for e in self._entries.values() if e.healthy]),
             "degraded": len(degraded_entries),
             "unhealthy": len(unhealthy_entries),
             "max_healthy": self._max_healthy,
@@ -483,6 +533,7 @@ class ProxyPool:
             "enabled": self._auto_refresh_enabled,
             "protocol": self._auto_refresh_protocol,
             "interval": self._auto_refresh_interval,
+            "fetch_limit": self._auto_refresh_fetch_limit,
         }
 
     @property
