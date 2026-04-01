@@ -3111,8 +3111,6 @@ textarea::placeholder {
   flex-direction: column;
   gap: 0.5rem;
   margin: 0.5rem 0;
-  max-height: 60vh;
-  overflow-y: auto;
 }
 
 /* (old card image/combine styles removed — not used in compact layout) */
