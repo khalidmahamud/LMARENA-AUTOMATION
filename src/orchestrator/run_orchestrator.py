@@ -1004,7 +1004,7 @@ class RunOrchestrator:
         """Publish an event, automatically stamping the current run_id."""
         if event.run_id is None:
             event.run_id = self._active_run_id
-        await self._publish(event)
+        await self._event_bus.publish(event)
 
     @staticmethod
     def _build_result(
