@@ -2880,7 +2880,12 @@ html, body { margin: 0; padding: 0; background: #fff; color: #111;
     formData.append("file", file);
 
     fetch("/upload-instructions", { method: "POST", body: formData })
-      .then(function (res) { return res.json(); })
+      .then(function (res) {
+        if (!res.ok) {
+          return res.json().then(function (err) { throw new Error(err.error || err.detail || "Upload failed"); });
+        }
+        return res.json();
+      })
       .then(function (data) {
         if (data.error) {
           showToast(data.error, "error");
