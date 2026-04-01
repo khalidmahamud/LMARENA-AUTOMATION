@@ -2419,70 +2419,69 @@ html, body { margin: 0; padding: 0; background: #fff; color: #111;
     el.className = "prompt-card";
     el.setAttribute("data-card-id", cardId);
     el.innerHTML =
+      // ── Header (always visible: compact single row) ──
       '<div class="prompt-card-header">' +
-        '<span class="prompt-card-title">Prompt #' + index + '</span>' +
+        '<span class="prompt-card-index">#' + index + '</span>' +
+        '<span class="prompt-card-preview">No prompt</span>' +
+        '<span class="prompt-card-tags"></span>' +
         '<span class="prompt-card-status">Idle</span>' +
         '<div class="prompt-card-actions">' +
-          '<button class="btn-card-run" data-card-id="' + cardId + '">&#9654; Run</button>' +
-          '<button class="btn-card-stop" data-card-id="' + cardId + '" disabled>&#9632; Stop</button>' +
-          '<button class="btn-card-collapse" data-card-id="' + cardId + '">&#9660;</button>' +
+          '<button class="btn-card-run" data-card-id="' + cardId + '" title="Run">&#9654;</button>' +
+          '<button class="btn-card-stop" data-card-id="' + cardId + '" title="Stop" disabled>&#9632;</button>' +
+          '<button class="btn-card-collapse" data-card-id="' + cardId + '" title="Expand">&#9660;</button>' +
         '</div>' +
       '</div>' +
-      '<div class="prompt-card-body">' +
-        '<details class="system-prompt-details">' +
-          '<summary class="system-prompt-toggle">System Prompt</summary>' +
-          '<label class="combine-prompt-option">' +
-            '<input type="checkbox" class="card-combine-first" /> Combine with prompt' +
-          '</label>' +
-          '<textarea class="card-system-prompt" rows="2" placeholder="e.g. You are a helpful assistant."></textarea>' +
-        '</details>' +
-        '<div class="prompt-input-wrap card-image-upload-area">' +
-          '<textarea class="card-prompt" rows="4" placeholder="Enter your prompt here... (drag images onto this box)"></textarea>' +
-          '<div class="prompt-input-toolbar">' +
-            '<button type="button" class="btn-attach card-btn-attach" title="Attach images">&#128206;</button>' +
-            '<span class="attach-hint card-attach-hint"></span>' +
-          '</div>' +
+      // ── Body (hidden by default, shown on expand) ──
+      '<div class="prompt-card-body collapsed">' +
+        '<textarea class="card-prompt" rows="3" placeholder="Enter prompt..."></textarea>' +
+        '<div class="card-sys-row">' +
+          '<label class="card-sys-label">System</label>' +
+          '<input type="text" class="card-system-prompt" placeholder="System prompt (optional)" />' +
+          '<label class="card-combine-label"><input type="checkbox" class="card-combine-first" /> Combine</label>' +
         '</div>' +
-        '<div class="image-thumbnails card-image-thumbnails"></div>' +
-        '<details class="card-settings-details">' +
-          '<summary>Settings</summary>' +
-          '<div class="card-settings-grid">' +
-            '<div class="card-setting"><label>Windows</label><input type="number" class="card-window-count" value="4" min="1" max="12" /></div>' +
-            '<div class="card-setting"><label>Gap (sec)</label><input type="number" class="card-gap" value="30" min="5" max="300" /></div>' +
-            '<div class="card-setting"><label>Model A</label><input type="text" class="card-model-a" placeholder="optional" /></div>' +
-            '<div class="card-setting"><label>Model B</label><input type="text" class="card-model-b" placeholder="optional" /></div>' +
-            '<div class="card-setting"><label>Retain</label>' +
-              '<select class="card-retain">' +
-                '<option value="both">Both</option>' +
-                '<option value="model_a">Model A</option>' +
-                '<option value="model_b">Model B</option>' +
-              '</select>' +
-            '</div>' +
-            '<div class="card-setting"><label>Zoom %</label><input type="number" class="card-zoom" value="100" min="25" max="200" step="5" /></div>' +
-            '<div class="card-setting checkbox-group"><label><input type="checkbox" class="card-clear-cookies" /> Clear cookies</label></div>' +
-            '<div class="card-setting checkbox-group"><label><input type="checkbox" class="card-incognito" /> Incognito</label></div>' +
-            '<div class="card-setting checkbox-group"><label><input type="checkbox" class="card-simultaneous" /> Simultaneous</label></div>' +
-          '</div>' +
-        '</details>' +
+        '<div class="card-settings-row">' +
+          '<label>Win <input type="number" class="card-window-count" value="4" min="1" max="12" /></label>' +
+          '<label>Gap <input type="number" class="card-gap" value="30" min="5" max="300" /></label>' +
+          '<label>A <input type="text" class="card-model-a" placeholder="any" /></label>' +
+          '<label>B <input type="text" class="card-model-b" placeholder="any" /></label>' +
+          '<label>Retain <select class="card-retain"><option value="both">Both</option><option value="model_a">A</option><option value="model_b">B</option></select></label>' +
+          '<label>Zoom <input type="number" class="card-zoom" value="100" min="25" max="200" step="5" /></label>' +
+          '<label class="card-chk"><input type="checkbox" class="card-clear-cookies" /> Cookies</label>' +
+          '<label class="card-chk"><input type="checkbox" class="card-incognito" /> Incog</label>' +
+          '<label class="card-chk"><input type="checkbox" class="card-simultaneous" /> Simul</label>' +
+        '</div>' +
         '<div class="card-progress hidden">' +
           '<span class="card-eta">ETA: &mdash;</span>' +
           '<div class="progress-track"><div class="progress-fill card-progress-fill"></div></div>' +
           '<span class="card-progress-pct">0%</span>' +
         '</div>' +
-        '<details class="card-results-details">' +
-          '<summary>Results (<span class="card-results-count">0</span>)</summary>' +
-          '<div class="card-results-body"></div>' +
-        '</details>' +
       '</div>';
 
     var container = document.getElementById("instruction-cards-container");
     if (container) container.appendChild(el);
 
-    // Event listeners for card buttons
-    el.querySelector(".btn-card-run").addEventListener("click", function () {
+    // ── Update preview text from prompt ──
+    function updatePreview() {
+      var text = el.querySelector(".card-prompt").value.trim();
+      var preview = el.querySelector(".prompt-card-preview");
+      preview.textContent = text ? (text.length > 80 ? text.substring(0, 80) + "..." : text) : "No prompt";
+      preview.title = text || "";
+      // Update tags
+      var tags = el.querySelector(".prompt-card-tags");
+      var w = el.querySelector(".card-window-count").value;
+      var a = el.querySelector(".card-model-a").value.trim();
+      var b = el.querySelector(".card-model-b").value.trim();
+      var parts = [w + "w"];
+      if (a) parts.push(a);
+      if (b) parts.push(b);
+      tags.textContent = parts.join(" · ");
+    }
+
+    // ── Event listeners ──
+    el.querySelector(".btn-card-run").addEventListener("click", function (e) {
+      e.stopPropagation();
       var c = promptCards[cardId];
       if (c.running) {
-        // Pause/resume toggle
         if (c.pauseTransitionPending) return;
         c.pauseTransitionPending = true;
         updateCardRunState(cardId);
@@ -2492,87 +2491,35 @@ html, body { margin: 0; padding: 0; background: #fff; color: #111;
       }
     });
 
-    el.querySelector(".btn-card-stop").addEventListener("click", function () {
+    el.querySelector(".btn-card-stop").addEventListener("click", function (e) {
+      e.stopPropagation();
       stopCardRun(cardId);
     });
 
-    el.querySelector(".btn-card-collapse").addEventListener("click", function () {
+    // Toggle expand/collapse
+    function toggleBody() {
       var body = el.querySelector(".prompt-card-body");
       var btn = el.querySelector(".btn-card-collapse");
       body.classList.toggle("collapsed");
-      btn.innerHTML = body.classList.contains("collapsed") ? "&#9654;" : "&#9660;";
-    });
-
-    // Image upload handling for this card
-    var cardUploadArea = el.querySelector(".card-image-upload-area");
-    var cardAttachBtn = el.querySelector(".card-btn-attach");
-    var cardThumbnails = el.querySelector(".card-image-thumbnails");
-    var cardAttachHint = el.querySelector(".card-attach-hint");
-
-    function addCardImage(file) {
-      if (card._uploadedImages.length >= 10) return;
-      if (file.size > 5 * 1024 * 1024) return;
-
-      var reader = new FileReader();
-      reader.onload = function (e) {
-        var base64 = e.target.result.split(",")[1];
-        card._uploadedImages.push({
-          data: base64,
-          mime_type: file.type,
-          filename: file.name,
-        });
-        cardAttachHint.textContent = card._uploadedImages.length + " image(s)";
-        // Render thumbnail
-        var thumb = document.createElement("div");
-        thumb.className = "image-thumb";
-        var idx = card._uploadedImages.length - 1;
-        thumb.innerHTML = '<img src="' + e.target.result + '" /><button class="thumb-remove" data-idx="' + idx + '">&times;</button>';
-        thumb.querySelector(".thumb-remove").addEventListener("click", function () {
-          card._uploadedImages.splice(idx, 1);
-          thumb.remove();
-          cardAttachHint.textContent = card._uploadedImages.length > 0 ? card._uploadedImages.length + " image(s)" : "";
-        });
-        cardThumbnails.appendChild(thumb);
-      };
-      reader.readAsDataURL(file);
+      btn.innerHTML = body.classList.contains("collapsed") ? "&#9660;" : "&#9650;";
     }
 
-    cardUploadArea.addEventListener("dragover", function (e) {
-      e.preventDefault();
-      cardUploadArea.classList.add("drag-over");
-    });
-    cardUploadArea.addEventListener("dragleave", function () {
-      cardUploadArea.classList.remove("drag-over");
-    });
-    cardUploadArea.addEventListener("drop", function (e) {
-      e.preventDefault();
-      cardUploadArea.classList.remove("drag-over");
-      Array.from(e.dataTransfer.files).forEach(function (f) {
-        if (f.type.startsWith("image/")) addCardImage(f);
-      });
-    });
-    cardAttachBtn.addEventListener("click", function () {
-      var inp = document.createElement("input");
-      inp.type = "file";
-      inp.accept = "image/png,image/jpeg,image/webp,image/gif";
-      inp.multiple = true;
-      inp.onchange = function () { Array.from(inp.files).forEach(addCardImage); };
-      inp.click();
+    el.querySelector(".btn-card-collapse").addEventListener("click", function (e) {
+      e.stopPropagation();
+      toggleBody();
     });
 
-    // Save settings on card input changes
-    el.querySelector(".card-prompt").addEventListener("input", saveSettings);
-    el.querySelector(".card-system-prompt").addEventListener("input", saveSettings);
-    el.querySelector(".card-combine-first").addEventListener("change", saveSettings);
-    el.querySelector(".card-window-count").addEventListener("input", saveSettings);
-    el.querySelector(".card-gap").addEventListener("input", saveSettings);
-    el.querySelector(".card-model-a").addEventListener("input", saveSettings);
-    el.querySelector(".card-model-b").addEventListener("input", saveSettings);
-    el.querySelector(".card-retain").addEventListener("change", saveSettings);
-    el.querySelector(".card-zoom").addEventListener("input", saveSettings);
-    el.querySelector(".card-clear-cookies").addEventListener("change", saveSettings);
-    el.querySelector(".card-incognito").addEventListener("change", saveSettings);
-    el.querySelector(".card-simultaneous").addEventListener("change", saveSettings);
+    // Click header to toggle too
+    el.querySelector(".prompt-card-header").addEventListener("click", toggleBody);
+
+    // Sync preview on input changes
+    el.querySelector(".card-prompt").addEventListener("input", updatePreview);
+    el.querySelector(".card-window-count").addEventListener("input", updatePreview);
+    el.querySelector(".card-model-a").addEventListener("input", updatePreview);
+    el.querySelector(".card-model-b").addEventListener("input", updatePreview);
+
+    // Init preview
+    updatePreview();
 
     return cardId;
   }
