@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "saved_at": "2026-04-03T09:09:04.650183+00:00",
+  "saved_at": "2026-04-03T09:10:33.581422+00:00",
   "max_healthy": 20,
   "max_latency_ms": 5000.0,
   "auto_refresh_enabled": true,
@@ -13,128 +13,128 @@
       "username": null,
       "password": null,
       "healthy": true,
-      "last_checked": 1775207320.2679756,
+      "last_checked": 1775207410.2737427,
       "fail_count": 0,
       "source": "auto_fetch",
-      "latency_ms": 199.1
+      "latency_ms": 200.1
     },
     {
       "server": "http://167.103.31.122:8800",
       "username": null,
       "password": null,
       "healthy": true,
-      "last_checked": 1775207320.2679899,
+      "last_checked": 1775207410.2737603,
       "fail_count": 0,
       "source": "auto_fetch",
-      "latency_ms": 308.6
-    },
-    {
-      "server": "http://113.160.132.26:8080",
-      "username": null,
-      "password": null,
-      "healthy": true,
-      "last_checked": 1775207320.2679935,
-      "fail_count": 0,
-      "source": "auto_fetch",
-      "latency_ms": 509.0
-    },
-    {
-      "server": "http://180.250.219.58:53281",
-      "username": null,
-      "password": null,
-      "healthy": true,
-      "last_checked": 1775207320.267999,
-      "fail_count": 0,
-      "source": "auto_fetch",
-      "latency_ms": 529.4
-    },
-    {
-      "server": "http://167.103.144.127:8800",
-      "username": null,
-      "password": null,
-      "healthy": true,
-      "last_checked": 1775207320.2679954,
-      "fail_count": 0,
-      "source": "auto_fetch",
-      "latency_ms": 591.1
-    },
-    {
-      "server": "http://1.231.81.166:3128",
-      "username": null,
-      "password": null,
-      "healthy": true,
-      "last_checked": 1775207320.2679913,
-      "fail_count": 0,
-      "source": "auto_fetch",
-      "latency_ms": 673.0
+      "latency_ms": 310.6
     },
     {
       "server": "http://203.80.138.81:50000",
       "username": null,
       "password": null,
       "healthy": true,
-      "last_checked": 1775207320.268256,
+      "last_checked": 1775207410.2740083,
       "fail_count": 0,
       "source": "auto_fetch",
-      "latency_ms": 694.5
+      "latency_ms": 396.6
     },
     {
-      "server": "http://147.161.239.240:8800",
+      "server": "http://113.160.132.26:8080",
       "username": null,
       "password": null,
       "healthy": true,
-      "last_checked": 1775207320.2679973,
+      "last_checked": 1775207410.2737648,
       "fail_count": 0,
       "source": "auto_fetch",
-      "latency_ms": 737.0
+      "latency_ms": 496.1
     },
     {
       "server": "http://159.223.71.162:8080",
       "username": null,
       "password": null,
       "healthy": true,
+      "last_checked": 1775207410.2740126,
+      "fail_count": 0,
+      "source": "auto_fetch",
+      "latency_ms": 536.5
+    },
+    {
+      "server": "http://1.231.81.166:3128",
+      "username": null,
+      "password": null,
+      "healthy": true,
+      "last_checked": 1775207410.2737622,
+      "fail_count": 0,
+      "source": "auto_fetch",
+      "latency_ms": 563.4
+    },
+    {
+      "server": "http://167.103.144.127:8800",
+      "username": null,
+      "password": null,
+      "healthy": true,
+      "last_checked": 1775207410.2737675,
+      "fail_count": 0,
+      "source": "auto_fetch",
+      "latency_ms": 586.6
+    },
+    {
+      "server": "http://147.161.239.240:8800",
+      "username": null,
+      "password": null,
+      "healthy": true,
+      "last_checked": 1775207410.2737694,
+      "fail_count": 0,
+      "source": "auto_fetch",
+      "latency_ms": 592.3
+    },
+    {
+      "server": "http://180.250.219.58:53281",
+      "username": null,
+      "password": null,
+      "healthy": true,
+      "last_checked": 1775207410.2737713,
+      "fail_count": 0,
+      "source": "auto_fetch",
+      "latency_ms": 593.3
+    },
+    {
+      "server": "http://186.248.239.154:3128",
+      "username": null,
+      "password": null,
+      "healthy": true,
       "last_checked": null,
       "fail_count": 0,
       "source": "auto_fetch",
-      "latency_ms": 2496.5
+      "latency_ms": 3435.5
     },
     {
       "server": "http://150.107.140.238:3128",
       "username": null,
       "password": null,
       "healthy": true,
-      "last_checked": 1775207320.2679877,
+      "last_checked": 1775207410.2737575,
       "fail_count": 0,
       "source": "auto_fetch",
-      "latency_ms": 2530.3
-    },
-    {
-      "server": "http://116.80.95.238:7777",
-      "username": null,
-      "password": null,
-      "healthy": true,
-      "last_checked": 1775207320.268005,
-      "fail_count": 0,
-      "source": "auto_fetch",
-      "latency_ms": 2701.1
+      "latency_ms": 3968.6
     },
     {
       "server": "http://116.80.65.78:3172",
       "username": null,
       "password": null,
       "healthy": true,
-      "last_checked": 1775207320.2680016,
-      "fail_count": 1,
+      "last_checked": 1775207410.2739952,
+      "fail_count": 2,
       "source": "auto_fetch",
       "latency_ms": null
     },
     {
-      "server": "http://178.218.105.99:3128",
+      "server": "http://116.80.95.238:7777",
       "username": null,
       "password": null,
       "healthy": true,
-      "last_checked": 1775207320.2680006,
-      "fail_count": 2,
+      "last_checked": 1775207410.2740002,
+      "fail_count": 1,
       "source": "auto_fetch",
       "latency_ms": null
     },
@@ -143,8 +143,8 @@
       "username": null,
       "password": null,
       "healthy": false,
-      "last_checked": 1775207320.2680087,
-      "fail_count": 3,
+      "last_checked": 1775207410.2740045,
+      "fail_count": 4,
       "source": "auto_fetch",
       "latency_ms": null
     },
@@ -153,8 +153,8 @@
       "username": null,
       "password": null,
       "healthy": false,
-      "last_checked": 1775207320.2679691,
-      "fail_count": 6,
+      "last_checked": 1775207410.2737346,
+      "fail_count": 7,
       "source": "auto_fetch",
       "latency_ms": null
     },
@@ -163,8 +163,8 @@
       "username": null,
       "password": null,
       "healthy": false,
-      "last_checked": 1775207320.268003,
-      "fail_count": 5,
+      "last_checked": 1775207410.2739978,
+      "fail_count": 6,
       "source": "auto_fetch",
       "latency_ms": null
     },
@@ -173,8 +173,8 @@
       "username": null,
       "password": null,
       "healthy": false,
-      "last_checked": 1775207320.2680066,
-      "fail_count": 11,
+      "last_checked": 1775207410.2740016,
+      "fail_count": 12,
       "source": "auto_fetch",
       "latency_ms": null
     },
@@ -183,8 +183,8 @@
       "username": null,
       "password": null,
       "healthy": false,
-      "last_checked": 1775207320.2680042,
-      "fail_count": 5,
+      "last_checked": 1775207410.2739992,
+      "fail_count": 6,
       "source": "auto_fetch",
       "latency_ms": null
     },
@@ -193,8 +193,8 @@
       "username": null,
       "password": null,
       "healthy": false,
-      "last_checked": 1775207320.2680078,
-      "fail_count": 18,
+      "last_checked": 1775207410.2740033,
+      "fail_count": 19,
       "source": "auto_fetch",
       "latency_ms": null
     },
@@ -203,8 +203,8 @@
       "username": null,
       "password": null,
       "healthy": false,
-      "last_checked": 1775207320.2682266,
-      "fail_count": 3,
+      "last_checked": 1775207410.2740068,
+      "fail_count": 4,
       "source": "auto_fetch",
       "latency_ms": null
     }

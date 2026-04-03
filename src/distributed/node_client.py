@@ -13,6 +13,7 @@ import signal
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
+from contextlib import suppress
 from typing import Any, Dict, List, Optional
 
 import websockets
@@ -339,8 +340,7 @@ class NodeClient:
         if worker_id in self._slots:
             # Cancel existing worker in this slot
             old_slot = self._slots[worker_id]
-            if old_slot.task and not old_slot.task.done():
-                old_slot.task.cancel()
+            await self._cancel_slot(old_slot, reason="reassigned")
 
         if len(self._slots) >= self._max_workers:
             logger.warning(
@@ -582,10 +582,8 @@ class NodeClient:
     ) -> None:
         """Cancel a specific worker."""
         slot = self._slots.get(payload.worker_id)
-        if slot and slot.worker:
-            await slot.worker.cancel()
-            if slot.task and not slot.task.done():
-                slot.task.cancel()
+        if slot:
+            await self._cancel_slot(slot, reason="cancelled")
             logger.info("Worker %d cancelled", payload.worker_id)
 
     async def _handle_cancel_all(
@@ -594,10 +592,7 @@ class NodeClient:
         """Cancel all workers for a run."""
         for slot in list(self._slots.values()):
             if slot.run_id == payload.run_id:
-                if slot.worker:
-                    await slot.worker.cancel()
-                if slot.task and not slot.task.done():
-                    slot.task.cancel()
+                await self._cancel_slot(slot, reason="cancelled")
         logger.info("All workers cancelled for run %s", payload.run_id)
 
     async def _handle_pause_worker(
@@ -699,6 +694,23 @@ class NodeClient:
             logger.debug("Error closing context for worker %d", worker_id, exc_info=True)
 
         del self._slots[worker_id]
+
+    async def _cancel_slot(
+        self,
+        slot: LocalWorkerSlot,
+        reason: str = "cancelled",
+    ) -> None:
+        """Cancel a worker slot and eagerly close its browser context."""
+        if slot.worker:
+            with suppress(Exception):
+                await slot.worker.cancel()
+
+        if slot.task and not slot.task.done():
+            slot.task.cancel()
+            with suppress(asyncio.CancelledError, Exception):
+                await slot.task
+
+        await self._cleanup_slot(slot.worker_id)
 
     async def _report_proxy(
         self,
