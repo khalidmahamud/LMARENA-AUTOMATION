@@ -3097,6 +3097,13 @@ html, body { margin: 0; padding: 0; background: #fff; color: #111;
     var monW = parseInt(monitorWidthInput.value, 10) || screen.availWidth || 1920;
     var monH = parseInt(monitorHeightInput.value, 10) || screen.availHeight || 1080;
 
+    // Pre-create run-scoped worker cards and rows for this instruction card
+    // so queued windows are visible before the first worker_update arrives.
+    for (var wid = 0; wid < windowCount; wid++) {
+      ensureWorkerCard(wid, cardId);
+      ensureResultRow(wid, cardId);
+    }
+
     // Build message
     var msg = {
       type: "start_run",
