@@ -71,6 +71,17 @@ class LoginDialogError(BrowserError):
         super().__init__(message, worker_id)
 
 
+class GenerationFailedBannerError(BrowserError):
+    """Arena showed a generation-failed banner, requiring window recreation."""
+
+    def __init__(
+        self,
+        worker_id: int,
+        message: str = "Generation failed banner detected",
+    ):
+        super().__init__(message, worker_id)
+
+
 class SelectorNotFoundError(BrowserError):
     """Expected DOM selector not found on page."""
 

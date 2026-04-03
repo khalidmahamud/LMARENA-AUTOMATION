@@ -144,14 +144,22 @@ class WsBroadcaster:
             return RunResumedMessage(run_id=rid)
 
         if event.type == EventType.CHALLENGE_DETECTED:
+            challenge_type = d.get("challenge_type", "unknown")
+            if challenge_type == "generation_error":
+                message = (
+                    f"Generation failed on window {event.worker_id}. "
+                    "Automatic recovery is in progress."
+                )
+            else:
+                message = (
+                    f"Challenge detected on window {event.worker_id}. "
+                    "Automatic recovery is in progress."
+                )
             return ChallengeDetectedMessage(
                 run_id=rid,
                 worker_id=event.worker_id or 0,
-                challenge_type=d.get("challenge_type", "unknown"),
-                message=(
-                    f"Challenge detected on window {event.worker_id}. "
-                    "Automatic recovery is in progress."
-                ),
+                challenge_type=challenge_type,
+                message=message,
             )
 
         if event.type == EventType.TOAST:

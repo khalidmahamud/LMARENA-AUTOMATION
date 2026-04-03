@@ -203,6 +203,7 @@ class RunOrchestrator:
             windows_per_proxy=request.windows_per_proxy,
             zoom_pct=request.zoom_pct,
             run_id=run_id,
+            layout_group_id=request.layout_group_id,
             total_windows=request.total_windows,
             tile_offset=request.tile_offset or 0,
         )
@@ -1458,8 +1459,8 @@ class RunOrchestrator:
                 data={
                     "level": "warning",
                     "text": (
-                        f"Worker {worker_idx}: attempting recovery — "
-                        "reopening browser and retrying prompt"
+                        f"Worker {worker_idx}: starting recovery for batch "
+                        f"{batch_idx + 1}; recreating the browser context and replaying the prompt"
                     ),
                 },
             )
@@ -1481,6 +1482,19 @@ class RunOrchestrator:
                 return result
 
             try:
+                await self._publish(
+                    Event(
+                        type=EventType.LOG,
+                        worker_id=worker_idx,
+                        data={
+                            "level": "info",
+                            "text": (
+                                f"Worker {worker_idx}: recovery reset attempt "
+                                f"{attempt}/{max_context_retries}"
+                            ),
+                        },
+                    )
+                )
                 await worker.reset_with_fresh_context(
                     zoom_pct=request.zoom_pct,
                     clear_cookies=request.clear_cookies,
@@ -1537,6 +1551,18 @@ class RunOrchestrator:
             recovery_baseline: Optional[Tuple[str, str]] = None
             if system_prompt:
                 await self._wait_if_paused()
+                await self._publish(
+                    Event(
+                        type=EventType.LOG,
+                        worker_id=worker_idx,
+                        data={
+                            "level": "info",
+                            "text": (
+                                f"Worker {worker_idx}: replaying the system prompt during recovery"
+                            ),
+                        },
+                    )
+                )
                 await worker.submit_prompt(
                     prompt=system_prompt,
                     model_a=request.model_a,
@@ -1560,10 +1586,34 @@ class RunOrchestrator:
                     await self._publish_failed_worker_result(worker, result)
                     return result
                 await self._wait_if_paused()
+                await self._publish(
+                    Event(
+                        type=EventType.LOG,
+                        worker_id=worker_idx,
+                        data={
+                            "level": "info",
+                            "text": (
+                                f"Worker {worker_idx}: system prompt replay completed; preparing the follow-up composer"
+                            ),
+                        },
+                    )
+                )
                 recovery_baseline = await worker.prepare_for_followup_prompt()
 
             # Submit actual prompt
             await self._wait_if_paused()
+            await self._publish(
+                Event(
+                    type=EventType.LOG,
+                    worker_id=worker_idx,
+                    data={
+                        "level": "info",
+                        "text": (
+                            f"Worker {worker_idx}: replaying the original prompt during recovery"
+                        ),
+                    },
+                )
+            )
             await worker.submit_prompt(
                 prompt=prompt,
                 model_a=None if system_prompt else request.model_a,
@@ -1573,12 +1623,37 @@ class RunOrchestrator:
             )
 
             # Poll for completion
+            await self._publish(
+                Event(
+                    type=EventType.LOG,
+                    worker_id=worker_idx,
+                    data={
+                        "level": "info",
+                        "text": (
+                            f"Worker {worker_idx}: recovery replay submitted; resuming polling"
+                        ),
+                    },
+                )
+            )
             result = await worker.poll_for_completion(
                 baseline_responses=recovery_baseline,
                 pause_event=self._resume_event,
             )
             result.prompt = prompt
             result.batch_index = batch_idx
+            if result.success:
+                await self._publish(
+                    Event(
+                        type=EventType.LOG,
+                        worker_id=worker_idx,
+                        data={
+                            "level": "info",
+                            "text": (
+                                f"Worker {worker_idx}: recovery completed successfully"
+                            ),
+                        },
+                    )
+                )
             if not result.success:
                 await self._publish_failed_worker_result(worker, result)
             return result

@@ -9,7 +9,12 @@ from playwright.async_api import Page
 
 from src.browser.selectors import SelectorRegistry
 from src.browser.challenges import ChallengeType, detect_challenge, detect_login_dialog
-from src.core.exceptions import LoginDialogError, PollingTimeoutError, RateLimitError
+from src.core.exceptions import (
+    GenerationFailedBannerError,
+    LoginDialogError,
+    PollingTimeoutError,
+    RateLimitError,
+)
 from src.models.config import TimingConfig
 
 logger = logging.getLogger(__name__)
@@ -109,6 +114,20 @@ class ResponsePoller:
                 raise
             except Exception:
                 pass
+
+            # Check for top-level generation failures that require a fresh window
+            try:
+                if await self._has_generation_failed_banner(page):
+                    logger.warning(
+                        "Worker %d: generation failed banner detected during polling",
+                        worker_id,
+                    )
+                    raise GenerationFailedBannerError(worker_id)
+            except GenerationFailedBannerError:
+                raise
+            except Exception:
+                if cancel_event and cancel_event.is_set():
+                    raise asyncio.CancelledError("Run cancelled")
 
             slides = await self._extract_slide_payloads(
                 page,
@@ -349,6 +368,66 @@ class ResponsePoller:
                 selector,
                 exc,
             )
+            return False
+
+    @staticmethod
+    async def _has_generation_failed_banner(page: Page) -> bool:
+        try:
+            return bool(
+                await page.evaluate(
+                    """() => {
+                        const normalize = (value) =>
+                            (value || "")
+                                .replace(/\\s+/g, " ")
+                                .trim()
+                                .toLowerCase();
+
+                        const isVisible = (el) => {
+                            if (!el) return false;
+                            const style = window.getComputedStyle(el);
+                            const rect = el.getBoundingClientRect();
+                            return (
+                                style.display !== "none" &&
+                                style.visibility !== "hidden" &&
+                                rect.width > 0 &&
+                                rect.height > 0
+                            );
+                        };
+
+                        const hasClearButton = (root) =>
+                            Array.from(root.querySelectorAll("button")).some(
+                                (btn) =>
+                                    isVisible(btn) &&
+                                    normalize(btn.innerText) === "clear"
+                            );
+
+                        return Array.from(
+                            document.querySelectorAll("div, section, aside")
+                        )
+                            .filter(isVisible)
+                            .some((node) => {
+                                const text = normalize(node.innerText);
+                                if (
+                                    !text.includes("something went wrong") ||
+                                    !text.includes("please try again")
+                                ) {
+                                    return false;
+                                }
+                                if (
+                                    !text.includes("trace id:") &&
+                                    !text.includes(
+                                        "while generating the response"
+                                    )
+                                ) {
+                                    return false;
+                                }
+                                return hasClearButton(node);
+                            });
+                    }"""
+                )
+            )
+        except Exception as exc:
+            logger.debug("Generation-failed banner detection failed: %s", exc)
             return False
 
     @staticmethod

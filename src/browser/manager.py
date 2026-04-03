@@ -4,6 +4,7 @@ import asyncio
 import logging
 import shutil
 import tempfile
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -16,6 +17,14 @@ from src.proxy.pool import ProxyPool
 logger = logging.getLogger(__name__)
 
 
+@dataclass
+class _LayoutReservation:
+    """Reserved tile range for a concurrent run group."""
+
+    base_offset: int
+    total_windows: int
+
+
 class _RunGroup:
     """Internal state for a single run's browser contexts."""
 
@@ -23,7 +32,7 @@ class _RunGroup:
         "contexts", "tiles", "profile_base", "context_dirs",
         "proxies", "proxy_on_challenge", "proxy_assign_counter",
         "context_proxies", "incognito_mode", "zoom_pct",
-        "windows_per_proxy",
+        "windows_per_proxy", "layout_group_id",
     )
 
     def __init__(self) -> None:
@@ -38,6 +47,7 @@ class _RunGroup:
         self.incognito_mode: bool = False
         self.zoom_pct: int = 100
         self.windows_per_proxy: int = 4
+        self.layout_group_id: Optional[str] = None
 
 
 class BrowserManager:
@@ -57,6 +67,8 @@ class BrowserManager:
         self._zoom_extension_dir = (Path(__file__).with_name("zoom_extension")).resolve()
         # Per-run state
         self._groups: Dict[str, _RunGroup] = {}
+        self._layout_reservations: Dict[str, _LayoutReservation] = {}
+        self._layout_lock = asyncio.Lock()
         # Backward-compat: default group key for callers that don't pass run_id
         self._default_group_key = "__default__"
 
@@ -77,6 +89,7 @@ class BrowserManager:
         windows_per_proxy: int = 4,
         zoom_pct: int = 100,
         run_id: Optional[str] = None,
+        layout_group_id: Optional[str] = None,
         total_windows: Optional[int] = None,
         tile_offset: int = 0,
     ) -> List[BrowserContext]:
@@ -91,125 +104,209 @@ class BrowserManager:
         """
         if self._playwright is None:
             raise RuntimeError("Call start() before create_contexts()")
-
-        gkey = run_id or self._default_group_key
-        # Close any previous contexts for this group
-        await self.close_contexts(run_id=gkey)
-
-        group = _RunGroup()
-
-        disp = display_override or self._config.display
-        group.incognito_mode = (
-            self._config.browser.incognito if incognito is None else incognito
-        )
-
-        if total_windows is not None:
-            # Pre-computed tiling: compute positions for the global total
-            # and slice this run's portion using tile_offset.
-            all_tiles = compute_tile_positions(
-                count=total_windows,
-                monitor_count=disp.monitor_count,
-                monitor_width=disp.monitor_width,
-                monitor_height=disp.monitor_height,
-                taskbar_height=disp.taskbar_height,
-                margin=disp.margin,
-                border_offset=disp.border_offset,
+        if total_windows is not None and tile_offset + count > total_windows:
+            raise ValueError(
+                "tile_offset + count cannot exceed total_windows"
             )
-            group.tiles = all_tiles[tile_offset : tile_offset + count]
-        else:
-            # Global tiling across all active runs to avoid overlap.
-            existing_context_entries: list[tuple[str, int, BrowserContext]] = []
-            for other_key, other_group in self._groups.items():
-                for idx, ctx in enumerate(other_group.contexts):
-                    existing_context_entries.append((other_key, idx, ctx))
 
-            all_tiles = compute_tile_positions(
-                count=len(existing_context_entries) + count,
-                monitor_count=disp.monitor_count,
-                monitor_width=disp.monitor_width,
-                monitor_height=disp.monitor_height,
-                taskbar_height=disp.taskbar_height,
-                margin=disp.margin,
-                border_offset=disp.border_offset,
+        async with self._layout_lock:
+            gkey = run_id or self._default_group_key
+            await self._close_contexts_unlocked(gkey)
+
+            group = _RunGroup()
+            group.layout_group_id = layout_group_id
+
+            disp = display_override or self._config.display
+            group.incognito_mode = (
+                self._config.browser.incognito if incognito is None else incognito
             )
-            tile_cursor = 0
+
             retile_tasks: list[asyncio.Task] = []
-            for other_key, idx, ctx in existing_context_entries:
-                tile = all_tiles[tile_cursor]
-                tile_cursor += 1
-                other_group = self._groups.get(other_key)
-                if not other_group:
-                    continue
-                if len(other_group.tiles) <= idx:
-                    other_group.tiles.extend(
-                        [tile] * (idx + 1 - len(other_group.tiles))
+            if total_windows is not None and layout_group_id:
+                reservation = self._layout_reservations.get(layout_group_id)
+                if reservation is None:
+                    existing_context_entries = self._collect_existing_context_entries()
+                    reservation = _LayoutReservation(
+                        base_offset=len(existing_context_entries),
+                        total_windows=total_windows,
                     )
-                else:
-                    other_group.tiles[idx] = tile
-                retile_tasks.append(asyncio.create_task(self._retile_context(ctx, tile)))
+                    self._layout_reservations[layout_group_id] = reservation
+                    all_tiles = compute_tile_positions(
+                        count=reservation.base_offset + reservation.total_windows,
+                        monitor_count=disp.monitor_count,
+                        monitor_width=disp.monitor_width,
+                        monitor_height=disp.monitor_height,
+                        taskbar_height=disp.taskbar_height,
+                        margin=disp.margin,
+                        border_offset=disp.border_offset,
+                    )
+                    for tile_idx, (other_key, idx, ctx) in enumerate(existing_context_entries):
+                        tile = all_tiles[tile_idx]
+                        other_group = self._groups.get(other_key)
+                        if not other_group:
+                            continue
+                        if len(other_group.tiles) <= idx:
+                            other_group.tiles.extend(
+                                [tile] * (idx + 1 - len(other_group.tiles))
+                            )
+                        else:
+                            other_group.tiles[idx] = tile
+                        retile_tasks.append(
+                            asyncio.create_task(self._retile_context(ctx, tile))
+                        )
 
-            group.tiles = all_tiles[tile_cursor : tile_cursor + count]
+                all_tiles = compute_tile_positions(
+                    count=reservation.base_offset + reservation.total_windows,
+                    monitor_count=disp.monitor_count,
+                    monitor_width=disp.monitor_width,
+                    monitor_height=disp.monitor_height,
+                    taskbar_height=disp.taskbar_height,
+                    margin=disp.margin,
+                    border_offset=disp.border_offset,
+                )
+                start = reservation.base_offset + tile_offset
+                group.tiles = all_tiles[start : start + count]
+            elif total_windows is not None:
+                # Backward-compatible pre-computed tiling for a single run.
+                all_tiles = compute_tile_positions(
+                    count=total_windows,
+                    monitor_count=disp.monitor_count,
+                    monitor_width=disp.monitor_width,
+                    monitor_height=disp.monitor_height,
+                    taskbar_height=disp.taskbar_height,
+                    margin=disp.margin,
+                    border_offset=disp.border_offset,
+                )
+                group.tiles = all_tiles[tile_offset : tile_offset + count]
+            else:
+                # Global tiling across all active runs to avoid overlap.
+                existing_context_entries = self._collect_existing_context_entries()
+                all_tiles = compute_tile_positions(
+                    count=len(existing_context_entries) + count,
+                    monitor_count=disp.monitor_count,
+                    monitor_width=disp.monitor_width,
+                    monitor_height=disp.monitor_height,
+                    taskbar_height=disp.taskbar_height,
+                    margin=disp.margin,
+                    border_offset=disp.border_offset,
+                )
+                tile_cursor = 0
+                for other_key, idx, ctx in existing_context_entries:
+                    tile = all_tiles[tile_cursor]
+                    tile_cursor += 1
+                    other_group = self._groups.get(other_key)
+                    if not other_group:
+                        continue
+                    if len(other_group.tiles) <= idx:
+                        other_group.tiles.extend(
+                            [tile] * (idx + 1 - len(other_group.tiles))
+                        )
+                    else:
+                        other_group.tiles[idx] = tile
+                    retile_tasks.append(
+                        asyncio.create_task(self._retile_context(ctx, tile))
+                    )
+
+                group.tiles = all_tiles[tile_cursor : tile_cursor + count]
+
+            self._groups[gkey] = group
+
             if retile_tasks:
                 await asyncio.gather(*retile_tasks, return_exceptions=True)
 
-        self._groups[gkey] = group
+            group.proxies = proxies or []
+            group.proxy_on_challenge = proxy_on_challenge
+            group.proxy_assign_counter = 0
+            group.context_proxies.clear()
+            group.zoom_pct = max(25, min(200, int(zoom_pct)))
+            group.windows_per_proxy = max(1, int(windows_per_proxy))
 
-        group.proxies = proxies or []
-        group.proxy_on_challenge = proxy_on_challenge
-        group.proxy_assign_counter = 0
-        group.context_proxies.clear()
-        group.zoom_pct = max(25, min(200, int(zoom_pct)))
-        group.windows_per_proxy = max(1, int(windows_per_proxy))
+            # Seed the pool with manually provided proxies
+            if group.proxies and self._proxy_pool:
+                self._proxy_pool.add_proxies(group.proxies, source="manual")
 
-        # Seed the pool with manually provided proxies
-        if group.proxies and self._proxy_pool:
-            self._proxy_pool.add_proxies(group.proxies, source="manual")
+            self._tmp_root.mkdir(parents=True, exist_ok=True)
+            group.profile_base = Path(
+                tempfile.mkdtemp(prefix="arena_run_", dir=str(self._tmp_root))
+            )
+            group.context_dirs.clear()
 
-        self._tmp_root.mkdir(parents=True, exist_ok=True)
-        group.profile_base = Path(
-            tempfile.mkdtemp(prefix="arena_run_", dir=str(self._tmp_root))
-        )
-        group.context_dirs.clear()
-
-        for i in range(count):
-            tile = group.tiles[i]
-            profile_dir = Path(
-                tempfile.mkdtemp(
-                    prefix=f"context_{i}_",
-                    dir=str(group.profile_base),
+            for i in range(count):
+                tile = group.tiles[i]
+                profile_dir = Path(
+                    tempfile.mkdtemp(
+                        prefix=f"context_{i}_",
+                        dir=str(group.profile_base),
+                    )
                 )
-            )
-            # If proxy_on_challenge, proactively distribute proxies across windows
-            if group.proxy_on_challenge:
-                proxy = self._assign_proactive_proxy(group, i)
-            else:
-                proxy = group.proxies[i % len(group.proxies)] if group.proxies else None
-            ctx = await self._launch_context(
-                profile_dir, tile, proxy=proxy,
-                incognito_mode=group.incognito_mode,
-                zoom_pct=group.zoom_pct,
-            )
+                # If proxy_on_challenge, proactively distribute proxies across windows
+                if group.proxy_on_challenge:
+                    proxy = self._assign_proactive_proxy(group, i)
+                else:
+                    proxy = (
+                        group.proxies[i % len(group.proxies)]
+                        if group.proxies else None
+                    )
+                ctx = await self._launch_context(
+                    profile_dir, tile, proxy=proxy,
+                    incognito_mode=group.incognito_mode,
+                    zoom_pct=group.zoom_pct,
+                )
 
-            group.contexts.append(ctx)
-            group.context_dirs[i] = profile_dir
-            group.context_proxies[i] = proxy.get("server") if proxy else None
+                group.contexts.append(ctx)
+                group.context_dirs[i] = profile_dir
+                group.context_proxies[i] = proxy.get("server") if proxy else None
+                logger.info(
+                    "Context %d (run=%s) launched at (%d, %d) size %dx%d",
+                    i, gkey[:8], tile.x, tile.y, tile.width, tile.height,
+                )
+
+            # Log proxy distribution summary
+            proxy_summary: Dict[str, int] = {}
+            for idx in range(count):
+                key = group.context_proxies.get(idx) or "bare-ip"
+                proxy_summary[key] = proxy_summary.get(key, 0) + 1
             logger.info(
-                "Context %d (run=%s) launched at (%d, %d) size %dx%d",
-                i, gkey[:8], tile.x, tile.y, tile.width, tile.height,
+                "Proxy distribution for run %s: %s",
+                gkey[:8],
+                {k: f"{v} windows" for k, v in proxy_summary.items()},
             )
 
-        # Log proxy distribution summary
-        proxy_summary: Dict[str, int] = {}
-        for idx in range(count):
-            key = group.context_proxies.get(idx) or "bare-ip"
-            proxy_summary[key] = proxy_summary.get(key, 0) + 1
-        logger.info(
-            "Proxy distribution for run %s: %s",
-            gkey[:8],
-            {k: f"{v} windows" for k, v in proxy_summary.items()},
-        )
+            return list(group.contexts)
 
-        return list(group.contexts)
+    def _collect_existing_context_entries(
+        self,
+    ) -> list[tuple[str, int, BrowserContext]]:
+        entries: list[tuple[str, int, BrowserContext]] = []
+        for other_key, other_group in self._groups.items():
+            for idx, ctx in enumerate(other_group.contexts):
+                entries.append((other_key, idx, ctx))
+        return entries
+
+    def _cleanup_layout_reservation(self, layout_group_id: Optional[str]) -> None:
+        if not layout_group_id:
+            return
+        for group in self._groups.values():
+            if group.layout_group_id == layout_group_id:
+                return
+        self._layout_reservations.pop(layout_group_id, None)
+
+    async def _close_contexts_unlocked(self, gkey: str) -> None:
+        group = self._groups.pop(gkey, None)
+        if group is None:
+            return
+
+        for ctx in group.contexts:
+            try:
+                await ctx.close()
+            except Exception:
+                pass
+        group.contexts.clear()
+        if group.profile_base and group.profile_base.exists():
+            shutil.rmtree(group.profile_base, ignore_errors=True)
+        group.context_dirs.clear()
+        self._cleanup_layout_reservation(group.layout_group_id)
+        logger.info("Browser contexts closed for run %s", gkey[:8])
 
     def _assign_proactive_proxy(
         self, group: _RunGroup, index: int
@@ -342,20 +439,8 @@ class BrowserManager:
         If *run_id* is ``None``, closes the default group for backward compat.
         """
         gkey = run_id or self._default_group_key
-        group = self._groups.pop(gkey, None)
-        if group is None:
-            return
-
-        for ctx in group.contexts:
-            try:
-                await ctx.close()
-            except Exception:
-                pass
-        group.contexts.clear()
-        if group.profile_base and group.profile_base.exists():
-            shutil.rmtree(group.profile_base, ignore_errors=True)
-        group.context_dirs.clear()
-        logger.info("Browser contexts closed for run %s", gkey[:8])
+        async with self._layout_lock:
+            await self._close_contexts_unlocked(gkey)
 
     async def close_all(self) -> None:
         """Gracefully close every context across all runs and stop Playwright."""

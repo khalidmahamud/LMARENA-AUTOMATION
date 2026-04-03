@@ -12,6 +12,7 @@ from src.browser.selectors import SelectorRegistry
 from src.core.events import Event, EventBus, EventType
 from src.core.exceptions import (
     ChallengeDetectedError,
+    GenerationFailedBannerError,
     LoginDialogError,
     NavigationError,
     PollingTimeoutError,
@@ -158,6 +159,13 @@ class ArenaWorker:
             timeout_ms = timeout_schedule[attempt - 1]
             try:
                 await self._ensure_active(pause_event)
+                await self._log(
+                    "info",
+                    (
+                        f"Navigating to Arena side-by-side page "
+                        f"(attempt {attempt}/{attempts}, timeout {timeout_ms // 1000}s)"
+                    ),
+                )
                 await self._page.goto(
                     self._config.arena_url,
                     wait_until="domcontentloaded",
@@ -496,9 +504,11 @@ class ArenaWorker:
         self._zoom_pct = zoom_pct
         await self.state_machine.transition(WorkerState.LAUNCHING)
         await self._ensure_active(pause_event)
+        await self._log("info", "Preparing browser context for Arena")
 
         # Optionally clear cookies before navigation.
         if clear_cookies:
+            await self._log("info", "Clearing cookies before Arena navigation")
             await self._clear_cookies()
 
         # Reuse the default page from persistent context (closing all pages
@@ -562,7 +572,7 @@ class ArenaWorker:
                 self._proxy_success_reporter(self._id)
 
         await self.state_machine.transition(WorkerState.READY)
-        await self._log("info", "Ready")
+        await self._log("info", "Arena page is ready for prompt entry")
 
     async def _clear_cookies(self) -> None:
         """Remove all cookies from the current browser context."""
@@ -855,6 +865,51 @@ class ArenaWorker:
     ) -> bool:
         """Aggressively accept the Arena cookie dialog when it is present."""
         assert self._page is not None
+
+        try:
+            dialog = self._page.locator("[role='dialog']").filter(
+                has_text="This website uses cookies"
+            )
+            accept_button = dialog.get_by_role("button", name="Accept Cookies")
+            if await accept_button.count() > 0:
+                await self._log(
+                    "info",
+                    "Cookie consent dialog detected; clicking 'Accept Cookies'",
+                )
+                target = accept_button.last
+                try:
+                    await target.scroll_into_view_if_needed(timeout=2_000)
+                except Exception:
+                    pass
+                await target.click(force=True, timeout=3_000)
+                await self._sleep_with_controls(0.3, pause_event)
+                return True
+        except Exception as exc:
+            await self._log(
+                "debug",
+                f"Locator-based cookie dialog click failed: {exc}",
+            )
+
+        try:
+            button = await self._find_cookie_accept_button()
+            if button is not None:
+                await self._log(
+                    "info",
+                    "Cookie consent dialog detected; clicking 'Accept Cookies'",
+                )
+                if await self._click_dialog_button(
+                    button,
+                    "cookie_accept_button",
+                    pause_event,
+                ):
+                    await self._sleep_with_controls(0.2, pause_event)
+                    return True
+        except Exception as exc:
+            await self._log(
+                "debug",
+                f"Element-handle cookie dialog click failed: {exc}",
+            )
+
         try:
             clicked = bool(
                 await self._page.evaluate(
@@ -897,9 +952,17 @@ class ArenaWorker:
             )
             if not clicked:
                 return False
+            await self._log(
+                "info",
+                "Cookie consent dialog detected; clicking 'Accept Cookies' via DOM fallback",
+            )
             await self._sleep_with_controls(0.2, pause_event)
             return True
-        except Exception:
+        except Exception as exc:
+            await self._log(
+                "debug",
+                f"DOM fallback cookie dialog click failed: {exc}",
+            )
             return False
 
     async def _dismiss_known_dialogs(
@@ -939,17 +1002,21 @@ class ArenaWorker:
                         await self._find_cookie_accept_button()
                     ) is not None
                     if not still_present:
-                        if click_counts["cookie_accept_button"] == 1:
-                            await self._log("info", "Accepted cookie dialog")
-                        else:
-                            await self._log(
-                                "debug",
-                                "Accepted cookie dialog (retry "
-                                f"{click_counts['cookie_accept_button']})",
-                            )
+                        await self._log(
+                            "info",
+                            "Cookie consent dialog closed after clicking 'Accept Cookies'",
+                        )
                         dismissed_any = True
                         dismissed_this_pass = True
                         continue
+                    await self._log(
+                        "debug",
+                        (
+                            "Cookie consent dialog is still visible after "
+                            f"click attempt {click_counts['cookie_accept_button']}; "
+                            "retrying"
+                        ),
+                    )
 
                 for selector_key, log_text in handlers:
                     if selector_key == "cookie_accept_button":
@@ -1226,6 +1293,7 @@ class ArenaWorker:
         # Paste prompt
         await self.state_machine.transition(WorkerState.PASTING)
         await self._ensure_active(pause_event)
+        await self._log("info", "Entering prompt text into the Arena composer")
         textarea_sel = self._selectors.get("prompt_textarea")
         has_images = bool(images)
         try:
@@ -1259,17 +1327,21 @@ class ArenaWorker:
                 pause_event=pause_event,
                 images=images,
             )
-        await self._log("info", "Prompt pasted")
+        await self._log("info", "Prompt text entered into the Arena composer")
 
         # Paste images if provided
         if has_images:
+            await self._log(
+                "info",
+                f"Pasting {len(images)} image(s) into the Arena composer",
+            )
             await self._human.paste_images(
                 self._page, prompt_element, images,
             )
-            await self._log("info", f"Pasted {len(images)} image(s)")
+            await self._log("info", f"Attached {len(images)} image(s) to the prompt")
 
         await self.state_machine.transition(WorkerState.PREPARED)
-        await self._log("info", "Prompt prepared")
+        await self._log("info", "Prompt composer is ready for submission")
 
     async def submit_prepared_prompt(
         self,
@@ -1300,6 +1372,10 @@ class ArenaWorker:
         last_snapshot: Optional[dict] = None
 
         for attempt in range(1, 4):
+            await self._log(
+                "info",
+                f"Submitting prepared prompt (attempt {attempt}/3)",
+            )
             prompt_element = await self._page.wait_for_selector(
                 textarea_sel,
                 state="visible",
@@ -1444,7 +1520,10 @@ class ArenaWorker:
                 self._id,
             )
 
-        await self._log("info", "Submitted")
+        await self._log(
+            "info",
+            "Prompt submission accepted; switching to response polling",
+        )
 
         # Transition to polling
         await self.state_machine.transition(WorkerState.POLLING)
@@ -2219,7 +2298,7 @@ class ArenaWorker:
         self,
         baseline_responses: Optional[tuple[str, str]] = None,
         pause_event: Optional[asyncio.Event] = None,
-        _rate_limit_retries: int = 2,
+        _recovery_retries: int = 2,
         _poll_timeout_retries: int = 1,
         _poll_timeout_override_seconds: Optional[float] = None,
     ) -> WindowResult:
@@ -2295,129 +2374,58 @@ class ArenaWorker:
             )
             return self._result
 
-        except RateLimitError:
-            if _rate_limit_retries <= 0 or self._context_recreator is None:
-                raise  # fall through to general handler below
+        except GenerationFailedBannerError:
+            if _recovery_retries <= 0 or self._context_recreator is None:
+                raise
 
-            await self._log(
-                "warning",
-                "Rate limit hit — closing window, reopening fresh, and retrying",
-            )
-            await self._publish(
-                Event(
-                    type=EventType.CHALLENGE_DETECTED,
-                    worker_id=self._id,
-                    data={"challenge_type": "rate_limit"},
-                )
-            )
-
-            # Transition to WAITING_FOR_CHALLENGE (allowed from POLLING)
-            await self.state_machine.transition(
-                WorkerState.WAITING_FOR_CHALLENGE
-            )
-
-            # Close and reopen window
-            self._context = await self._context_recreator(self._id)
-            self._page = (
-                self._context.pages[0]
-                if self._context.pages
-                else await self._context.new_page()
-            )
-            await self._log_current_proxy("Rate-limit retry proxy")
-
-            # Re-navigate
-            await self.state_machine.transition(WorkerState.NAVIGATING)
-            await self._log("info", "Fresh window opened; navigating back to Arena")
-            await self._goto_arena_with_retries(
-                pause_event=pause_event,
-                max_attempts=2,
-            )
-
-            await self._stabilize_loaded_page(
-                pause_event=pause_event,
-                dialog_wait_seconds=5.0,
-            )
-
-            await self._publish(
-                Event(type=EventType.CHALLENGE_RESOLVED, worker_id=self._id)
-            )
-
-            # Re-submit the same prompt
-            await self.state_machine.transition(WorkerState.READY)
-            await self.submit_prompt(
-                prompt=self._last_prompt,
-                model_a=self._last_model_a,
-                model_b=self._last_model_b,
-                pause_event=pause_event,
-            )
-
-            # Re-poll with decremented retry count
-            return await self.poll_for_completion(
+            return await self._recover_from_polling_restart(
+                reason_text=(
+                    "Generation failed banner detected — closing window, "
+                    "reopening fresh, and retrying"
+                ),
+                recovery_type="generation_error",
+                proxy_log_context="Generation-error retry proxy",
                 baseline_responses=baseline_responses,
                 pause_event=pause_event,
-                _rate_limit_retries=_rate_limit_retries - 1,
-                _poll_timeout_retries=_poll_timeout_retries,
-                _poll_timeout_override_seconds=_poll_timeout_override_seconds,
+                recovery_retries=_recovery_retries,
+                poll_timeout_retries=_poll_timeout_retries,
+                poll_timeout_override_seconds=_poll_timeout_override_seconds,
+            )
+
+        except RateLimitError:
+            if _recovery_retries <= 0 or self._context_recreator is None:
+                raise  # fall through to general handler below
+
+            return await self._recover_from_polling_restart(
+                reason_text=(
+                    "Rate limit hit — closing window, reopening fresh, "
+                    "and retrying"
+                ),
+                recovery_type="rate_limit",
+                proxy_log_context="Rate-limit retry proxy",
+                baseline_responses=baseline_responses,
+                pause_event=pause_event,
+                recovery_retries=_recovery_retries,
+                poll_timeout_retries=_poll_timeout_retries,
+                poll_timeout_override_seconds=_poll_timeout_override_seconds,
             )
 
         except LoginDialogError:
-            if _rate_limit_retries <= 0 or self._context_recreator is None:
+            if _recovery_retries <= 0 or self._context_recreator is None:
                 raise
 
-            await self._log(
-                "warning",
-                "Login dialog detected — closing window, reopening fresh, and retrying",
-            )
-            await self._publish(
-                Event(
-                    type=EventType.CHALLENGE_DETECTED,
-                    worker_id=self._id,
-                    data={"challenge_type": "login_wall"},
-                )
-            )
-
-            await self.state_machine.transition(
-                WorkerState.WAITING_FOR_CHALLENGE
-            )
-
-            self._context = await self._context_recreator(self._id)
-            self._page = (
-                self._context.pages[0]
-                if self._context.pages
-                else await self._context.new_page()
-            )
-            await self._log_current_proxy("Login-wall retry proxy")
-
-            await self.state_machine.transition(WorkerState.NAVIGATING)
-            await self._log("info", "Fresh window opened; navigating back to Arena")
-            await self._goto_arena_with_retries(
-                pause_event=pause_event,
-                max_attempts=2,
-            )
-
-            await self._stabilize_loaded_page(
-                pause_event=pause_event,
-                dialog_wait_seconds=5.0,
-            )
-
-            await self._publish(
-                Event(type=EventType.CHALLENGE_RESOLVED, worker_id=self._id)
-            )
-
-            await self.state_machine.transition(WorkerState.READY)
-            await self.submit_prompt(
-                prompt=self._last_prompt,
-                model_a=self._last_model_a,
-                model_b=self._last_model_b,
-                pause_event=pause_event,
-            )
-
-            return await self.poll_for_completion(
+            return await self._recover_from_polling_restart(
+                reason_text=(
+                    "Login dialog detected — closing window, reopening "
+                    "fresh, and retrying"
+                ),
+                recovery_type="login_wall",
+                proxy_log_context="Login-wall retry proxy",
                 baseline_responses=baseline_responses,
                 pause_event=pause_event,
-                _rate_limit_retries=_rate_limit_retries - 1,
-                _poll_timeout_retries=_poll_timeout_retries,
-                _poll_timeout_override_seconds=_poll_timeout_override_seconds,
+                recovery_retries=_recovery_retries,
+                poll_timeout_retries=_poll_timeout_retries,
+                poll_timeout_override_seconds=_poll_timeout_override_seconds,
             )
 
         except PollingTimeoutError as exc:
@@ -2432,7 +2440,7 @@ class ArenaWorker:
                 return await self.poll_for_completion(
                     baseline_responses=baseline_responses,
                     pause_event=pause_event,
-                    _rate_limit_retries=_rate_limit_retries,
+                    _recovery_retries=_recovery_retries,
                     _poll_timeout_retries=_poll_timeout_retries - 1,
                     _poll_timeout_override_seconds=120.0,
                 )
@@ -2473,6 +2481,87 @@ class ArenaWorker:
                 )
             )
             return self._result
+
+    async def _recover_from_polling_restart(
+        self,
+        *,
+        reason_text: str,
+        recovery_type: str,
+        proxy_log_context: str,
+        baseline_responses: Optional[tuple[str, str]],
+        pause_event: Optional[asyncio.Event],
+        recovery_retries: int,
+        poll_timeout_retries: int,
+        poll_timeout_override_seconds: Optional[float],
+    ) -> WindowResult:
+        assert self._context_recreator is not None
+        assert self._last_prompt is not None
+
+        await self._log("warning", reason_text)
+        await self._publish(
+            Event(
+                type=EventType.CHALLENGE_DETECTED,
+                worker_id=self._id,
+                data={"challenge_type": recovery_type},
+            )
+        )
+
+        await self.state_machine.transition(WorkerState.WAITING_FOR_CHALLENGE)
+
+        await self._log(
+            "info",
+            f"Requesting a fresh browser context after '{recovery_type}' while polling",
+        )
+        self._context = await self._context_recreator(self._id)
+        self._page = (
+            self._context.pages[0]
+            if self._context.pages
+            else await self._context.new_page()
+        )
+        await self._log_current_proxy(proxy_log_context)
+
+        await self.state_machine.transition(WorkerState.NAVIGATING)
+        await self._log(
+            "info",
+            f"Fresh browser context created after '{recovery_type}'; navigating back to Arena",
+        )
+        await self._goto_arena_with_retries(
+            pause_event=pause_event,
+            max_attempts=2,
+        )
+
+        await self._stabilize_loaded_page(
+            pause_event=pause_event,
+            dialog_wait_seconds=5.0,
+        )
+
+        await self._publish(
+            Event(type=EventType.CHALLENGE_RESOLVED, worker_id=self._id)
+        )
+
+        await self.state_machine.transition(WorkerState.READY)
+        await self._log(
+            "info",
+            "Replaying the last prompt in the refreshed browser context",
+        )
+        await self.submit_prompt(
+            prompt=self._last_prompt,
+            model_a=self._last_model_a,
+            model_b=self._last_model_b,
+            pause_event=pause_event,
+        )
+        await self._log(
+            "info",
+            "Prompt replay submitted; resuming response polling",
+        )
+
+        return await self.poll_for_completion(
+            baseline_responses=baseline_responses,
+            pause_event=pause_event,
+            _recovery_retries=recovery_retries - 1,
+            _poll_timeout_retries=poll_timeout_retries,
+            _poll_timeout_override_seconds=poll_timeout_override_seconds,
+        )
 
     async def prepare_for_followup_prompt(self) -> tuple[str, str]:
         """Ready the current page for another prompt in the same chat."""

@@ -69,7 +69,10 @@ class StartRunRequest(BaseModel):
     proxies: Optional[List[dict]] = Field(default=None)
     proxy_on_challenge: bool = False
     windows_per_proxy: int = Field(default=4, ge=1, le=50)
-    # Pre-computed tiling: total windows across all concurrent runs and this run's offset
+    # Shared tiling for concurrent instruction runs.
+    layout_group_id: Optional[str] = Field(default=None, max_length=100)
+    # Pre-computed tiling: total windows across a concurrent layout group and
+    # this run's offset inside that shared layout.
     total_windows: Optional[int] = Field(default=None, ge=1, le=100)
     tile_offset: Optional[int] = Field(default=None, ge=0)
 
@@ -229,7 +232,7 @@ class ChallengeDetectedMessage(BaseModel):
     type: Literal["challenge_detected"] = "challenge_detected"
     run_id: Optional[str] = None
     worker_id: int
-    challenge_type: str  # "turnstile", "recaptcha", "login_wall"
+    challenge_type: str  # e.g. "turnstile", "recaptcha", "login_wall", "generation_error"
     message: str
 
 

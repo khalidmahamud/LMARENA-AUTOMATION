@@ -2894,7 +2894,7 @@ html, body { margin: 0; padding: 0; background: #fff; color: #111;
     return cardId;
   }
 
-  function startCardRun(cardId, totalWindows, tileOffset) {
+  function startCardRun(cardId, totalWindows, tileOffset, layoutGroupId) {
     var card = promptCards[cardId];
     if (!card || card.running) return;
 
@@ -2965,6 +2965,7 @@ html, body { margin: 0; padding: 0; background: #fff; color: #111;
     };
 
     // Pre-computed tiling for parallel instruction runs
+    if (layoutGroupId) msg.layout_group_id = layoutGroupId;
     if (totalWindows != null) msg.total_windows = totalWindows;
     if (tileOffset != null) msg.tile_offset = tileOffset;
 
@@ -3399,6 +3400,8 @@ html, body { margin: 0; padding: 0; background: #fff; color: #111;
     // Calculate total windows and per-card tile offsets for non-overlapping placement.
     var totalWindows = 0;
     var cardOffsets = {};
+    var layoutGroupId = "instruction-layout-" + Date.now().toString(36) + "-" +
+      Math.random().toString(36).slice(2, 8);
     instructionRunQueue.forEach(function (cardId) {
       var el = document.querySelector('.prompt-card[data-card-id="' + cardId + '"]');
       var wc = parseInt(el.querySelector(".card-window-count").value, 10) || 4;
@@ -3408,7 +3411,7 @@ html, body { margin: 0; padding: 0; background: #fff; color: #111;
 
     // Start all pending instruction cards in parallel with pre-computed tiling.
     instructionRunQueue.forEach(function (cardId) {
-      startCardRun(cardId, totalWindows, cardOffsets[cardId]);
+      startCardRun(cardId, totalWindows, cardOffsets[cardId], layoutGroupId);
     });
     currentInstructionCardId = null;
     updateInstructionOverallProgress();
