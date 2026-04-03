@@ -616,12 +616,24 @@ class DistributedOrchestrator:
     # ──── Helpers ────
 
     def _build_prompt_list(self, request: StartRunRequest) -> List[str]:
-        """Build flat list of prompts from the request."""
+        """Build flat list of prompts from the request.
+
+        Single prompt with multiple windows is replicated across all windows,
+        matching the behavior of RunOrchestrator.
+        """
         if request.prompts:
-            return list(request.prompts)
-        if request.turns:
-            return [request.turns[0].text]
-        return [request.prompt]
+            prompts = list(request.prompts)
+        elif request.turns:
+            prompts = [request.turns[0].text]
+        else:
+            prompts = [request.prompt]
+
+        # Single prompt with multiple windows: replicate across all windows
+        count = request.window_count
+        if len(prompts) == 1 and count > 1:
+            prompts = prompts * count
+
+        return prompts
 
     def _build_result(
         self, run_id: str, all_prompts: List[str], total_batches: int
