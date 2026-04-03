@@ -146,6 +146,7 @@ class WorkerUpdateMessage(BaseModel):
     message: str
     error: Optional[str] = None
     proxy: Optional[str] = None
+    node_id: Optional[str] = None  # Set in distributed mode
 
 
 class RunProgressMessage(BaseModel):
@@ -252,6 +253,20 @@ class ErrorMessage(BaseModel):
     code: Optional[str] = None
 
 
+class NodeOnlineMessage(BaseModel):
+    type: Literal["node_online"] = "node_online"
+    node_id: str
+    max_workers: int = 0
+    platform: str = ""
+
+
+class NodeOfflineMessage(BaseModel):
+    type: Literal["node_offline"] = "node_offline"
+    node_id: str
+    affected_workers: List[int] = Field(default_factory=list)
+    reason: str = ""
+
+
 OutboundMessage = Union[
     WorkerUpdateMessage,
     WorkerPartialResultMessage,
@@ -266,4 +281,6 @@ OutboundMessage = Union[
     ToastMessage,
     PongMessage,
     ErrorMessage,
+    NodeOnlineMessage,
+    NodeOfflineMessage,
 ]

@@ -33,6 +33,18 @@ typing:
   min_delay_ms: 50
   max_delay_ms: 150
 
+distributed:
+  enabled: true
+  coordinator_port: 8001
+  auth_token: "IykpflrTW0CVmwojJehwH2WPPgYeHKJL8cJQ43rEbgA"    # change this
+  scheduling_policy: "fill"           # "fill" (pack nodes) or "spread" (round-robin)
+  heartbeat_interval_seconds: 5
+  heartbeat_timeout_missed: 3         # 3 missed = 15s before node declared dead
+  reconnect_grace_seconds: 30
+  event_coalesce_ms: 100
+  allow_local_workers: false          # true = also run browsers on coordinator
+
+
 arena_url: "https://arena.ai/text/side-by-side"
 output_dir: "outputs"
 log_level: "INFO"

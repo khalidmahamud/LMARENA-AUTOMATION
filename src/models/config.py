@@ -58,6 +58,20 @@ class BrowserConfig(BaseModel):
     proxies: List[ProxyConfig] = Field(default_factory=list)
 
 
+class DistributedConfig(BaseModel):
+    """Configuration for distributed execution mode."""
+
+    enabled: bool = Field(default=False)
+    coordinator_port: int = Field(default=8001, ge=1024, le=65535)
+    auth_token: str = Field(default="change-me")
+    scheduling_policy: str = Field(default="fill")  # "fill" or "spread"
+    heartbeat_interval_seconds: float = Field(default=5.0, ge=1.0, le=30.0)
+    heartbeat_timeout_missed: int = Field(default=3, ge=1, le=10)
+    reconnect_grace_seconds: float = Field(default=30.0, ge=5.0, le=120.0)
+    event_coalesce_ms: int = Field(default=100, ge=0, le=1000)
+    allow_local_workers: bool = Field(default=False)
+
+
 class AppConfig(BaseModel):
     """Root configuration — validated from YAML at startup."""
 
@@ -68,6 +82,7 @@ class AppConfig(BaseModel):
     arena_url: str = Field(default="https://arena.ai/text/direct")
     output_dir: str = Field(default="outputs")
     log_level: str = Field(default="INFO")
+    distributed: Optional[DistributedConfig] = Field(default=None)
 
     @classmethod
     def from_yaml(cls, path: str) -> AppConfig:

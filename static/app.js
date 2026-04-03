@@ -186,6 +186,7 @@
       setStatus(true);
       fetchCheckpoints();
       syncRunState();
+      fetchNodes();
     };
 
     ws.onclose = () => {
@@ -709,9 +710,91 @@
       case "toast":
         showToast(msg.message, msg.level || "success");
         break;
+      case "node_online":
+        onNodeOnline(msg);
+        break;
+      case "node_offline":
+        onNodeOffline(msg);
+        break;
       case "pong":
         break;
     }
+  }
+
+  // ══════════════════════════════════════
+  // Worker Nodes (distributed mode)
+  // ══════════════════════════════════════
+
+  const nodesData = {};  // node_id -> { max_workers, allocated, state, platform }
+
+  function onNodeOnline(msg) {
+    const nodeId = msg.node_id;
+    nodesData[nodeId] = {
+      max_workers: msg.max_workers || 0,
+      allocated: 0,
+      state: "healthy",
+      platform: msg.platform || "",
+    };
+    renderNodes();
+    appendLog("info", `Node "${nodeId}" connected (${msg.max_workers} workers)`);
+  }
+
+  function onNodeOffline(msg) {
+    const nodeId = msg.node_id;
+    if (nodesData[nodeId]) {
+      nodesData[nodeId].state = "dead";
+    }
+    renderNodes();
+    const affected = msg.affected_workers || [];
+    const reason = msg.reason || "disconnected";
+    appendLog(
+      "warning",
+      `Node "${nodeId}" offline (${reason}). ${affected.length} workers affected.`
+    );
+    // Mark affected workers
+    affected.forEach(wid => highlightWorker(wid, "disconnected", null));
+  }
+
+  function fetchNodes() {
+    fetch("/api/nodes")
+      .then(res => res.json())
+      .then(data => {
+        if (!data.distributed) return;
+        (data.nodes || []).forEach(n => {
+          nodesData[n.node_id] = {
+            max_workers: n.max_workers || 0,
+            allocated: n.allocated_workers || 0,
+            state: n.state || "healthy",
+            platform: n.platform || "",
+          };
+        });
+        renderNodes();
+      })
+      .catch(() => {});
+  }
+
+  function renderNodes() {
+    const container = document.getElementById("nodes-list");
+    const section = document.getElementById("nodes-section");
+    if (!container || !section) return;
+
+    const ids = Object.keys(nodesData);
+    if (ids.length === 0) {
+      section.style.display = "none";
+      return;
+    }
+    section.style.display = "";
+
+    container.innerHTML = ids.map(nid => {
+      const n = nodesData[nid];
+      const dotClass = n.state === "healthy" ? "healthy" :
+                       n.state === "suspect" ? "suspect" : "dead";
+      return `<div class="node-card">
+        <span class="node-dot ${dotClass}"></span>
+        <span class="node-name" title="${nid}">${nid}</span>
+        <span class="node-workers">${n.allocated}/${n.max_workers}</span>
+      </div>`;
+    }).join("");
   }
 
   // ══════════════════════════════════════
@@ -821,6 +904,23 @@
       proxyBadge.classList.remove("hidden");
     }
 
+    // Show node badge in distributed mode
+    if (msg.node_id) {
+      let nodeBadge = card.querySelector(".node-badge");
+      if (!nodeBadge) {
+        nodeBadge = document.createElement("span");
+        nodeBadge.className = "node-badge";
+        const left = card.querySelector(".window-card-left");
+        if (left) left.appendChild(nodeBadge);
+      }
+      nodeBadge.textContent = msg.node_id;
+      // Update node allocation count
+      if (nodesData[msg.node_id]) {
+        nodesData[msg.node_id].allocated =
+          Object.values(workerData).filter(w => w.node_id === msg.node_id && w.state !== "complete" && w.state !== "error").length || nodesData[msg.node_id].allocated;
+      }
+    }
+
     // Track start times
     if (!workerStartTimes[workerKey] && msg.state !== "idle") {
       workerStartTimes[workerKey] = Date.now();
@@ -834,7 +934,8 @@
       state: msg.state,
       progress_pct: msg.progress_pct,
       message: msg.message || "",
-      error: msg.error || null
+      error: msg.error || null,
+      node_id: msg.node_id || null,
     };
 
     // State-based styling

@@ -427,6 +427,69 @@ body {
   font-weight: 400;
 }
 
+/* Worker Nodes Panel (distributed mode) */
+.nodes-section {
+  flex-shrink: 0;
+  padding: 0.4rem 1rem;
+  border-bottom: 1px solid var(--border);
+}
+.nodes-section .section-header {
+  font-family: var(--display);
+  font-size: 0.62rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-2);
+  margin-bottom: 0.3rem;
+}
+.nodes-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+.node-card {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.25rem 0.4rem;
+  font-size: 0.68rem;
+  background: var(--surface-2);
+  border-radius: 4px;
+}
+.node-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.node-dot.healthy { background: var(--green); }
+.node-dot.suspect { background: var(--orange); }
+.node-dot.dead    { background: var(--red); }
+.node-name {
+  font-weight: 600;
+  color: var(--text-1);
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.node-workers {
+  color: var(--text-2);
+  font-size: 0.6rem;
+  white-space: nowrap;
+}
+.node-badge {
+  display: inline-block;
+  font-size: 0.55rem;
+  padding: 0 0.3em;
+  border-radius: 3px;
+  background: var(--surface-2);
+  color: var(--text-2);
+  margin-left: 0.3em;
+  vertical-align: middle;
+}
+
 .windows-section {
   flex: 1;
   display: flex;

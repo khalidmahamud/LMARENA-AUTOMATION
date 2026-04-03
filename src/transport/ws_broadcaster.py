@@ -9,6 +9,8 @@ from src.core.events import Event, EventBus, EventType
 from src.models.messages import (
     ChallengeDetectedMessage,
     LogMessage,
+    NodeOfflineMessage,
+    NodeOnlineMessage,
     OutboundMessage,
     RunCancelledMessage,
     RunCompleteMessage,
@@ -75,6 +77,7 @@ class WsBroadcaster:
                 progress_pct=d.get("progress", 0),
                 message=f"State: {d.get('new_state', '')}",
                 proxy=d.get("proxy"),
+                node_id=d.get("node_id"),
             )
 
         if event.type == EventType.WORKER_ERROR:
@@ -85,6 +88,7 @@ class WsBroadcaster:
                 progress_pct=100.0,
                 message="Error occurred",
                 error=d.get("error"),
+                node_id=d.get("node_id"),
             )
 
         if event.type == EventType.WORKER_PARTIAL_RESULT:
@@ -174,6 +178,20 @@ class WsBroadcaster:
                 level=d.get("level", "info"),
                 text=d.get("text", ""),
                 worker_id=event.worker_id,
+            )
+
+        if event.type == EventType.NODE_ONLINE:
+            return NodeOnlineMessage(
+                node_id=d.get("node_id", ""),
+                max_workers=d.get("max_workers", 0),
+                platform=d.get("platform", ""),
+            )
+
+        if event.type == EventType.NODE_OFFLINE:
+            return NodeOfflineMessage(
+                node_id=d.get("node_id", ""),
+                affected_workers=d.get("affected_workers", []),
+                reason=d.get("reason", ""),
             )
 
         return None

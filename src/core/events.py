@@ -34,6 +34,10 @@ class EventType(str, Enum):
     RUN_RESUMED = "run.resumed"
     RUN_ERROR = "run.error"
 
+    # Distributed node lifecycle
+    NODE_ONLINE = "node.online"
+    NODE_OFFLINE = "node.offline"
+
     # Notifications
     TOAST = "toast"
 

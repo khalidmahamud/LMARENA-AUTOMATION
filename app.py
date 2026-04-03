@@ -19,8 +19,9 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from functools import partial
 from pathlib import Path
+from typing import Any, Optional
 
-from fastapi import FastAPI, File, UploadFile, WebSocket
+from fastapi import FastAPI, File, Query, UploadFile, WebSocket
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from openpyxl import load_workbook
@@ -51,10 +52,14 @@ logger = logging.getLogger(__name__)
 config: AppConfig
 event_bus: EventBus
 broadcaster: WsBroadcaster
-browser_manager: BrowserManager
+browser_manager: Optional[BrowserManager] = None
 checkpoint_manager: CheckpointManager
 ws_handler: WsHandler
 proxy_pool: ProxyPool
+
+# Distributed mode globals (only set when distributed.enabled=True)
+node_registry: Optional[Any] = None
+node_handler: Optional[Any] = None
 
 
 @asynccontextmanager
@@ -90,24 +95,62 @@ async def lifespan(application: FastAPI):
 
     event_bus = EventBus()
     broadcaster = WsBroadcaster(event_bus)
-    browser_manager = BrowserManager(config, proxy_pool=proxy_pool)
     checkpoint_manager = CheckpointManager(config.output_dir)
-    await browser_manager.start()
 
-    def orchestrator_factory() -> RunOrchestrator:
-        return RunOrchestrator(
-            config, event_bus, browser_manager, checkpoint_manager
+    distributed_enabled = (
+        config.distributed is not None and config.distributed.enabled
+    )
+
+    if distributed_enabled:
+        # Distributed mode: coordinator + remote nodes
+        from src.distributed.coordinator import NodeConnectionHandler, NodeRegistry
+        from src.distributed.distributed_orchestrator import DistributedOrchestrator
+
+        global node_registry, node_handler
+
+        node_registry = NodeRegistry()
+        node_handler = NodeConnectionHandler(
+            config, event_bus, node_registry, proxy_pool=proxy_pool
         )
+        node_handler.start_heartbeat_monitor()
+
+        if config.distributed.allow_local_workers:
+            # Hybrid mode: also run local browsers
+            browser_manager = BrowserManager(config, proxy_pool=proxy_pool)
+            await browser_manager.start()
+
+        def orchestrator_factory():
+            return DistributedOrchestrator(
+                config, event_bus, node_registry, node_handler,
+                checkpoint_manager, proxy_pool=proxy_pool,
+            )
+
+        logger.info(
+            "Distributed mode enabled — node port: %d",
+            config.distributed.coordinator_port,
+        )
+    else:
+        # Local mode: single machine (existing behavior)
+        browser_manager = BrowserManager(config, proxy_pool=proxy_pool)
+        await browser_manager.start()
+
+        def orchestrator_factory() -> RunOrchestrator:
+            return RunOrchestrator(
+                config, event_bus, browser_manager, checkpoint_manager
+            )
 
     ws_handler = WsHandler(orchestrator_factory, broadcaster, checkpoint_manager)
 
     logger.info("Server ready — open http://localhost:8000")
     yield
 
-    # Shutdown: stop the task but preserve the saved auto-refresh preference
+    # Shutdown
     await proxy_pool.stop_auto_refresh(clear_enabled=False)
     proxy_pool.save_to_file()
-    await browser_manager.close_all()
+    if distributed_enabled and node_handler:
+        node_handler.stop_heartbeat_monitor()
+    if browser_manager:
+        await browser_manager.close_all()
     logger.info("Shutdown complete")
 
 
@@ -126,6 +169,15 @@ async def index():
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
     await ws_handler.handle(websocket)
+
+
+@app.websocket("/node-ws")
+async def node_websocket_endpoint(websocket: WebSocket, token: str = ""):
+    """WebSocket endpoint for worker node connections (distributed mode)."""
+    if node_handler is None:
+        await websocket.close(code=4000, reason="Distributed mode not enabled")
+        return
+    await node_handler.handle_node_connection(websocket, token=token)
 
 
 @app.post("/upload-prompts")
@@ -536,6 +588,23 @@ async def get_run_state():
     if state:
         return state
     return {"running": False}
+
+
+@app.get("/api/nodes")
+async def get_nodes():
+    """Return connected worker nodes (distributed mode)."""
+    if node_registry is None:
+        return {"nodes": [], "distributed": False}
+    nodes = []
+    for nid, info in node_registry.get_all().items():
+        nodes.append({
+            "node_id": nid,
+            "state": info.state.value,
+            "max_workers": info.max_workers,
+            "allocated_workers": info.allocated_workers,
+            "platform": info.platform,
+        })
+    return {"nodes": nodes, "distributed": True}
 
 
 # ── Free proxy endpoint ──
