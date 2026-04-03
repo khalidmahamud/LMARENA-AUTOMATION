@@ -350,8 +350,12 @@ class DistributedOrchestrator:
 
         Returns: {worker_id: node_id}
         """
-        dist_config = self._config.distributed
-        policy = dist_config.scheduling_policy if dist_config else "fill"
+        # Per-run override from StartRunRequest, fallback to config
+        policy = (
+            self._active_request.scheduling_policy
+            if self._active_request and self._active_request.scheduling_policy
+            else (self._config.distributed.scheduling_policy if self._config.distributed else "fill")
+        )
         healthy = self._registry.get_healthy()
 
         if not healthy:

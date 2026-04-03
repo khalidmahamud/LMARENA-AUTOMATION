@@ -592,7 +592,7 @@ async def get_run_state():
 
 @app.get("/api/nodes")
 async def get_nodes():
-    """Return connected worker nodes (distributed mode)."""
+    """Return connected worker nodes and distributed config for UI."""
     if node_registry is None:
         return {"nodes": [], "distributed": False}
     nodes = []
@@ -604,7 +604,13 @@ async def get_nodes():
             "allocated_workers": info.allocated_workers,
             "platform": info.platform,
         })
-    return {"nodes": nodes, "distributed": True}
+    dist = config.distributed
+    return {
+        "nodes": nodes,
+        "distributed": True,
+        "auth_token": dist.auth_token if dist else "",
+        "scheduling_policy": dist.scheduling_policy if dist else "fill",
+    }
 
 
 # ── Free proxy endpoint ──

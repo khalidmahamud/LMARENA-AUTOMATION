@@ -2662,6 +2662,31 @@ textarea::placeholder {
   border: 1px solid var(--border);
 }
 
+.dist-nodes-info {
+  font-size: 0.7rem;
+  color: var(--text-2);
+  margin-top: 0.5rem;
+  padding: 0.4rem 0.6rem;
+  background: var(--bg);
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+}
+.dist-nodes-label {
+  color: var(--text-dim);
+}
+.btn-sm {
+  padding: 0.15rem 0.4rem;
+  font-size: 0.65rem;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  color: var(--text-2);
+  cursor: pointer;
+}
+.btn-sm:hover {
+  background: var(--surface-3);
+}
+
 /* Response viewer modal */
 .modal-response {
   width: 560px;

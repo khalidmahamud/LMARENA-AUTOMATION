@@ -75,6 +75,8 @@ class StartRunRequest(BaseModel):
     # this run's offset inside that shared layout.
     total_windows: Optional[int] = Field(default=None, ge=1, le=100)
     tile_offset: Optional[int] = Field(default=None, ge=0)
+    # Distributed mode: scheduling policy override
+    scheduling_policy: Optional[str] = Field(default=None)  # "fill" or "spread"
 
     @model_validator(mode="after")
     def validate_has_prompt(self):

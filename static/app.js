@@ -94,6 +94,13 @@
   const taskbarHeightInput = document.getElementById("taskbar-height");
   const tileMarginInput   = document.getElementById("tile-margin");
   const tilePreviewLabel  = document.getElementById("tile-preview-label");
+  const schedulingPolicyInput = document.getElementById("scheduling-policy");
+  const distAuthTokenInput = document.getElementById("dist-auth-token");
+  const distSettingsSection = document.getElementById("distributed-settings-section");
+  const distNodesCount    = document.getElementById("dist-nodes-count");
+  const distNodesCapacity = document.getElementById("dist-nodes-capacity");
+  const btnCopyToken      = document.getElementById("btn-copy-token");
+  const btnToggleToken    = document.getElementById("btn-toggle-token");
   const startBtn          = document.getElementById("btn-start");
   const stopBtn           = document.getElementById("btn-stop");
   const exportBtn         = document.getElementById("btn-export");
@@ -1453,6 +1460,7 @@
       proxies: parseProxyList(proxyListInput.value),
       proxy_on_challenge: proxyOnChallengeInput.checked,
       windows_per_proxy: parseInt(windowsPerProxyInput.value, 10) || 4,
+      scheduling_policy: schedulingPolicyInput.value || null,
     });
 
     if (isFileMode) {
@@ -1958,6 +1966,48 @@
 
   settingsBtn.addEventListener("click", () => {
     settingsModal.classList.remove("hidden");
+    // Refresh distributed settings when opening modal
+    fetchDistributedSettings();
+  });
+
+  // Distributed settings helpers
+  function fetchDistributedSettings() {
+    fetch("/api/nodes")
+      .then(res => res.json())
+      .then(data => {
+        if (!data.distributed) {
+          distSettingsSection.style.display = "none";
+          return;
+        }
+        distSettingsSection.style.display = "";
+        // Populate token from server config
+        if (data.auth_token) {
+          distAuthTokenInput.value = data.auth_token;
+        }
+        if (data.scheduling_policy && !localStorage.getItem("lmarena_settings")) {
+          schedulingPolicyInput.value = data.scheduling_policy;
+        }
+        // Update node counts
+        const nodes = data.nodes || [];
+        const healthy = nodes.filter(n => n.state === "healthy" || n.state === "suspect");
+        distNodesCount.textContent = healthy.length + " / " + nodes.length;
+        const cap = healthy.reduce((sum, n) => sum + (n.max_workers - n.allocated_workers), 0);
+        distNodesCapacity.textContent = cap + " workers";
+      })
+      .catch(() => {
+        distSettingsSection.style.display = "none";
+      });
+  }
+
+  btnCopyToken.addEventListener("click", () => {
+    const token = distAuthTokenInput.value;
+    if (token) {
+      navigator.clipboard.writeText(token).then(() => showToast("Token copied", "info"));
+    }
+  });
+
+  btnToggleToken.addEventListener("click", () => {
+    distAuthTokenInput.type = distAuthTokenInput.type === "password" ? "text" : "password";
   });
 
   closeSettingsBtn.addEventListener("click", () => {
@@ -3071,6 +3121,7 @@ html, body { margin: 0; padding: 0; background: #fff; color: #111;
       proxies: parseProxyList(proxyListInput.value),
       proxy_on_challenge: proxyOnChallengeInput.checked,
       windows_per_proxy: parseInt(windowsPerProxyInput.value, 10) || 4,
+      scheduling_policy: schedulingPolicyInput.value || null,
     };
 
     // Pre-computed tiling for parallel instruction runs
@@ -3624,6 +3675,7 @@ html, body { margin: 0; padding: 0; background: #fff; color: #111;
     { el: monitorHeightInput, key: "monitor_height" },
     { el: taskbarHeightInput, key: "taskbar_height" },
     { el: tileMarginInput,    key: "tile_margin" },
+    { el: schedulingPolicyInput, key: "scheduling_policy" },
     { el: systemPromptInput,  key: "system_prompt" },
     { el: promptInput,        key: "prompt" },
     // prompt_mode handled separately (not an input element)

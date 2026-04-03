@@ -469,6 +469,33 @@
           <div class="tile-preview" id="tile-preview-label"></div>
         </details>
 
+        <details class="settings-section" id="distributed-settings-section" style="display:none">
+          <summary>Distributed Mode</summary>
+          <div class="settings-grid">
+            <div class="form-group">
+              <label for="scheduling-policy">Scheduling Policy</label>
+              <select id="scheduling-policy">
+                <option value="fill">Fill (pack fewest nodes)</option>
+                <option value="spread">Spread (distribute evenly)</option>
+              </select>
+            </div>
+            <div class="form-group">
+              <label for="dist-auth-token">Auth Token</label>
+              <div style="display:flex;gap:0.3rem">
+                <input type="password" id="dist-auth-token" readonly style="flex:1" />
+                <button type="button" class="btn-sm" id="btn-copy-token" title="Copy token">&#128203;</button>
+                <button type="button" class="btn-sm" id="btn-toggle-token" title="Show/Hide">&#128065;</button>
+              </div>
+            </div>
+          </div>
+          <div class="dist-nodes-info" id="dist-nodes-info">
+            <span class="dist-nodes-label">Connected Nodes:</span>
+            <span id="dist-nodes-count">0</span>
+            <span class="dist-nodes-label" style="margin-left:1rem">Total Capacity:</span>
+            <span id="dist-nodes-capacity">0</span>
+          </div>
+        </details>
+
       </div>
     </div>
   </div>
