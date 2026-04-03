@@ -54,7 +54,7 @@ def parse_args() -> argparse.Namespace:
         "--max-workers",
         type=int,
         default=12,
-        help="Maximum concurrent browser windows (default: 12)",
+        help="Maximum concurrent browser windows; use 0 for no limit (default: 12)",
     )
     parser.add_argument(
         "--token",

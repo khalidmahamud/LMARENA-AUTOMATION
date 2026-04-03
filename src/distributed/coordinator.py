@@ -16,6 +16,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Coroutine, Dict, List, Optional, Set
+import math
 
 from fastapi import WebSocket, WebSocketDisconnect
 
@@ -48,6 +49,15 @@ from src.models.config import AppConfig
 logger = logging.getLogger(__name__)
 
 
+def _worker_key(run_id: str, worker_id: int) -> str:
+    return f"{run_id}::{worker_id}"
+
+
+def _split_worker_key(key: str) -> tuple[str, int]:
+    run_id, worker_id = key.rsplit("::", 1)
+    return run_id, int(worker_id)
+
+
 @dataclass
 class NodeInfo:
     """Coordinator-side state for a connected worker node."""
@@ -63,13 +73,15 @@ class NodeInfo:
     generation: int = 0
     last_heartbeat: float = field(default_factory=time.monotonic)
     missed_heartbeats: int = 0
-    active_worker_ids: Set[int] = field(default_factory=set)
+    active_worker_ids: Set[str] = field(default_factory=set)
 
     # Latest heartbeat info
     memory_pct: Optional[float] = None
 
     @property
-    def available_capacity(self) -> int:
+    def available_capacity(self) -> float:
+        if self.max_workers <= 0:
+            return math.inf
         return max(0, self.max_workers - self.allocated_workers)
 
     @property
@@ -119,20 +131,20 @@ class NodeRegistry:
     def healthy_nodes(self) -> int:
         return sum(1 for n in self._nodes.values() if n.is_alive)
 
-    def allocate_worker(self, node_id: str, worker_id: int) -> bool:
+    def allocate_worker(self, node_id: str, run_id: str, worker_id: int) -> bool:
         """Mark a worker as allocated on a node. Returns False if no capacity."""
         node = self._nodes.get(node_id)
         if not node or not node.is_alive or node.available_capacity <= 0:
             return False
         node.allocated_workers += 1
-        node.active_worker_ids.add(worker_id)
+        node.active_worker_ids.add(_worker_key(run_id, worker_id))
         return True
 
-    def deallocate_worker(self, node_id: str, worker_id: int) -> None:
+    def deallocate_worker(self, node_id: str, run_id: str, worker_id: int) -> None:
         node = self._nodes.get(node_id)
         if node:
             node.allocated_workers = max(0, node.allocated_workers - 1)
-            node.active_worker_ids.discard(worker_id)
+            node.active_worker_ids.discard(_worker_key(run_id, worker_id))
 
     def mark_node_state(self, node_id: str, state: NodeState) -> None:
         node = self._nodes.get(node_id)
@@ -180,6 +192,18 @@ class NodeConnectionHandler:
         self._on_node_dead: Optional[
             Callable[[str, NodeInfo], Coroutine[Any, Any, None]]
         ] = None
+        self._run_worker_result_handlers: Dict[
+            str, Callable[[str, WorkerResultPayload], Coroutine[Any, Any, None]]
+        ] = {}
+        self._run_worker_event_handlers: Dict[
+            str, Callable[[str, WorkerEventPayload], Coroutine[Any, Any, None]]
+        ] = {}
+        self._run_request_proxy_handlers: Dict[
+            str, Callable[[str, RequestProxyPayload], Coroutine[Any, Any, None]]
+        ] = {}
+        self._run_node_dead_handlers: Dict[
+            str, Callable[[str, NodeInfo], Coroutine[Any, Any, None]]
+        ] = {}
 
     def set_callbacks(
         self,
@@ -200,6 +224,31 @@ class NodeConnectionHandler:
             self._on_request_proxy = on_request_proxy
         if on_node_dead:
             self._on_node_dead = on_node_dead
+
+    def register_run_callbacks(
+        self,
+        run_id: str,
+        *,
+        on_worker_result=None,
+        on_worker_event=None,
+        on_request_proxy=None,
+        on_node_dead=None,
+    ) -> None:
+        """Register run-scoped callbacks for concurrent distributed runs."""
+        if on_worker_result:
+            self._run_worker_result_handlers[run_id] = on_worker_result
+        if on_worker_event:
+            self._run_worker_event_handlers[run_id] = on_worker_event
+        if on_request_proxy:
+            self._run_request_proxy_handlers[run_id] = on_request_proxy
+        if on_node_dead:
+            self._run_node_dead_handlers[run_id] = on_node_dead
+
+    def unregister_run_callbacks(self, run_id: str) -> None:
+        self._run_worker_result_handlers.pop(run_id, None)
+        self._run_worker_event_handlers.pop(run_id, None)
+        self._run_request_proxy_handlers.pop(run_id, None)
+        self._run_node_dead_handlers.pop(run_id, None)
 
     def start_heartbeat_monitor(self) -> None:
         """Start the background heartbeat monitor task."""
@@ -297,7 +346,10 @@ class NodeConnectionHandler:
     async def _handle_disconnect(self, node_id: str) -> None:
         """Handle node disconnection."""
         node = self._registry.get(node_id)
-        affected_workers = list(node.active_worker_ids) if node else []
+        affected_worker_keys = list(node.active_worker_ids) if node else []
+        affected_workers = [
+            worker_id for _, worker_id in map(_split_worker_key, affected_worker_keys)
+        ]
 
         self._registry.mark_node_state(node_id, NodeState.DEAD)
 
@@ -312,8 +364,14 @@ class NodeConnectionHandler:
         ))
 
         # Notify orchestrator
-        if self._on_node_dead and node:
-            await self._on_node_dead(node_id, node)
+        if node:
+            affected_runs = {run_id for run_id, _ in map(_split_worker_key, affected_worker_keys)}
+            for run_id in affected_runs:
+                handler = self._run_node_dead_handlers.get(run_id)
+                if handler:
+                    await handler(node_id, node)
+            if self._on_node_dead:
+                await self._on_node_dead(node_id, node)
 
         logger.warning(
             "Node %s disconnected, %d workers affected",
@@ -361,7 +419,10 @@ class NodeConnectionHandler:
         )
         await self._event_bus.publish(event)
 
-        if self._on_worker_event:
+        handler = self._run_worker_event_handlers.get(payload.run_id or "")
+        if handler:
+            await handler(node_id, payload)
+        elif self._on_worker_event:
             await self._on_worker_event(node_id, payload)
 
     async def _handle_worker_result(
@@ -382,7 +443,10 @@ class NodeConnectionHandler:
             )
 
         # Forward to orchestrator
-        if self._on_worker_result:
+        handler = self._run_worker_result_handlers.get(payload.run_id)
+        if handler:
+            await handler(node_id, payload)
+        elif self._on_worker_result:
             await self._on_worker_result(node_id, payload)
 
         logger.debug(
@@ -425,7 +489,10 @@ class NodeConnectionHandler:
 
         # Process any buffered results
         for result_payload in payload.buffered_results:
-            if self._on_worker_result:
+            handler = self._run_worker_result_handlers.get(result_payload.run_id)
+            if handler:
+                await handler(node_id, result_payload)
+            elif self._on_worker_result:
                 await self._on_worker_result(node_id, result_payload)
 
         self._registry.mark_node_state(node_id, NodeState.SHUTTING_DOWN)
@@ -434,7 +501,10 @@ class NodeConnectionHandler:
         self, node_id: str, envelope: NodeMessage, payload: RequestProxyPayload
     ) -> None:
         """Handle proxy request from node (e.g. after challenge)."""
-        if self._on_request_proxy:
+        handler = self._run_request_proxy_handlers.get(payload.run_id)
+        if handler:
+            await handler(node_id, payload)
+        elif self._on_request_proxy:
             await self._on_request_proxy(node_id, payload)
 
     # ──── Heartbeat Monitor ────
@@ -495,11 +565,24 @@ class NodeConnectionHandler:
                     type=EventType.NODE_OFFLINE,
                     data={
                         "node_id": node_id,
-                        "affected_workers": list(node.active_worker_ids),
+                        "affected_workers": [
+                            worker_id
+                            for _, worker_id in map(
+                                _split_worker_key, list(node.active_worker_ids)
+                            )
+                        ],
                         "reason": f"heartbeat_timeout ({missed} missed)",
                     },
                 ))
 
+                affected_runs = {
+                    run_id
+                    for run_id, _ in map(_split_worker_key, list(node.active_worker_ids))
+                }
+                for run_id in affected_runs:
+                    handler = self._run_node_dead_handlers.get(run_id)
+                    if handler:
+                        await handler(node_id, node)
                 if self._on_node_dead:
                     await self._on_node_dead(node_id, node)
 

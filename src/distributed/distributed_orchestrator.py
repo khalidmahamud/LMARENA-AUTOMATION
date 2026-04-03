@@ -89,14 +89,10 @@ class DistributedOrchestrator:
         # Epoch counter for fencing
         self._epoch = 0
 
-        # Register callbacks with the node handler
-        node_handler.set_callbacks(
-            on_worker_result=self._on_worker_result,
-            on_worker_event=self._on_worker_event,
-            on_proxy_report=self._on_proxy_report,
-            on_request_proxy=self._on_request_proxy,
-            on_node_dead=self._on_node_dead,
-        )
+        # Proxy reports are global/shared; run-scoped worker callbacks are
+        # registered when execute_run starts because concurrent runs share
+        # the same coordinator/node handler.
+        node_handler.set_callbacks(on_proxy_report=self._on_proxy_report)
 
     @property
     def last_result(self) -> Optional[RunResult]:
@@ -126,6 +122,13 @@ class DistributedOrchestrator:
             self._layout_proxy_refcounts[layout_group_id] = (
                 self._layout_proxy_refcounts.get(layout_group_id, 0) + 1
             )
+        self._node_handler.register_run_callbacks(
+            run_id,
+            on_worker_result=self._on_worker_result,
+            on_worker_event=self._on_worker_event,
+            on_request_proxy=self._on_request_proxy,
+            on_node_dead=self._on_node_dead,
+        )
 
         # Build prompt list
         all_prompts = self._build_prompt_list(request)
@@ -241,6 +244,7 @@ class DistributedOrchestrator:
         except asyncio.CancelledError:
             self._cancelled = True
         finally:
+            self._node_handler.unregister_run_callbacks(run_id)
             if layout_group_id:
                 remaining = self._layout_proxy_refcounts.get(layout_group_id, 0) - 1
                 if remaining <= 0:
@@ -389,11 +393,17 @@ class DistributedOrchestrator:
                 node = sorted_nodes[i % len(sorted_nodes)]
                 if node.available_capacity > 0:
                     assignments[i] = node.node_id
+                    self._registry.allocate_worker(
+                        node.node_id, self._active_run_id or "", i
+                    )
                 else:
                     # Find any node with capacity
                     for n in sorted_nodes:
                         if n.available_capacity > 0:
                             assignments[i] = n.node_id
+                            self._registry.allocate_worker(
+                                n.node_id, self._active_run_id or "", i
+                            )
                             break
         else:
             # Fill: pack workers onto fewest nodes
@@ -402,7 +412,7 @@ class DistributedOrchestrator:
             for node in sorted_nodes:
                 while worker_idx < count and node.available_capacity > 0:
                     assignments[worker_idx] = node.node_id
-                    self._registry.allocate_worker(node.node_id, worker_idx)
+                    self._registry.allocate_worker(node.node_id, self._active_run_id or "", worker_idx)
                     worker_idx += 1
                 if worker_idx >= count:
                     break
@@ -634,7 +644,7 @@ class DistributedOrchestrator:
             evt.set()
 
         # Deallocate from node
-        self._registry.deallocate_worker(node_id, payload.worker_id)
+        self._registry.deallocate_worker(node_id, payload.run_id, payload.worker_id)
 
     async def _on_worker_event(
         self, node_id: str, payload: WorkerEventPayload
@@ -668,7 +678,16 @@ class DistributedOrchestrator:
 
     async def _on_node_dead(self, node_id: str, node: NodeInfo) -> None:
         """Handle a node dying — mark affected workers as failed."""
-        affected = list(node.active_worker_ids)
+        affected = []
+        for worker_key in list(node.active_worker_ids):
+            try:
+                run_id, worker_id = worker_key.rsplit("::", 1)
+            except ValueError:
+                continue
+            if run_id != self._active_run_id:
+                continue
+            affected.append(int(worker_id))
+
         for worker_id in affected:
             # Create a failed result for the lost worker
             key_matches = [
@@ -682,7 +701,8 @@ class DistributedOrchestrator:
                 if evt:
                     evt.set()  # Unblock the waiter
 
-            self._registry.deallocate_worker(node_id, worker_id)
+            if self._active_run_id:
+                self._registry.deallocate_worker(node_id, self._active_run_id, worker_id)
 
         logger.warning(
             "Node %s died — %d workers affected: %s",

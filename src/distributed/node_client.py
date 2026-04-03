@@ -108,7 +108,7 @@ class NodeClient:
         self._event_bus = EventBus()
         self._forwarder: Optional[EventForwarder] = None
 
-        self._slots: Dict[int, LocalWorkerSlot] = {}  # worker_id -> slot
+        self._slots: Dict[tuple[str, int], LocalWorkerSlot] = {}  # (run_id, worker_id) -> slot
         self._running = False
         self._connected = False
         self._generation = 0  # Incremented on each reconnect
@@ -130,6 +130,10 @@ class NodeClient:
             1 for s in self._slots.values()
             if s.worker and not s.worker.state_machine.is_terminal
         )
+
+    @staticmethod
+    def _slot_key(run_id: str, worker_id: int) -> tuple[str, int]:
+        return (run_id, worker_id)
 
     async def start(self) -> None:
         """Start the node client — connects and runs the message loop."""
@@ -336,13 +340,14 @@ class NodeClient:
         """Create a worker and start executing the assigned work."""
         worker_id = payload.worker_id
         run_id = payload.run_id
+        slot_key = self._slot_key(run_id, worker_id)
 
-        if worker_id in self._slots:
+        if slot_key in self._slots:
             # Cancel existing worker in this slot
-            old_slot = self._slots[worker_id]
+            old_slot = self._slots[slot_key]
             await self._cancel_slot(old_slot, reason="reassigned")
 
-        if len(self._slots) >= self._max_workers:
+        if self._max_workers > 0 and len(self._slots) >= self._max_workers:
             logger.warning(
                 "At capacity (%d workers), rejecting work for worker %d",
                 self._max_workers,
@@ -419,7 +424,7 @@ class NodeClient:
         )
 
         slot.worker = worker
-        self._slots[worker_id] = slot
+        self._slots[slot_key] = slot
 
         # Launch worker task
         slot.task = asyncio.ensure_future(
@@ -583,7 +588,7 @@ class NodeClient:
         self, envelope: NodeMessage, payload: CancelWorkerPayload
     ) -> None:
         """Cancel a specific worker."""
-        slot = self._slots.get(payload.worker_id)
+        slot = self._slots.get(self._slot_key(payload.run_id, payload.worker_id))
         if slot:
             await self._cancel_slot(slot, reason="cancelled")
             logger.info("Worker %d cancelled", payload.worker_id)
@@ -602,7 +607,7 @@ class NodeClient:
     ) -> None:
         """Pause worker(s)."""
         if payload.worker_id is not None:
-            slot = self._slots.get(payload.worker_id)
+            slot = self._slots.get(self._slot_key(payload.run_id, payload.worker_id))
             if slot:
                 slot.pause_event.clear()
                 logger.debug("Worker %d paused", payload.worker_id)
@@ -618,7 +623,7 @@ class NodeClient:
     ) -> None:
         """Resume worker(s)."""
         if payload.worker_id is not None:
-            slot = self._slots.get(payload.worker_id)
+            slot = self._slots.get(self._slot_key(payload.run_id, payload.worker_id))
             if slot:
                 slot.pause_event.set()
                 logger.debug("Worker %d resumed", payload.worker_id)
@@ -657,15 +662,15 @@ class NodeClient:
             logger.debug("Result ACKed: worker=%d batch=%d", payload.worker_id, payload.batch_index)
 
         # Clean up completed worker slot
-        slot = self._slots.get(payload.worker_id)
+        slot = self._slots.get(self._slot_key(payload.run_id, payload.worker_id))
         if slot and slot.worker and slot.worker.state_machine.is_terminal:
-            await self._cleanup_slot(payload.worker_id)
+            await self._cleanup_slot(payload.run_id, payload.worker_id)
 
     async def _handle_assign_proxy(
         self, envelope: NodeMessage, payload: AssignProxyPayload
     ) -> None:
         """Receive a new proxy assignment for a worker."""
-        slot = self._slots.get(payload.worker_id)
+        slot = self._slots.get(self._slot_key(payload.run_id, payload.worker_id))
         if slot:
             slot.proxy = payload.proxy
             logger.debug("Worker %d assigned new proxy", payload.worker_id)
@@ -700,9 +705,10 @@ class NodeClient:
             await slot.pause_event.wait()
             await asyncio.sleep(min(0.25, remaining))
 
-    async def _cleanup_slot(self, worker_id: int) -> None:
+    async def _cleanup_slot(self, run_id: str, worker_id: int) -> None:
         """Clean up a completed worker slot."""
-        slot = self._slots.get(worker_id)
+        slot_key = self._slot_key(run_id, worker_id)
+        slot = self._slots.get(slot_key)
         if not slot:
             return
 
@@ -713,7 +719,7 @@ class NodeClient:
         except Exception:
             logger.debug("Error closing context for worker %d", worker_id, exc_info=True)
 
-        del self._slots[worker_id]
+        del self._slots[slot_key]
 
     async def _cancel_slot(
         self,
@@ -730,7 +736,7 @@ class NodeClient:
             with suppress(asyncio.CancelledError, Exception):
                 await slot.task
 
-        await self._cleanup_slot(slot.worker_id)
+        await self._cleanup_slot(slot.run_id, slot.worker_id)
 
     async def _report_proxy(
         self,

@@ -801,10 +801,11 @@
       const n = nodesData[nid];
       const dotClass = n.state === "healthy" ? "healthy" :
                        n.state === "suspect" ? "suspect" : "dead";
+      const maxWorkersLabel = n.max_workers > 0 ? n.max_workers : "\u221e";
       return `<div class="node-card">
         <span class="node-dot ${dotClass}"></span>
         <span class="node-name" title="${nid}">${nid}</span>
-        <span class="node-workers">${n.allocated}/${n.max_workers}</span>
+        <span class="node-workers">${n.allocated}/${maxWorkersLabel}</span>
       </div>`;
     }).join("");
   }
@@ -1991,8 +1992,13 @@
         const nodes = data.nodes || [];
         const healthy = nodes.filter(n => n.state === "healthy" || n.state === "suspect");
         distNodesCount.textContent = healthy.length + " / " + nodes.length;
-        const cap = healthy.reduce((sum, n) => sum + (n.max_workers - n.allocated_workers), 0);
-        distNodesCapacity.textContent = cap + " workers";
+        const hasUnlimited = healthy.some(n => (n.max_workers || 0) <= 0);
+        if (hasUnlimited) {
+          distNodesCapacity.textContent = "\u221e workers";
+        } else {
+          const cap = healthy.reduce((sum, n) => sum + (n.max_workers - n.allocated_workers), 0);
+          distNodesCapacity.textContent = cap + " workers";
+        }
       })
       .catch(() => {
         distSettingsSection.style.display = "none";

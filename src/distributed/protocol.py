@@ -79,7 +79,7 @@ class NodeRegisterPayload(BaseModel):
     """Sent by node on connection to register with coordinator."""
 
     node_id: str
-    max_workers: int = Field(default=12, ge=1, le=50)
+    max_workers: int = Field(default=12, ge=0, le=50)
     display: NodeDisplayInfo = Field(default_factory=NodeDisplayInfo)
     platform: str = "linux"
     version: str = "1.0.0"
