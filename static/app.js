@@ -1409,10 +1409,14 @@
     // Set grid layout based on window count
     layoutWindowsGrid(windowCount);
 
-    // Pre-create worker cards and result rows
-    for (let i = 0; i < windowCount; i++) {
-      ensureWorkerCard(i);
-      ensureResultRow(i);
+    // Pre-create worker cards and result rows (skip in distributed mode
+    // since remote workers will create their own cards via worker_update)
+    const isDistributed = Object.keys(nodesData).length > 0;
+    if (!isDistributed) {
+      for (let i = 0; i < windowCount; i++) {
+        ensureWorkerCard(i);
+        ensureResultRow(i);
+      }
     }
 
     send({
