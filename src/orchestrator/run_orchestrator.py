@@ -203,6 +203,8 @@ class RunOrchestrator:
             windows_per_proxy=request.windows_per_proxy,
             zoom_pct=request.zoom_pct,
             run_id=run_id,
+            total_windows=request.total_windows,
+            tile_offset=request.tile_offset or 0,
         )
 
         # Create run_id-scoped callbacks for workers

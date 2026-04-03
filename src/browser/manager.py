@@ -77,6 +77,8 @@ class BrowserManager:
         windows_per_proxy: int = 4,
         zoom_pct: int = 100,
         run_id: Optional[str] = None,
+        total_windows: Optional[int] = None,
+        tile_offset: int = 0,
     ) -> List[BrowserContext]:
         """Launch *count* isolated persistent browser contexts for a run.
 
@@ -101,41 +103,56 @@ class BrowserManager:
             self._config.browser.incognito if incognito is None else incognito
         )
 
-        # Global tiling across all active runs to avoid overlap.
-        existing_context_entries: list[tuple[str, int, BrowserContext]] = []
-        for other_key, other_group in self._groups.items():
-            for idx, ctx in enumerate(other_group.contexts):
-                existing_context_entries.append((other_key, idx, ctx))
+        if total_windows is not None:
+            # Pre-computed tiling: compute positions for the global total
+            # and slice this run's portion using tile_offset.
+            all_tiles = compute_tile_positions(
+                count=total_windows,
+                monitor_count=disp.monitor_count,
+                monitor_width=disp.monitor_width,
+                monitor_height=disp.monitor_height,
+                taskbar_height=disp.taskbar_height,
+                margin=disp.margin,
+                border_offset=disp.border_offset,
+            )
+            group.tiles = all_tiles[tile_offset : tile_offset + count]
+        else:
+            # Global tiling across all active runs to avoid overlap.
+            existing_context_entries: list[tuple[str, int, BrowserContext]] = []
+            for other_key, other_group in self._groups.items():
+                for idx, ctx in enumerate(other_group.contexts):
+                    existing_context_entries.append((other_key, idx, ctx))
 
-        all_tiles = compute_tile_positions(
-            count=len(existing_context_entries) + count,
-            monitor_count=disp.monitor_count,
-            monitor_width=disp.monitor_width,
-            monitor_height=disp.monitor_height,
-            taskbar_height=disp.taskbar_height,
-            margin=disp.margin,
-            border_offset=disp.border_offset,
-        )
-        tile_cursor = 0
-        retile_tasks: list[asyncio.Task] = []
-        for other_key, idx, ctx in existing_context_entries:
-            tile = all_tiles[tile_cursor]
-            tile_cursor += 1
-            other_group = self._groups.get(other_key)
-            if not other_group:
-                continue
-            if len(other_group.tiles) <= idx:
-                other_group.tiles.extend(
-                    [tile] * (idx + 1 - len(other_group.tiles))
-                )
-            else:
-                other_group.tiles[idx] = tile
-            retile_tasks.append(asyncio.create_task(self._retile_context(ctx, tile)))
+            all_tiles = compute_tile_positions(
+                count=len(existing_context_entries) + count,
+                monitor_count=disp.monitor_count,
+                monitor_width=disp.monitor_width,
+                monitor_height=disp.monitor_height,
+                taskbar_height=disp.taskbar_height,
+                margin=disp.margin,
+                border_offset=disp.border_offset,
+            )
+            tile_cursor = 0
+            retile_tasks: list[asyncio.Task] = []
+            for other_key, idx, ctx in existing_context_entries:
+                tile = all_tiles[tile_cursor]
+                tile_cursor += 1
+                other_group = self._groups.get(other_key)
+                if not other_group:
+                    continue
+                if len(other_group.tiles) <= idx:
+                    other_group.tiles.extend(
+                        [tile] * (idx + 1 - len(other_group.tiles))
+                    )
+                else:
+                    other_group.tiles[idx] = tile
+                retile_tasks.append(asyncio.create_task(self._retile_context(ctx, tile)))
 
-        group.tiles = all_tiles[tile_cursor : tile_cursor + count]
+            group.tiles = all_tiles[tile_cursor : tile_cursor + count]
+            if retile_tasks:
+                await asyncio.gather(*retile_tasks, return_exceptions=True)
+
         self._groups[gkey] = group
-        if retile_tasks:
-            await asyncio.gather(*retile_tasks, return_exceptions=True)
 
         group.proxies = proxies or []
         group.proxy_on_challenge = proxy_on_challenge

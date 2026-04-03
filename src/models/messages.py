@@ -69,6 +69,9 @@ class StartRunRequest(BaseModel):
     proxies: Optional[List[dict]] = Field(default=None)
     proxy_on_challenge: bool = False
     windows_per_proxy: int = Field(default=4, ge=1, le=50)
+    # Pre-computed tiling: total windows across all concurrent runs and this run's offset
+    total_windows: Optional[int] = Field(default=None, ge=1, le=100)
+    tile_offset: Optional[int] = Field(default=None, ge=0)
 
     @model_validator(mode="after")
     def validate_has_prompt(self):
