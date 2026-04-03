@@ -252,6 +252,7 @@ class BrowserManager:
                     incognito_mode=group.incognito_mode,
                     zoom_pct=group.zoom_pct,
                 )
+                await self._retile_context(ctx, tile)
 
                 group.contexts.append(ctx)
                 group.context_dirs[i] = profile_dir
@@ -522,6 +523,7 @@ class BrowserManager:
             incognito_mode=group.incognito_mode,
             zoom_pct=group.zoom_pct,
         )
+        await self._retile_context(ctx, tile)
 
         group.contexts[index] = ctx
         group.context_dirs[index] = profile_dir
