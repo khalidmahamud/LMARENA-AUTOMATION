@@ -68,6 +68,7 @@ class BrowserManager:
         # Per-run state
         self._groups: Dict[str, _RunGroup] = {}
         self._layout_reservations: Dict[str, _LayoutReservation] = {}
+        self._proxy_layout_reservations: Dict[str, Dict[int, Optional[dict]]] = {}
         self._layout_lock = asyncio.Lock()
         # Backward-compat: default group key for callers that don't pass run_id
         self._default_group_key = "__default__"
@@ -241,7 +242,14 @@ class BrowserManager:
                 )
                 # If proxy_on_challenge, proactively distribute proxies across windows
                 if group.proxy_on_challenge:
-                    proxy = self._assign_proactive_proxy(group, i)
+                    if layout_group_id and total_windows is not None:
+                        proxy = self._assign_layout_proxy(
+                            layout_group_id=layout_group_id,
+                            group=group,
+                            global_index=tile_offset + i,
+                        )
+                    else:
+                        proxy = self._assign_proactive_proxy(group, i)
                 else:
                     proxy = (
                         group.proxies[i % len(group.proxies)]
@@ -291,6 +299,7 @@ class BrowserManager:
             if group.layout_group_id == layout_group_id:
                 return
         self._layout_reservations.pop(layout_group_id, None)
+        self._proxy_layout_reservations.pop(layout_group_id, None)
 
     async def _close_contexts_unlocked(self, gkey: str) -> None:
         group = self._groups.pop(gkey, None)
@@ -346,6 +355,49 @@ class BrowserManager:
 
         # No proxies available — bare IP
         return None
+
+    def _assign_layout_proxy(
+        self,
+        layout_group_id: str,
+        group: _RunGroup,
+        global_index: int,
+    ) -> Optional[dict]:
+        """Assign proxies across a concurrent layout group.
+
+        This extends windows_per_proxy grouping across instruction-upload runs
+        that are launched in parallel under the same layout_group_id.
+        """
+        wpp = group.windows_per_proxy
+        slot_start = (global_index // wpp) * wpp
+        reservations = self._proxy_layout_reservations.setdefault(
+            layout_group_id, {}
+        )
+
+        if slot_start in reservations:
+            reserved = reservations[slot_start]
+            if reserved and reserved.get("server"):
+                found = self._find_proxy_dict(group, reserved["server"])
+                return found or reserved
+            return reserved
+
+        if self._proxy_pool and self._proxy_pool.healthy_count > 0:
+            proxy = self._proxy_pool.get_next_healthy()
+        elif group.proxies:
+            proxy = group.proxies[group.proxy_assign_counter % len(group.proxies)]
+            group.proxy_assign_counter += 1
+        else:
+            proxy = None
+
+        reservations[slot_start] = proxy
+        if proxy:
+            logger.info(
+                "Layout proxy slot %d (%s): assigning proxy %s to global window %d",
+                slot_start // wpp,
+                layout_group_id[:12],
+                proxy.get("server", "???"),
+                global_index,
+            )
+        return proxy
 
     def _find_proxy_dict(
         self, group: _RunGroup, server: str

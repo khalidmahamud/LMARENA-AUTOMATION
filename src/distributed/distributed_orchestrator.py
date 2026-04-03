@@ -12,7 +12,7 @@ import logging
 import time
 import uuid
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, ClassVar, Dict, List, Optional, Set, Tuple
 
 from src.checkpoint.manager import CheckpointManager, RunCheckpoint
 from src.core.events import Event, EventBus, EventType
@@ -45,6 +45,9 @@ class DistributedOrchestrator:
     - cancel() / pause() / resume()
     - get_run_snapshot() / last_result
     """
+
+    _layout_proxy_assignments: ClassVar[Dict[str, Dict[int, Optional[dict]]]] = {}
+    _layout_proxy_refcounts: ClassVar[Dict[str, int]] = {}
 
     def __init__(
         self,
@@ -81,6 +84,7 @@ class DistributedOrchestrator:
         self._live_results: Dict[Tuple[int, int, int], WindowResult] = {}  # (batch, worker, turn)
         self._pending_workers: Set[int] = set()  # Workers we're waiting on
         self._result_events: Dict[int, asyncio.Event] = {}  # worker_id -> completion signal
+        self._run_proxy_assignments: Dict[int, Optional[dict]] = {}
 
         # Epoch counter for fencing
         self._epoch = 0
@@ -115,6 +119,13 @@ class DistributedOrchestrator:
         self._active_started_at = datetime.now(timezone.utc)
         self._completed_results = []
         self._live_results = {}
+        self._run_proxy_assignments = {}
+
+        layout_group_id = request.layout_group_id
+        if layout_group_id:
+            self._layout_proxy_refcounts[layout_group_id] = (
+                self._layout_proxy_refcounts.get(layout_group_id, 0) + 1
+            )
 
         # Build prompt list
         all_prompts = self._build_prompt_list(request)
@@ -229,6 +240,14 @@ class DistributedOrchestrator:
 
         except asyncio.CancelledError:
             self._cancelled = True
+        finally:
+            if layout_group_id:
+                remaining = self._layout_proxy_refcounts.get(layout_group_id, 0) - 1
+                if remaining <= 0:
+                    self._layout_proxy_refcounts.pop(layout_group_id, None)
+                    self._layout_proxy_assignments.pop(layout_group_id, None)
+                else:
+                    self._layout_proxy_refcounts[layout_group_id] = remaining
 
         # Build final result
         self._current_run = self._build_result(run_id, all_prompts, total_batches)
@@ -414,6 +433,7 @@ class DistributedOrchestrator:
         }
 
         gap = request.submission_gap_seconds or self._config.timing.submission_gap_seconds
+        cumulative_submit_delay = 0.0
 
         for worker_id, node_id in assignments.items():
             if self._cancelled:
@@ -422,12 +442,10 @@ class DistributedOrchestrator:
             self._epoch += 1
             self._worker_epochs[worker_id] = self._epoch
 
-            # Get proxy from pool if available
-            proxy = None
-            if self._proxy_pool:
-                proxy_dict = self._proxy_pool.get_next_healthy()
-                if proxy_dict:
-                    proxy = proxy_dict
+            proxy = self._select_proxy_for_worker(request, worker_id)
+            submit_after_seconds = None
+            if request.simultaneous_start:
+                submit_after_seconds = cumulative_submit_delay
 
             prompt = prompts[worker_id] if worker_id < len(prompts) else prompts[-1]
 
@@ -451,6 +469,7 @@ class DistributedOrchestrator:
                 proxy_on_challenge=request.proxy_on_challenge,
                 windows_per_proxy=request.windows_per_proxy,
                 submission_gap_seconds=gap,
+                submit_after_seconds=submit_after_seconds,
             )
 
             await self._node_handler.send_to_node_by_id(
@@ -460,12 +479,67 @@ class DistributedOrchestrator:
                 epoch=self._epoch,
             )
 
-            # Submission gap between workers
-            if worker_id < len(assignments) - 1 and gap > 0:
+            # In simultaneous-start mode, all workers are assigned immediately
+            # and each node delays submit locally after preparing the prompt.
+            if (
+                request.simultaneous_start
+                and worker_id < len(assignments) - 1
+                and gap > 0
+            ):
+                jitter = gap * self._config.timing.jitter_pct
+                import random
+                actual_gap = gap + random.uniform(-jitter, jitter)
+                cumulative_submit_delay += max(0, actual_gap)
+            # Submission gap between workers in non-simultaneous mode
+            elif worker_id < len(assignments) - 1 and gap > 0:
                 jitter = gap * self._config.timing.jitter_pct
                 import random
                 actual_gap = gap + random.uniform(-jitter, jitter)
                 await asyncio.sleep(max(0, actual_gap))
+
+    def _select_proxy_for_worker(
+        self,
+        request: StartRunRequest,
+        worker_id: int,
+    ) -> Optional[dict]:
+        """Apply windows_per_proxy grouping when dispatching distributed workers."""
+        wpp = max(1, int(request.windows_per_proxy or 1))
+        global_index = (request.tile_offset or 0) + worker_id
+        slot_start = (global_index // wpp) * wpp
+
+        if request.layout_group_id:
+            slots = self._layout_proxy_assignments.setdefault(
+                request.layout_group_id, {}
+            )
+            if slot_start in slots:
+                return slots[slot_start]
+
+            proxy = self._next_proxy_candidate(request, slot_start, wpp)
+            slots[slot_start] = proxy
+            return proxy
+
+        if slot_start in self._run_proxy_assignments:
+            return self._run_proxy_assignments[slot_start]
+
+        proxy = self._next_proxy_candidate(request, slot_start, wpp)
+        self._run_proxy_assignments[slot_start] = proxy
+        return proxy
+
+    def _next_proxy_candidate(
+        self,
+        request: StartRunRequest,
+        slot_start: int,
+        windows_per_proxy: int,
+    ) -> Optional[dict]:
+        """Get the next proxy from the shared pool, falling back to manual list."""
+        if self._proxy_pool and self._proxy_pool.healthy_count > 0:
+            return self._proxy_pool.get_next_healthy()
+
+        if request.proxies:
+            slot_index = slot_start // max(1, windows_per_proxy)
+            return request.proxies[slot_index % len(request.proxies)]
+
+        return None
 
     async def _collect_batch_results(
         self,

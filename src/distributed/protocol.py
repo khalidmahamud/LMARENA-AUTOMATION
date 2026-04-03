@@ -173,6 +173,7 @@ class AssignWorkPayload(BaseModel):
     proxy_on_challenge: bool = False
     windows_per_proxy: int = 4
     submission_gap_seconds: Optional[float] = None
+    submit_after_seconds: Optional[float] = None
     # Display tile for this specific worker
     display_override: Optional[Dict[str, Any]] = None
 

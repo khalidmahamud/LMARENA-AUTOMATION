@@ -492,6 +492,7 @@ class NodeClient:
                 pause_event=slot.pause_event,
                 images=work.images,
             )
+            await self._wait_for_submit_slot(slot, work)
             await worker.submit_prepared_prompt(
                 pause_event=slot.pause_event,
             )
@@ -526,6 +527,7 @@ class NodeClient:
                     pause_event=slot.pause_event,
                     images=turn.get("images") if isinstance(turn, dict) else getattr(turn, "images", None),
                 )
+                await self._wait_for_submit_slot(slot, work)
                 await worker.submit_prepared_prompt(
                     pause_event=slot.pause_event,
                 )
@@ -679,6 +681,24 @@ class NodeClient:
         """Resume all workers (called on reconnect)."""
         for slot in self._slots.values():
             slot.pause_event.set()
+
+    async def _wait_for_submit_slot(
+        self,
+        slot: LocalWorkerSlot,
+        work: AssignWorkPayload,
+    ) -> None:
+        """Delay submit for simultaneous-start batches while respecting pause."""
+        delay = float(work.submit_after_seconds or 0.0)
+        if delay <= 0:
+            return
+
+        deadline = time.monotonic() + delay
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return
+            await slot.pause_event.wait()
+            await asyncio.sleep(min(0.25, remaining))
 
     async def _cleanup_slot(self, worker_id: int) -> None:
         """Clean up a completed worker slot."""
