@@ -126,13 +126,19 @@ async def main(args: argparse.Namespace) -> None:
         logger.info("Shutdown signal received")
         shutdown_event.set()
 
-    for sig in (signal.SIGINT, signal.SIGTERM):
-        loop.add_signal_handler(sig, signal_handler)
+    # add_signal_handler is not supported on Windows
+    if sys.platform != "win32":
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            loop.add_signal_handler(sig, signal_handler)
 
     # Run client in background, wait for shutdown signal
     client_task = asyncio.ensure_future(client.start())
 
-    await shutdown_event.wait()
+    try:
+        await shutdown_event.wait()
+    except KeyboardInterrupt:
+        pass
+
     await client.stop()
 
     if not client_task.done():
