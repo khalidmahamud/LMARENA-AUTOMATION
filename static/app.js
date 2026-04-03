@@ -24,6 +24,11 @@
     return "card_" + Date.now() + "_" + (nextCardIndex++);
   }
 
+  function generateRunId() {
+    return "run_" + Date.now().toString(36) + "_" +
+      Math.random().toString(36).slice(2, 8);
+  }
+
   // File upload state
   let promptMode = "manual"; // "manual" | "file"
   let uploadedRows = null;   // raw parsed rows from backend
@@ -1381,6 +1386,9 @@
       }
     }
 
+    const windowCount = parseInt(windowCountInput.value, 10) || 4;
+    const runId = generateRunId();
+
     running = true;
     paused = false;
     pauseTransitionPending = false;
@@ -1400,8 +1408,6 @@
     incrementalResults = {};
     resultsJsonPre.textContent = "";
 
-    const windowCount = parseInt(windowCountInput.value, 10) || 4;
-
     // Use actual screen dimensions for tiling (from Settings, auto-detected on load)
     const monW = parseInt(monitorWidthInput.value, 10) || screen.availWidth || 1920;
     const monH = parseInt(monitorHeightInput.value, 10) || screen.availHeight || 1080;
@@ -1409,18 +1415,16 @@
     // Set grid layout based on window count
     layoutWindowsGrid(windowCount);
 
-    // Pre-create worker cards and result rows (skip in distributed mode
-    // since remote workers will create their own cards via worker_update)
-    const isDistributed = Object.keys(nodesData).length > 0;
-    if (!isDistributed) {
-      for (let i = 0; i < windowCount; i++) {
-        ensureWorkerCard(i);
-        ensureResultRow(i);
-      }
+    // Pre-create run-scoped worker cards and rows so later worker updates
+    // reconcile onto the same DOM nodes in both local and distributed modes.
+    for (let i = 0; i < windowCount; i++) {
+      ensureWorkerCard(i, runId);
+      ensureResultRow(i, runId);
     }
 
     send({
       type: "start_run",
+      run_id: runId,
       prompt: singlePrompt,
       prompts: isFileMode ? prompts : null,
       system_prompt: systemPromptInput.value.trim() || "",
