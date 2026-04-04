@@ -88,6 +88,31 @@ async function applyZoomToAllTabs() {
   return applied;
 }
 
+async function getArenaZoomState() {
+  const zoomPct = await getManagedZoomPct();
+  const tabs = await chrome.tabs.query({});
+  const arenaTabs = [];
+
+  for (const tab of tabs) {
+    if (!tab || !tab.id || tab.id < 0 || !isArenaUrl(tab.url)) continue;
+    let zoom = null;
+    try {
+      zoom = await chrome.tabs.getZoom(tab.id);
+    } catch (error) {
+      console.warn("Failed to inspect browser zoom", tab.id, error);
+    }
+
+    arenaTabs.push({
+      tabId: tab.id,
+      url: tab.url,
+      zoom,
+      lastAppliedZoom: lastAppliedZoomByTab.get(tab.id) ?? null
+    });
+  }
+
+  return { ok: true, zoomPct, arenaTabs };
+}
+
 chrome.runtime.onInstalled.addListener(() => {
   chrome.storage.local.set({ [STORAGE_KEY]: 100 });
 });
@@ -135,6 +160,18 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 
 globalThis.configureManagedZoom = async (zoomPct) => {
   const normalized = await setManagedZoomPct(zoomPct);
+  const appliedTabs = await applyZoomToAllTabs();
   const incognitoAllowed = await chrome.extension.isAllowedIncognitoAccess();
-  return { ok: true, zoomPct: normalized, appliedTabs: 0, incognitoAllowed };
+  const state = await getArenaZoomState();
+  return {
+    ok: true,
+    zoomPct: normalized,
+    appliedTabs,
+    incognitoAllowed,
+    arenaTabs: state.arenaTabs
+  };
+};
+
+globalThis.getManagedZoomState = async () => {
+  return await getArenaZoomState();
 };

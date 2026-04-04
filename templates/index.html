@@ -17,6 +17,12 @@
       <span class="logo-text">Arena Runner</span>
       <span class="version">v1.9</span>
     </div>
+    <div class="header-center">
+      <div class="main-tab-group">
+        <button class="main-tab active" id="main-tab-results">&#128196; Main</button>
+        <button class="main-tab" id="main-tab-preview">&#128247; Live Preview</button>
+      </div>
+    </div>
     <div class="header-right">
       <div class="status-badge" id="status-badge">
         <span class="status-dot" id="status-dot"></span>
@@ -192,6 +198,8 @@
           <div class="prompt-buttons">
             <button class="btn-start" id="btn-start">&#8853; Start Run</button>
             <button class="btn-stop" id="btn-stop" disabled>&#8854; Stop</button>
+            <button class="btn-secondary" id="btn-close-all">&#10005; Close All</button>
+            <button class="btn-secondary" id="btn-clear-all">&#128465; Clear All</button>
           </div>
           <div class="progress-inline" id="progress-inline">
             <span class="eta-label" id="eta-text">ETA: &mdash;</span>
@@ -205,10 +213,10 @@
 
       <!-- Results -->
       <section class="panel" id="results-section">
-        <div class="panel-header">
+        <div class="panel-header" id="results-panel-header">
           <div class="panel-title-group">
             <span class="panel-title">&#128196; RESULTS</span>
-            <div class="tab-group">
+            <div class="tab-group" id="sub-tab-group">
               <button class="tab active" id="tab-table">Table View</button>
               <button class="tab" id="tab-json">JSON</button>
               <button class="tab" id="tab-html">HTML</button>
@@ -223,24 +231,27 @@
             </div>
           </div>
         </div>
-        <div id="results-table-wrap">
-          <table class="results-table">
-            <thead>
-              <tr>
-                <th>#</th>
-                <th>MODEL A</th>
-                <th>MODEL B</th>
-                <th>TIME</th>
-                <th>TOKENS</th>
-                <th>STATUS</th>
-              </tr>
-            </thead>
-            <tbody id="results-body"></tbody>
-          </table>
-        </div>
-        <pre class="results-json hidden" id="results-json"></pre>
-        <div class="results-html-wrap hidden" id="results-html-wrap">
-          <div class="html-results-list" id="html-results-list"></div>
+        <!-- Main content (results) -->
+        <div id="main-results-content">
+          <div id="results-table-wrap">
+            <table class="results-table">
+              <thead>
+                <tr>
+                  <th>#</th>
+                  <th>MODEL A</th>
+                  <th>MODEL B</th>
+                  <th>TIME</th>
+                  <th>TOKENS</th>
+                  <th>STATUS</th>
+                </tr>
+              </thead>
+              <tbody id="results-body"></tbody>
+            </table>
+          </div>
+          <pre class="results-json hidden" id="results-json"></pre>
+          <div class="results-html-wrap hidden" id="results-html-wrap">
+            <div class="html-results-list" id="html-results-list"></div>
+          </div>
         </div>
       </section>
 
@@ -292,6 +303,14 @@
       </div>
     </aside>
 
+  </div>
+
+  <!-- Live Preview (full-width, outside main layout) -->
+  <div class="preview-fullscreen hidden" id="preview-grid-wrap">
+    <div class="preview-toolbar">
+      <span class="preview-status" id="preview-status">No windows active</span>
+    </div>
+    <div class="preview-grid" id="preview-grid"></div>
   </div>
 
   <!-- Status Bar (Footer) -->
@@ -346,6 +365,12 @@
             </div>
             <div class="form-group checkbox-group">
               <label>
+                <input type="checkbox" id="headless-mode" />
+                Headless mode (run in background, use Live Preview tab)
+              </label>
+            </div>
+            <div class="form-group checkbox-group">
+              <label>
                 <input type="checkbox" id="clear-cookies" />
                 Clear cookies before run
               </label>
@@ -354,6 +379,12 @@
               <label>
                 <input type="checkbox" id="incognito-mode" />
                 Open all windows in incognito mode
+              </label>
+            </div>
+            <div class="form-group checkbox-group">
+              <label>
+                <input type="checkbox" id="minimized-mode" />
+                Open all headed windows minimized
               </label>
             </div>
             <div class="form-group checkbox-group">

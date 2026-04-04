@@ -55,7 +55,18 @@ class BrowserConfig(BaseModel):
     window_size: WindowSize = Field(default_factory=WindowSize)
     headless: bool = Field(default=False)
     incognito: bool = Field(default=False)
+    minimized: bool = Field(default=False)
     proxies: List[ProxyConfig] = Field(default_factory=list)
+
+
+class PreviewConfig(BaseModel):
+    """Live preview dashboard configuration."""
+
+    enabled: bool = Field(default=True)
+    interval_seconds: float = Field(default=2.0, ge=0.5, le=10.0)
+    jpeg_quality: int = Field(default=65, ge=10, le=100)
+    max_width: int = Field(default=640, ge=160, le=1920)
+    max_height: int = Field(default=480, ge=120, le=1080)
 
 
 class AppConfig(BaseModel):
@@ -65,6 +76,7 @@ class AppConfig(BaseModel):
     display: DisplayConfig = Field(default_factory=DisplayConfig)
     timing: TimingConfig = Field(default_factory=TimingConfig)
     typing: TypingConfig = Field(default_factory=TypingConfig)
+    preview: PreviewConfig = Field(default_factory=PreviewConfig)
     arena_url: str = Field(default="https://arena.ai/text/direct")
     output_dir: str = Field(default="outputs")
     log_level: str = Field(default="INFO")

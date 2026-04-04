@@ -5,7 +5,7 @@ import logging
 import random
 import uuid
 from datetime import datetime, timezone
-from typing import List, Optional, Tuple
+from typing import Awaitable, Callable, List, Optional, Tuple
 
 from src.browser.manager import BrowserManager
 from src.checkpoint.manager import CheckpointManager, RunCheckpoint
@@ -63,6 +63,8 @@ class RunOrchestrator:
         self._completed_results: List[WindowResult] = []
         self._live_results: dict[tuple[int, int], WindowResult] = {}
         self._current_batch_index: Optional[int] = None
+        self._submit_group_locks: dict[str, asyncio.Lock] = {}
+        self._submit_group_next_ready_at: dict[str, float] = {}
 
     async def execute_run(
         self,
@@ -145,6 +147,8 @@ class RunOrchestrator:
         self._completed_results = list(restored_results)
         self._live_results = {}
         self._current_batch_index = None
+        self._submit_group_locks = {}
+        self._submit_group_next_ready_at = {}
         self._refresh_current_run()
 
         await self._publish(
@@ -197,6 +201,8 @@ class RunOrchestrator:
         contexts = await self._browser_manager.create_contexts(
             count,
             display_override=display_override,
+            headless=request.headless,
+            minimized=request.minimized,
             incognito=request.incognito,
             proxies=proxy_list,
             proxy_on_challenge=request.proxy_on_challenge,
@@ -241,18 +247,40 @@ class RunOrchestrator:
             for i in range(count)
         ]
 
-        # Phase 3: Navigate all to Arena (parallel)
-        nav_results = await asyncio.gather(
-            *(w.navigate_to_arena(
-                clear_cookies=request.clear_cookies,
-                zoom_pct=request.zoom_pct,
-                pause_event=self._resume_event,
-            ) for w in self._workers),
-            return_exceptions=True,
-        )
-        for i, result in enumerate(nav_results):
-            if isinstance(result, BaseException):
-                logger.error("Worker %d navigation failed: %s", i, result)
+        initial_navigation_tasks: Optional[List[asyncio.Task[None]]] = None
+        if simultaneous_start:
+            initial_navigation_tasks = [
+                asyncio.create_task(
+                    w.navigate_to_arena(
+                        clear_cookies=request.clear_cookies,
+                        zoom_pct=request.zoom_pct,
+                        pause_event=self._resume_event,
+                    )
+                )
+                for w in self._workers
+            ]
+            if start_batch_idx > 0:
+                nav_results = await asyncio.gather(
+                    *initial_navigation_tasks,
+                    return_exceptions=True,
+                )
+                for i, result in enumerate(nav_results):
+                    if isinstance(result, BaseException):
+                        logger.error("Worker %d navigation failed: %s", i, result)
+                initial_navigation_tasks = None
+        else:
+            # Phase 3: Navigate all to Arena (parallel)
+            nav_results = await asyncio.gather(
+                *(w.navigate_to_arena(
+                    clear_cookies=request.clear_cookies,
+                    zoom_pct=request.zoom_pct,
+                    pause_event=self._resume_event,
+                ) for w in self._workers),
+                return_exceptions=True,
+            )
+            for i, result in enumerate(nav_results):
+                if isinstance(result, BaseException):
+                    logger.error("Worker %d navigation failed: %s", i, result)
 
         if request.clear_cookies:
             await self._publish(
@@ -294,6 +322,9 @@ class RunOrchestrator:
             self._current_batch_index = batch_idx
             self._live_results = {}
             self._refresh_current_run()
+            batch_navigation_tasks = (
+                initial_navigation_tasks if batch_idx == 0 else None
+            )
             await self._wait_if_paused()
             if self._cancelled:
                 break
@@ -317,26 +348,93 @@ class RunOrchestrator:
                 await self._wait_if_paused()
                 for worker in self._workers:
                     await worker.state_machine.reset()
-                nav_results = await asyncio.gather(
-                    *(w.navigate_to_arena(
-                        zoom_pct=request.zoom_pct,
-                        pause_event=self._resume_event,
-                    )
-                      for w in self._workers),
-                    return_exceptions=True,
-                )
-                for i, result in enumerate(nav_results):
-                    if isinstance(result, BaseException):
-                        logger.error(
-                            "Worker %d re-navigation failed (batch %d): %s",
-                            i, batch_idx, result,
+                if simultaneous_start:
+                    batch_navigation_tasks = [
+                        asyncio.create_task(
+                            w.navigate_to_arena(
+                                zoom_pct=request.zoom_pct,
+                                pause_event=self._resume_event,
+                            )
                         )
+                        for w in self._workers
+                    ]
+                else:
+                    nav_results = await asyncio.gather(
+                        *(w.navigate_to_arena(
+                            zoom_pct=request.zoom_pct,
+                            pause_event=self._resume_event,
+                        )
+                          for w in self._workers),
+                        return_exceptions=True,
+                    )
+                    for i, result in enumerate(nav_results):
+                        if isinstance(result, BaseException):
+                            logger.error(
+                                "Worker %d re-navigation failed (batch %d): %s",
+                                i, batch_idx, result,
+                            )
 
             if self._cancelled:
                 break
 
             # Submit this batch's prompts (sequential with gap)
             workers_in_batch = min(len(batch_prompts), count)
+            if simultaneous_start:
+                batch_results = await self._run_simultaneous_batch(
+                    batch_idx=batch_idx,
+                    total_batches=total_batches,
+                    batch_prompts=batch_prompts,
+                    request=request,
+                    system_prompt=system_prompt,
+                    turn_list=turn_list,
+                    image_dicts=image_dicts,
+                    gap=gap,
+                    expected_result_slots=expected_result_slots,
+                    completed_before_batch=len(all_window_results),
+                    navigation_tasks=batch_navigation_tasks,
+                )
+                all_window_results.extend(batch_results)
+                self._completed_results = list(all_window_results)
+                self._live_results = {}
+                self._current_batch_index = None
+
+                self._refresh_current_run()
+                self._save_incremental(self._current_run)
+
+                if self._checkpoint_manager:
+                    self._save_checkpoint(
+                        run_id, request, all_prompts, batch_idx,
+                        count, total_batches, all_window_results, started_at,
+                    )
+
+                await self._publish(
+                    Event(
+                        type=EventType.RUN_PROGRESS,
+                        data={
+                            "total_workers": expected_result_slots,
+                            "submitted": len(all_window_results),
+                            "phase": "batch_complete",
+                            "batch": batch_idx + 1,
+                            "total_batches": total_batches,
+                        },
+                    )
+                )
+
+                await self._publish(
+                    Event(
+                        type=EventType.LOG,
+                        data={
+                            "level": "info",
+                            "text": (
+                                f"Batch {batch_idx + 1}/{total_batches} complete "
+                                f"â€” {len(all_window_results)}/{expected_result_slots} "
+                                f"{'responses' if turn_count > 1 else 'prompts'} done"
+                            ),
+                        },
+                    )
+                )
+                continue
+
             batch_results: List[WindowResult] = []
             early_failures: List[Tuple[int, ArenaWorker, str]] = []
             submitted: List[
@@ -1132,6 +1230,427 @@ class RunOrchestrator:
 
         return run_result
 
+    @staticmethod
+    def _apply_retain_output(result: WindowResult, retain: str) -> None:
+        if not result.success:
+            return
+        if retain == "model_a":
+            result.model_b_name = None
+            result.model_b_response = None
+            result.model_b_response_html = None
+        elif retain == "model_b":
+            result.model_a_name = None
+            result.model_a_response = None
+            result.model_a_response_html = None
+
+    def _submission_group_key(self, worker_idx: int) -> str:
+        proxy = self._browser_manager.get_context_proxy(
+            worker_idx,
+            run_id=self._active_run_id,
+        )
+        return proxy or "bare-ip"
+
+    async def _await_submit_slot(self, worker_idx: int, gap: float) -> None:
+        group_key = self._submission_group_key(worker_idx)
+        lock = self._submit_group_locks.setdefault(group_key, asyncio.Lock())
+        async with lock:
+            await self._wait_if_paused()
+            if self._cancelled:
+                return
+
+            now = asyncio.get_running_loop().time()
+            ready_at = self._submit_group_next_ready_at.get(group_key, now)
+            wait_for = max(0.0, ready_at - now)
+            if wait_for > 0:
+                await self._sleep_with_pause(wait_for)
+                if self._cancelled:
+                    return
+
+            self._submit_group_next_ready_at[group_key] = (
+                asyncio.get_running_loop().time() + self._apply_jitter(gap)
+            )
+
+    async def _drain_navigation_tasks(
+        self,
+        navigation_tasks: Optional[List[asyncio.Task[None]]],
+        used_count: int,
+    ) -> None:
+        if not navigation_tasks:
+            return
+
+        for task in navigation_tasks[used_count:]:
+            if not task.done():
+                task.cancel()
+
+        await asyncio.gather(*navigation_tasks, return_exceptions=True)
+
+    async def _await_worker_ready(
+        self,
+        worker_idx: int,
+        worker: ArenaWorker,
+        batch_idx: int,
+        navigation_task: Optional[asyncio.Task[None]] = None,
+    ) -> None:
+        if navigation_task is not None:
+            try:
+                await navigation_task
+            except Exception as exc:
+                logger.error(
+                    "Worker %d navigation failed (batch %d): %s",
+                    worker_idx,
+                    batch_idx,
+                    exc,
+                )
+                raise
+
+        if worker.state_machine.state != WorkerState.READY:
+            raise RuntimeError(
+                f"Worker {worker_idx} not ready for batch {batch_idx + 1} "
+                f"(state={worker.state_machine.state.value})"
+            )
+
+    async def _prepare_and_submit_prompt(
+        self,
+        worker: ArenaWorker,
+        worker_idx: int,
+        prompt: str,
+        gap: float,
+        model_a: Optional[str] = None,
+        model_b: Optional[str] = None,
+        images: Optional[list[dict]] = None,
+        on_submit: Optional[Callable[[], Awaitable[None]]] = None,
+    ) -> None:
+        await worker.prepare_prompt(
+            prompt=prompt,
+            model_a=model_a,
+            model_b=model_b,
+            mark_started=False,
+            pause_event=self._resume_event,
+            images=images,
+        )
+        await self._await_submit_slot(worker_idx, gap)
+        await worker.submit_prepared_prompt(
+            pause_event=self._resume_event,
+        )
+        if on_submit is not None:
+            await on_submit()
+
+    async def _prepare_submit_and_poll_prompt(
+        self,
+        worker: ArenaWorker,
+        worker_idx: int,
+        prompt: str,
+        batch_idx: int,
+        gap: float,
+        retain: str,
+        baseline_responses: Optional[Tuple[str, str]] = None,
+        turn_index: int = 0,
+        model_a: Optional[str] = None,
+        model_b: Optional[str] = None,
+        images: Optional[list[dict]] = None,
+        on_submit: Optional[Callable[[], Awaitable[None]]] = None,
+    ) -> WindowResult:
+        await self._prepare_and_submit_prompt(
+            worker=worker,
+            worker_idx=worker_idx,
+            prompt=prompt,
+            gap=gap,
+            model_a=model_a,
+            model_b=model_b,
+            images=images,
+            on_submit=on_submit,
+        )
+        return await self._poll_worker_for_batch(
+            worker=worker,
+            prompt=prompt,
+            batch_idx=batch_idx,
+            retain=retain,
+            baseline_responses=baseline_responses,
+            turn_index=turn_index,
+        )
+
+    @staticmethod
+    def _build_skipped_turn_results(
+        worker_id: int,
+        batch_idx: int,
+        turns: List[PromptTurn],
+        start_turn_index: int,
+        error: str,
+    ) -> List[WindowResult]:
+        return [
+            RunOrchestrator._failed_result(
+                worker_id=worker_id,
+                prompt=turns[turn_idx].text,
+                batch_idx=batch_idx,
+                error=error,
+                turn_index=turn_idx,
+            )
+            for turn_idx in range(start_turn_index, len(turns))
+        ]
+
+    async def _run_simultaneous_worker_batch(
+        self,
+        worker_idx: int,
+        prompt: str,
+        batch_idx: int,
+        request: StartRunRequest,
+        system_prompt: str,
+        turn_list: Optional[List[PromptTurn]],
+        image_dicts: Optional[list[dict]],
+        gap: float,
+        on_submit: Callable[[], Awaitable[None]],
+        navigation_task: Optional[asyncio.Task[None]] = None,
+    ) -> List[WindowResult]:
+        worker = self._workers[worker_idx]
+        results: List[WindowResult] = []
+        total_turns = len(turn_list) if turn_list else 1
+
+        first_result: Optional[WindowResult] = None
+        try:
+            await self._wait_if_paused()
+            await self._await_worker_ready(
+                worker_idx=worker_idx,
+                worker=worker,
+                batch_idx=batch_idx,
+                navigation_task=navigation_task,
+            )
+
+            baseline_responses: Optional[Tuple[str, str]] = None
+            if system_prompt:
+                await self._prepare_and_submit_prompt(
+                    worker=worker,
+                    worker_idx=worker_idx,
+                    prompt=system_prompt,
+                    gap=gap,
+                    model_a=request.model_a,
+                    model_b=request.model_b,
+                )
+                system_result = await worker.poll_for_completion(
+                    pause_event=self._resume_event,
+                )
+                if not system_result.success:
+                    raise RuntimeError(
+                        system_result.error or "System prompt phase failed"
+                    )
+                baseline_responses = await worker.prepare_for_followup_prompt()
+
+            first_result = await self._prepare_submit_and_poll_prompt(
+                worker=worker,
+                worker_idx=worker_idx,
+                prompt=prompt,
+                batch_idx=batch_idx,
+                gap=gap,
+                retain=request.retain_output,
+                baseline_responses=baseline_responses,
+                turn_index=0,
+                model_a=None if system_prompt else request.model_a,
+                model_b=None if system_prompt else request.model_b,
+                images=image_dicts,
+                on_submit=on_submit,
+            )
+            if not first_result.success:
+                raise RuntimeError(
+                    first_result.error or "Prompt polling failed"
+                )
+        except Exception as exc:
+            logger.error(
+                "Worker %d initial prompt pipeline failed (batch %d): %s",
+                worker_idx,
+                batch_idx,
+                exc,
+            )
+            first_result = await self._attempt_recovery(
+                worker=worker,
+                worker_idx=worker_idx,
+                prompt=prompt,
+                batch_idx=batch_idx,
+                request=request,
+                system_prompt=system_prompt,
+                image_dicts=image_dicts,
+            )
+            self._apply_retain_output(first_result, request.retain_output)
+
+        results.append(first_result)
+        if not first_result.success:
+            if turn_list and total_turns > 1:
+                results.extend(
+                    self._build_skipped_turn_results(
+                        worker_id=worker_idx,
+                        batch_idx=batch_idx,
+                        turns=turn_list,
+                        start_turn_index=1,
+                        error="Skipped (earlier turn failed or cancelled)",
+                    )
+                )
+            return results
+
+        if not turn_list or total_turns <= 1:
+            return results
+
+        for turn_idx in range(1, total_turns):
+            turn = turn_list[turn_idx]
+            turn_image_dicts = (
+                [img.model_dump() for img in turn.images]
+                if turn.images
+                else None
+            )
+
+            try:
+                baseline = await worker.prepare_for_followup_prompt()
+                turn_result = await self._prepare_submit_and_poll_prompt(
+                    worker=worker,
+                    worker_idx=worker_idx,
+                    prompt=turn.text,
+                    batch_idx=batch_idx,
+                    gap=gap,
+                    retain=request.retain_output,
+                    baseline_responses=baseline,
+                    turn_index=turn_idx,
+                    images=turn_image_dicts,
+                    on_submit=on_submit,
+                )
+            except Exception as exc:
+                logger.error(
+                    "Worker %d turn %d failed (batch %d): %s",
+                    worker_idx,
+                    turn_idx,
+                    batch_idx,
+                    exc,
+                )
+                turn_result = self._failed_result(
+                    worker_id=worker_idx,
+                    prompt=turn.text,
+                    batch_idx=batch_idx,
+                    error=f"Turn {turn_idx} failed: {exc}",
+                    turn_index=turn_idx,
+                )
+                await self._publish_failed_worker_result(worker, turn_result)
+
+            results.append(turn_result)
+            if not turn_result.success:
+                results.extend(
+                    self._build_skipped_turn_results(
+                        worker_id=worker_idx,
+                        batch_idx=batch_idx,
+                        turns=turn_list,
+                        start_turn_index=turn_idx + 1,
+                        error="Skipped (earlier turn failed or cancelled)",
+                    )
+                )
+                break
+
+        return results
+
+    async def _run_simultaneous_batch(
+        self,
+        batch_idx: int,
+        total_batches: int,
+        batch_prompts: List[str],
+        request: StartRunRequest,
+        system_prompt: str,
+        turn_list: Optional[List[PromptTurn]],
+        image_dicts: Optional[list[dict]],
+        gap: float,
+        expected_result_slots: int,
+        completed_before_batch: int,
+        navigation_tasks: Optional[List[asyncio.Task[None]]] = None,
+    ) -> List[WindowResult]:
+        workers_in_batch = min(len(batch_prompts), len(self._workers))
+        submitted_count = 0
+        progress_lock = asyncio.Lock()
+
+        await self._publish(
+            Event(
+                type=EventType.LOG,
+                data={
+                    "level": "info",
+                    "text": (
+                        f"Batch {batch_idx + 1}/{total_batches}: windows will "
+                        "prepare as soon as they are ready; same-IP submit clicks "
+                        "will respect the configured gap"
+                    ),
+                },
+            )
+        )
+
+        async def on_submit() -> None:
+            nonlocal submitted_count
+            async with progress_lock:
+                submitted_count += 1
+                await self._publish(
+                    Event(
+                        type=EventType.RUN_PROGRESS,
+                        data={
+                            "total_workers": expected_result_slots,
+                            "submitted": completed_before_batch + submitted_count,
+                            "phase": "submitting",
+                            "batch": batch_idx + 1,
+                            "total_batches": total_batches,
+                        },
+                    )
+                )
+
+        worker_tasks = [
+            asyncio.create_task(
+                self._run_simultaneous_worker_batch(
+                    worker_idx=i,
+                    prompt=batch_prompts[i],
+                    batch_idx=batch_idx,
+                    request=request,
+                    system_prompt=system_prompt,
+                    turn_list=turn_list,
+                    image_dicts=image_dicts,
+                    gap=gap,
+                    on_submit=on_submit,
+                    navigation_task=(
+                        navigation_tasks[i]
+                        if navigation_tasks and i < len(navigation_tasks)
+                        else None
+                    ),
+                )
+            )
+            for i in range(workers_in_batch)
+        ]
+
+        worker_results = await asyncio.gather(
+            *worker_tasks,
+            return_exceptions=True,
+        )
+        await self._drain_navigation_tasks(navigation_tasks, workers_in_batch)
+
+        batch_results: List[WindowResult] = []
+        for i, result in enumerate(worker_results):
+            if isinstance(result, BaseException):
+                logger.error(
+                    "Worker %d simultaneous batch pipeline crashed (batch %d): %s",
+                    i,
+                    batch_idx,
+                    result,
+                )
+                failed = self._failed_result(
+                    worker_id=i,
+                    prompt=batch_prompts[i],
+                    batch_idx=batch_idx,
+                    error=f"Unexpected worker pipeline failure: {result}",
+                )
+                await self._publish_failed_worker_result(self._workers[i], failed)
+                batch_results.append(failed)
+                if turn_list and len(turn_list) > 1:
+                    batch_results.extend(
+                        self._build_skipped_turn_results(
+                            worker_id=i,
+                            batch_idx=batch_idx,
+                            turns=turn_list,
+                            start_turn_index=1,
+                            error="Skipped (earlier turn failed or cancelled)",
+                        )
+                    )
+            else:
+                batch_results.extend(result)
+
+        batch_results.sort(key=lambda item: (item.turn_index, item.worker_id))
+        return batch_results
+
     async def _finish_cancelled(
         self,
         run_id: str,
@@ -1467,6 +1986,10 @@ class RunOrchestrator:
         )
 
         await self._wait_if_paused()
+        recovery_gap = (
+            request.submission_gap_seconds
+            or self._config.timing.submission_gap_seconds
+        )
 
         max_context_retries = 3
         for attempt in range(1, max_context_retries + 1):
@@ -1563,11 +2086,13 @@ class RunOrchestrator:
                         },
                     )
                 )
-                await worker.submit_prompt(
+                await self._prepare_and_submit_prompt(
+                    worker=worker,
+                    worker_idx=worker_idx,
                     prompt=system_prompt,
+                    gap=recovery_gap,
                     model_a=request.model_a,
                     model_b=request.model_b,
-                    pause_event=self._resume_event,
                 )
                 sys_result = await worker.poll_for_completion(
                     pause_event=self._resume_event,
@@ -1614,11 +2139,13 @@ class RunOrchestrator:
                     },
                 )
             )
-            await worker.submit_prompt(
+            await self._prepare_and_submit_prompt(
+                worker=worker,
+                worker_idx=worker_idx,
                 prompt=prompt,
+                gap=recovery_gap,
                 model_a=None if system_prompt else request.model_a,
                 model_b=None if system_prompt else request.model_b,
-                pause_event=self._resume_event,
                 images=image_dicts,
             )
 

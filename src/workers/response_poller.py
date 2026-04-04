@@ -10,6 +10,7 @@ from playwright.async_api import Page
 from src.browser.selectors import SelectorRegistry
 from src.browser.challenges import ChallengeType, detect_challenge, detect_login_dialog
 from src.core.exceptions import (
+    ChallengeDetectedError,
     GenerationFailedBannerError,
     LoginDialogError,
     PollingTimeoutError,
@@ -110,7 +111,20 @@ class ResponsePoller:
                         worker_id,
                     )
                     raise RateLimitError(worker_id)
+                if challenge in (
+                    ChallengeType.TURNSTILE,
+                    ChallengeType.RECAPTCHA,
+                    ChallengeType.SECURITY_MODAL,
+                ):
+                    logger.warning(
+                        "Worker %d: challenge %s detected during polling",
+                        worker_id,
+                        challenge.value,
+                    )
+                    raise ChallengeDetectedError(worker_id, challenge.value)
             except RateLimitError:
+                raise
+            except ChallengeDetectedError:
                 raise
             except Exception:
                 pass

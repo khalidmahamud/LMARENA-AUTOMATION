@@ -55,6 +55,8 @@ class StartRunRequest(BaseModel):
     retain_output: str = Field(default="both")  # "both", "model_a", "model_b"
     clear_cookies: bool = False
     incognito: bool = False
+    headless: Optional[bool] = None
+    minimized: Optional[bool] = None
     images: Optional[List[ImagePayload]] = Field(default=None, max_length=10)
     simultaneous_start: bool = False
     zoom_pct: int = Field(default=100, ge=25, le=200)

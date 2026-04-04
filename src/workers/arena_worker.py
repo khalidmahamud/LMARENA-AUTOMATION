@@ -5,7 +5,7 @@ import logging
 from datetime import datetime, timezone
 from typing import Callable, Coroutine, Optional
 
-from playwright.async_api import BrowserContext, ElementHandle, Page
+from playwright.async_api import BrowserContext, ElementHandle, Page, Worker
 
 from src.browser.challenges import ChallengeType, detect_challenge
 from src.browser.selectors import SelectorRegistry
@@ -14,6 +14,7 @@ from src.core.exceptions import (
     ChallengeDetectedError,
     GenerationFailedBannerError,
     LoginDialogError,
+    ModelSelectionError,
     NavigationError,
     PollingTimeoutError,
     RateLimitError,
@@ -73,6 +74,8 @@ class ArenaWorker:
         self._last_prompt: Optional[str] = None
         self._last_model_a: Optional[str] = None
         self._last_model_b: Optional[str] = None
+        self._zoom_service_worker: Optional[Worker] = None
+        self._zoom_service_worker_checked = False
 
         self._selectors = SelectorRegistry.instance()
         self._human = HumanSimulator(config.typing)
@@ -192,6 +195,7 @@ class ArenaWorker:
                         ),
                     )
                     self._context = await self._context_recreator(self._id)
+                    self._reset_zoom_service_worker_cache()
                     self._page = (
                         self._context.pages[0]
                         if self._context.pages
@@ -412,6 +416,52 @@ class ArenaWorker:
                         return false;
                     };
 
+                    const dismissCookieConsent = () => {
+                        const looksLikeCookieScope = (text) => {
+                            const normalized = (text || "").toLowerCase();
+                            return (
+                                normalized.includes("this website uses cookies") ||
+                                normalized.includes("manage cookies") ||
+                                normalized.includes("accept cookies") ||
+                                normalized.includes("accept all cookies")
+                            );
+                        };
+
+                        const scopes = Array.from(
+                            document.querySelectorAll(
+                                '[role="dialog"], [aria-modal="true"], .modal, .popup, .overlay, body'
+                            )
+                        );
+
+                        for (const scope of scopes) {
+                            if (scope !== document.body && !isVisible(scope)) continue;
+                            if (!looksLikeCookieScope(scope.innerText || "")) continue;
+
+                            const acceptButton = Array.from(
+                                scope.querySelectorAll('button, [role="button"]')
+                            ).find((btn) => {
+                                const text = (btn.innerText || btn.textContent || "")
+                                    .trim()
+                                    .toLowerCase();
+                                return (
+                                    isVisible(btn) &&
+                                    (
+                                        text === "accept cookies" ||
+                                        text === "accept all cookies" ||
+                                        text === "accept"
+                                    )
+                                );
+                            });
+
+                            if (acceptButton) {
+                                acceptButton.click();
+                                return true;
+                            }
+                        }
+
+                        return false;
+                    };
+
                     const hidePromos = () => {
                         const anchors = Array.from(
                             document.querySelectorAll("a[href]")
@@ -435,12 +485,15 @@ class ArenaWorker:
 
                     window.__lmArenaHidePromos = hidePromos;
                     window.__lmArenaShowToast = showToast;
+                    window.__lmArenaDismissCookieConsent =
+                        dismissCookieConsent;
                     window.__lmArenaDismissVotingOnboarding =
                         dismissVotingOnboarding;
                     if (!window.__lmArenaPageGuardsInstalled) {
                         window.__lmArenaPageGuardsInstalled = true;
                         const observer = new MutationObserver(() => {
                             hidePromos();
+                            dismissCookieConsent();
                             dismissVotingOnboarding();
                         });
                         observer.observe(document.documentElement, {
@@ -448,11 +501,13 @@ class ArenaWorker:
                             subtree: true,
                         });
                         window.setInterval(() => {
+                            dismissCookieConsent();
                             dismissVotingOnboarding();
                         }, 500);
                     }
 
                     hidePromos();
+                    dismissCookieConsent();
                     dismissVotingOnboarding();
                 }"""
             )
@@ -485,14 +540,225 @@ class ArenaWorker:
         assert self._page is not None
         await self._ensure_active(pause_event)
 
+        early_zoom_task: Optional[asyncio.Task[bool]] = None
+        target_zoom = max(25, min(200, int(getattr(self, "_zoom_pct", 100))))
+        if target_zoom != 100:
+            early_zoom_task = asyncio.create_task(
+                self._trigger_zoom_when_side_by_side_ready(
+                    pause_event=pause_event,
+                    timeout_seconds=max(dialog_wait_seconds, 10.0),
+                )
+            )
+
         await self._install_arena_page_guards()
         await self._dismiss_known_dialogs(
             wait_seconds=max(dialog_wait_seconds, 10.0),
             pause_event=pause_event,
         )
         await self._ensure_active(pause_event)
+        if early_zoom_task is not None:
+            try:
+                await early_zoom_task
+            except Exception as exc:
+                await self._log(
+                    "debug",
+                    f"Early browser zoom trigger skipped: {exc}",
+                )
 
     # ── Navigation ──
+
+    async def _trigger_zoom_when_side_by_side_ready(
+        self,
+        pause_event: Optional[asyncio.Event] = None,
+        timeout_seconds: float = 10.0,
+    ) -> bool:
+        assert self._page is not None
+
+        target_zoom = max(25, min(200, int(getattr(self, "_zoom_pct", 100))))
+        if target_zoom == 100:
+            return False
+
+        selector = self._selectors.get("side_by_side_button")
+        deadline = asyncio.get_running_loop().time() + timeout_seconds
+
+        while asyncio.get_running_loop().time() < deadline:
+            await self._ensure_active(pause_event)
+            try:
+                button = await self._page.wait_for_selector(
+                    selector,
+                    state="visible",
+                    timeout=500,
+                )
+            except Exception:
+                button = None
+
+            if button is not None:
+                await self._log(
+                    "debug",
+                    (
+                        "Side by Side button detected; triggering browser zoom "
+                        f"refresh to {target_zoom}%"
+                    ),
+                )
+                return await self._refresh_managed_browser_zoom(target_zoom)
+
+            await self._sleep_with_controls(0.1, pause_event)
+
+        return False
+
+    async def _wait_for_zoom_settle_before_model_selection(
+        self,
+        pause_event: Optional[asyncio.Event] = None,
+        timeout_seconds: float = 8.0,
+    ) -> None:
+        """Wait for a non-default browser zoom to settle before opening model pickers."""
+        assert self._page is not None
+
+        target_zoom = max(25, min(200, int(getattr(self, "_zoom_pct", 100))))
+        if target_zoom == 100:
+            return
+
+        await self._log(
+            "debug",
+            f"Waiting for browser zoom {target_zoom}% to settle before model selection",
+        )
+        try:
+            await self._page.wait_for_load_state("load", timeout=10_000)
+        except Exception:
+            pass
+
+        await self._refresh_managed_browser_zoom(target_zoom)
+
+        deadline = asyncio.get_running_loop().time() + timeout_seconds
+        last_signature: Optional[tuple] = None
+        stable_samples = 0
+        zoom_match_samples = 0
+        zoom_state_seen = False
+        target_zoom_ratio = target_zoom / 100.0
+
+        while asyncio.get_running_loop().time() < deadline:
+            await self._ensure_active(pause_event)
+            zoom_state = await self._get_managed_zoom_state()
+            if zoom_state and zoom_state.get("ok"):
+                arena_tabs = zoom_state.get("arenaTabs") or []
+                matching_tabs = [
+                    tab for tab in arena_tabs
+                    if isinstance(tab, dict)
+                    and isinstance(tab.get("zoom"), (int, float))
+                    and abs(float(tab["zoom"]) - target_zoom_ratio) <= 0.02
+                ]
+                zoom_state_seen = zoom_state_seen or bool(arena_tabs)
+                if matching_tabs:
+                    zoom_match_samples += 1
+                else:
+                    zoom_match_samples = 0
+
+            snapshot = await self._page.evaluate(
+                """() => ({
+                    readyState: document.readyState,
+                    innerWidth: window.innerWidth,
+                    innerHeight: window.innerHeight,
+                    dpr: window.devicePixelRatio || 1,
+                })"""
+            )
+            signature = (
+                snapshot.get("readyState"),
+                snapshot.get("innerWidth"),
+                snapshot.get("innerHeight"),
+                round(float(snapshot.get("dpr") or 1), 3),
+            )
+            if signature == last_signature and snapshot.get("readyState") == "complete":
+                stable_samples += 1
+            else:
+                stable_samples = 1
+                last_signature = signature
+
+            if zoom_match_samples >= 2 and stable_samples >= 2:
+                return
+            if not zoom_state_seen and stable_samples >= 4:
+                return
+
+            await self._sleep_with_controls(0.25, pause_event)
+
+        await self._log(
+            "debug",
+            "Browser zoom did not fully settle before timeout; continuing with model selection",
+        )
+
+    async def _get_zoom_service_worker(self) -> Optional[Worker]:
+        if self._zoom_service_worker is not None:
+            return self._zoom_service_worker
+
+        workers = self._context.service_workers
+        if workers:
+            self._zoom_service_worker = workers[0]
+            self._zoom_service_worker_checked = True
+            return self._zoom_service_worker
+        if self._zoom_service_worker_checked:
+            return None
+        try:
+            self._zoom_service_worker = await self._context.wait_for_event(
+                "serviceworker",
+                timeout=5_000,
+            )
+            self._zoom_service_worker_checked = True
+            return self._zoom_service_worker
+        except Exception as exc:
+            self._zoom_service_worker_checked = True
+            await self._log(
+                "debug",
+                f"Zoom extension service worker unavailable: {exc}",
+            )
+            return None
+
+    def _reset_zoom_service_worker_cache(self) -> None:
+        self._zoom_service_worker = None
+        self._zoom_service_worker_checked = False
+
+    async def _refresh_managed_browser_zoom(self, target_zoom: int) -> bool:
+        worker = await self._get_zoom_service_worker()
+        if worker is None:
+            return False
+
+        try:
+            result = await worker.evaluate(
+                """async zoomPct => {
+                    if (typeof globalThis.configureManagedZoom !== "function") {
+                        return { ok: false, error: "configureManagedZoom missing" };
+                    }
+                    return await globalThis.configureManagedZoom(zoomPct);
+                }""",
+                target_zoom,
+            )
+            return bool(isinstance(result, dict) and result.get("ok"))
+        except Exception as exc:
+            await self._log(
+                "debug",
+                f"Managed zoom refresh skipped: {exc}",
+            )
+            return False
+
+    async def _get_managed_zoom_state(self) -> Optional[dict]:
+        worker = await self._get_zoom_service_worker()
+        if worker is None:
+            return None
+
+        try:
+            result = await worker.evaluate(
+                """async () => {
+                    if (typeof globalThis.getManagedZoomState !== "function") {
+                        return { ok: false, error: "getManagedZoomState missing" };
+                    }
+                    return await globalThis.getManagedZoomState();
+                }"""
+            )
+            return result if isinstance(result, dict) else None
+        except Exception as exc:
+            await self._log(
+                "debug",
+                f"Managed zoom state check skipped: {exc}",
+            )
+            return None
 
     async def navigate_to_arena(
         self,
@@ -673,14 +939,67 @@ class ArenaWorker:
         return handle.as_element()
 
     async def _find_cookie_accept_button(self) -> Optional[ElementHandle]:
-        return await self._find_dialog_button_by_text(
+        button = await self._find_dialog_button_by_text(
             button_text="Accept Cookies",
             dialog_text_snippets=(
                 "this website uses cookies",
                 "accept cookies",
+                "manage cookies",
+                "personalize content and ads",
             ),
             selector_key="cookie_accept_button",
         )
+        if button is not None:
+            return button
+
+        assert self._page is not None
+        handle = await self._page.evaluate_handle(
+            """() => {
+                const isVisible = (el) => {
+                    if (!el) return false;
+                    const style = window.getComputedStyle(el);
+                    const rect = el.getBoundingClientRect();
+                    return (
+                        style.display !== 'none' &&
+                        style.visibility !== 'hidden' &&
+                        rect.width > 0 &&
+                        rect.height > 0
+                    );
+                };
+
+                const norm = (s) => (s || '').replace(/\\s+/g, ' ').trim().toLowerCase();
+                const buttons = Array.from(
+                    document.querySelectorAll('button, [role="button"]')
+                ).filter(isVisible);
+
+                for (const btn of buttons) {
+                    const text = norm(btn.innerText || btn.textContent || '');
+                    if (
+                        text !== 'accept cookies' &&
+                        text !== 'accept all cookies' &&
+                        text !== 'accept'
+                    ) {
+                        continue;
+                    }
+
+                    const scope =
+                        btn.closest('[role="dialog"], [aria-modal="true"], .modal, .popup, .overlay')
+                        || btn.parentElement
+                        || document.body;
+                    const scopeText = norm(scope.innerText || '');
+                    if (
+                        scopeText.includes('cookies') ||
+                        scopeText.includes('manage cookies') ||
+                        scopeText.includes('personalize content and ads')
+                    ) {
+                        return btn;
+                    }
+                }
+
+                return null;
+            }"""
+        )
+        return handle.as_element()
 
     async def _find_voting_onboarding_button(self) -> Optional[ElementHandle]:
         return await self._find_dialog_button_by_text(
@@ -891,6 +1210,33 @@ class ArenaWorker:
             )
 
         try:
+            accept_button = self._page.locator(
+                "button:has-text('Accept Cookies'), "
+                "button:has-text('Accept All Cookies'), "
+                "[role='button']:has-text('Accept Cookies'), "
+                "[role='button']:has-text('Accept All Cookies')"
+            ).first
+            if await accept_button.count() > 0:
+                await self._log(
+                    "info",
+                    "Cookie consent button detected; clicking accept",
+                )
+                try:
+                    await accept_button.scroll_into_view_if_needed(
+                        timeout=2_000
+                    )
+                except Exception:
+                    pass
+                await accept_button.click(force=True, timeout=3_000)
+                await self._sleep_with_controls(0.3, pause_event)
+                return True
+        except Exception as exc:
+            await self._log(
+                "debug",
+                f"Global cookie button click failed: {exc}",
+            )
+
+        try:
             button = await self._find_cookie_accept_button()
             if button is not None:
                 await self._log(
@@ -927,13 +1273,25 @@ class ArenaWorker:
                         };
                         const norm = (s) => (s || "").trim().toLowerCase();
 
-                        const dialogs = Array.from(document.querySelectorAll('[role="dialog"]'))
-                            .filter(isVisible);
-                        for (const dialog of dialogs) {
-                            const text = norm(dialog.innerText);
-                            if (!text.includes("this website uses cookies")) continue;
-                            const accept = Array.from(dialog.querySelectorAll("button")).find((btn) => {
-                                return isVisible(btn) && norm(btn.innerText) === "accept cookies";
+                        const scopes = Array.from(document.querySelectorAll('[role="dialog"], [aria-modal="true"], .modal, .popup, .overlay, body'))
+                            .filter((el) => el === document.body || isVisible(el));
+                        for (const scope of scopes) {
+                            const text = norm(scope.innerText);
+                            if (
+                                !text.includes("this website uses cookies") &&
+                                !text.includes("manage cookies") &&
+                                !text.includes("accept cookies")
+                            ) continue;
+                            const accept = Array.from(scope.querySelectorAll('button, [role="button"]')).find((btn) => {
+                                const btnText = norm(btn.innerText || btn.textContent);
+                                return (
+                                    isVisible(btn) &&
+                                    (
+                                        btnText === "accept cookies" ||
+                                        btnText === "accept all cookies" ||
+                                        btnText === "accept"
+                                    )
+                                );
                             });
                             if (!accept) continue;
                             accept.dispatchEvent(new MouseEvent("click", {
@@ -1170,6 +1528,7 @@ class ArenaWorker:
 
             # Get a fresh context from the manager
             self._context = await self._context_recreator(self._id)
+            self._reset_zoom_service_worker_cache()
             if clear_cookies:
                 await self._clear_cookies()
             self._page = (
@@ -1277,17 +1636,42 @@ class ArenaWorker:
 
         if model_a or model_b:
             await self.state_machine.transition(WorkerState.SELECTING_MODEL)
-            if model_a:
-                await self._select_model(
-                    model_a,
-                    index=0,
+            await self._wait_for_zoom_settle_before_model_selection(
+                pause_event=pause_event,
+            )
+            try:
+                if model_a:
+                    await self._select_model(
+                        model_a,
+                        index=0,
+                        pause_event=pause_event,
+                    )
+                if model_b:
+                    await self._select_model(
+                        model_b,
+                        index=1,
+                        pause_event=pause_event,
+                    )
+            except ModelSelectionError:
+                if retry_on_challenge <= 0 or self._context_recreator is None:
+                    raise
+                await self._log(
+                    "warning",
+                    "Model selector did not become usable within 30s; reopening a fresh window and retrying prepare",
+                )
+                await self.reset_with_fresh_context(
+                    zoom_pct=self._zoom_pct,
+                    clear_cookies=False,
                     pause_event=pause_event,
                 )
-            if model_b:
-                await self._select_model(
-                    model_b,
-                    index=1,
+                return await self.prepare_prompt(
+                    prompt=prompt,
+                    model_a=model_a,
+                    model_b=model_b,
+                    mark_started=mark_started,
+                    retry_on_challenge=retry_on_challenge - 1,
                     pause_event=pause_event,
+                    images=images,
                 )
 
         # Paste prompt
@@ -1387,11 +1771,22 @@ class ArenaWorker:
                 pause_event=pause_event,
             )
 
-            last_snapshot = await self._wait_for_submission_acceptance(
-                expected_prompt=self._last_prompt or "",
-                pause_event=pause_event,
-                timeout_seconds=3.0,
-            )
+            try:
+                last_snapshot = await self._wait_for_submission_acceptance(
+                    expected_prompt=self._last_prompt or "",
+                    pause_event=pause_event,
+                    timeout_seconds=3.0,
+                )
+            except ChallengeDetectedError as exc:
+                return await self._recover_submit_path_after_challenge(
+                    exc=exc,
+                    retry_on_challenge=retry_on_challenge,
+                    pause_event=pause_event,
+                    message=(
+                        f"Challenge ({exc.challenge_type}) appeared right after submit - "
+                        "reopening window with a fresh IP and retrying"
+                    ),
+                )
             if last_snapshot.get("accepted"):
                 submit_accepted = True
                 break
@@ -1455,11 +1850,22 @@ class ArenaWorker:
                     pause_event=pause_event,
                 )
 
-            last_snapshot = await self._wait_for_submission_acceptance(
-                expected_prompt=self._last_prompt or "",
-                pause_event=pause_event,
-                timeout_seconds=2.0,
-            )
+            try:
+                last_snapshot = await self._wait_for_submission_acceptance(
+                    expected_prompt=self._last_prompt or "",
+                    pause_event=pause_event,
+                    timeout_seconds=2.0,
+                )
+            except ChallengeDetectedError as exc:
+                return await self._recover_submit_path_after_challenge(
+                    exc=exc,
+                    retry_on_challenge=retry_on_challenge,
+                    pause_event=pause_event,
+                    message=(
+                        f"Challenge ({exc.challenge_type}) appeared after dialog handling - "
+                        "reopening window with a fresh IP and retrying"
+                    ),
+                )
             if last_snapshot.get("accepted"):
                 submit_accepted = True
                 if dialog_dismissed:
@@ -1471,12 +1877,23 @@ class ArenaWorker:
 
             if attempt < 3:
                 # One extra grace window before re-clicking submit.
-                grace_snapshot = await self._wait_for_submission_acceptance(
-                    expected_prompt=self._last_prompt or "",
-                    pause_event=pause_event,
-                    timeout_seconds=4.0,
-                    poll_interval=0.4,
-                )
+                try:
+                    grace_snapshot = await self._wait_for_submission_acceptance(
+                        expected_prompt=self._last_prompt or "",
+                        pause_event=pause_event,
+                        timeout_seconds=4.0,
+                        poll_interval=0.4,
+                    )
+                except ChallengeDetectedError as exc:
+                    return await self._recover_submit_path_after_challenge(
+                        exc=exc,
+                        retry_on_challenge=retry_on_challenge,
+                        pause_event=pause_event,
+                        message=(
+                            f"Challenge ({exc.challenge_type}) appeared while waiting for the submit result - "
+                            "reopening window with a fresh IP and retrying"
+                        ),
+                    )
                 last_snapshot = grace_snapshot
                 if grace_snapshot.get("accepted"):
                     submit_accepted = True
@@ -1524,6 +1941,46 @@ class ArenaWorker:
             "info",
             "Prompt submission accepted; switching to response polling",
         )
+
+        try:
+            generation_snapshot = await self._wait_for_generation_start_after_submit(
+                pause_event=pause_event,
+                timeout_seconds=30.0,
+            )
+        except ChallengeDetectedError as exc:
+            return await self._recover_submit_path_after_challenge(
+                exc=exc,
+                retry_on_challenge=retry_on_challenge,
+                pause_event=pause_event,
+                message=(
+                    f"Challenge ({exc.challenge_type}) appeared before generation started - "
+                    "reopening window with a fresh IP and retrying"
+                ),
+            )
+
+        if not generation_snapshot.get("generation_started"):
+            if retry_on_challenge <= 0 or self._context_recreator is None:
+                raise SubmissionError(
+                    "Generation did not start within 30 seconds after submit",
+                    self._id,
+                )
+            await self._log(
+                "warning",
+                "Generation did not start within 30 seconds after submit; "
+                "reopening window with a fresh IP and retrying",
+            )
+            await self.reset_with_fresh_context(
+                zoom_pct=self._zoom_pct,
+                clear_cookies=False,
+                pause_event=pause_event,
+            )
+            return await self.submit_prompt(
+                prompt=self._last_prompt,
+                model_a=self._last_model_a,
+                model_b=self._last_model_b,
+                retry_on_challenge=retry_on_challenge - 1,
+                pause_event=pause_event,
+            )
 
         # Transition to polling
         await self.state_machine.transition(WorkerState.POLLING)
@@ -1946,11 +2403,159 @@ class ArenaWorker:
         latest: dict = {"accepted": False}
         while asyncio.get_running_loop().time() < deadline:
             await self._ensure_active(pause_event)
+            challenge = await detect_challenge(self._page)
+            if challenge != ChallengeType.NONE:
+                raise ChallengeDetectedError(self._id, challenge.value)
             latest = await self._get_submission_snapshot(expected_prompt)
             if latest.get("accepted"):
                 return latest
             await self._sleep_with_controls(poll_interval, pause_event)
         return latest
+
+    async def _get_generation_start_snapshot(self) -> dict:
+        assert self._page is not None
+
+        slide_sel = self._selectors.get("response_slide")
+        stop_sel = self._selectors.get("stop_generation_button")
+        streaming_sel = self._selectors.get("streaming_indicator")
+        textarea_sel = self._selectors.get("prompt_textarea")
+
+        snapshot = await self._page.evaluate(
+            """({ slideSelector, stopSelector, streamingSelector, textareaSelector }) => {
+                const isVisible = (el) => {
+                    if (!el) return false;
+                    const style = window.getComputedStyle(el);
+                    const rect = el.getBoundingClientRect();
+                    return (
+                        style.display !== "none" &&
+                        style.visibility !== "hidden" &&
+                        rect.width > 0 &&
+                        rect.height > 0
+                    );
+                };
+
+                const normalize = (value) =>
+                    (value || "").replace(/\\u200b/g, "").replace(/\\s+/g, " ").trim();
+
+                const readPromptValue = (el) => {
+                    if (!el) return "";
+                    const tag = (el.tagName || "").toLowerCase();
+                    if (tag === "textarea" || tag === "input") {
+                        return el.value || "";
+                    }
+                    return el.innerText || el.textContent || "";
+                };
+
+                const pathname = window.location.pathname || "";
+                const textarea = Array.from(document.querySelectorAll(textareaSelector))
+                    .filter(isVisible)
+                    .pop() || null;
+                const promptValue = normalize(readPromptValue(textarea));
+                const stopVisible = Array.from(document.querySelectorAll(stopSelector))
+                    .some(isVisible);
+                const streamingVisible = Array.from(document.querySelectorAll(streamingSelector))
+                    .some(isVisible);
+                const slides = Array.from(document.querySelectorAll(slideSelector))
+                    .filter(isVisible);
+                const responseTextVisible = slides.some((slide) =>
+                    Array.from(slide.querySelectorAll(".prose"))
+                        .filter(isVisible)
+                        .some((node) => normalize(node.innerText || node.textContent).length > 0)
+                );
+
+                const onConversationPage =
+                    pathname.startsWith("/c/") || pathname.startsWith("/chat/");
+                const generationStarted =
+                    stopVisible ||
+                    streamingVisible ||
+                    responseTextVisible ||
+                    onConversationPage;
+
+                return {
+                    generation_started: generationStarted,
+                    stop_visible: stopVisible,
+                    streaming_visible: streamingVisible,
+                    response_text_visible: responseTextVisible,
+                    response_slide_count: slides.length,
+                    prompt_cleared: !promptValue,
+                    pathname,
+                };
+            }""",
+            {
+                "slideSelector": slide_sel,
+                "stopSelector": stop_sel,
+                "streamingSelector": streaming_sel,
+                "textareaSelector": textarea_sel,
+            },
+        )
+        return snapshot if isinstance(snapshot, dict) else {"generation_started": False}
+
+    async def _wait_for_generation_start_after_submit(
+        self,
+        pause_event: Optional[asyncio.Event] = None,
+        timeout_seconds: float = 30.0,
+        poll_interval: float = 0.5,
+    ) -> dict:
+        deadline = asyncio.get_running_loop().time() + timeout_seconds
+        latest: dict = {"generation_started": False}
+
+        while asyncio.get_running_loop().time() < deadline:
+            await self._ensure_active(pause_event)
+
+            try:
+                await self._dismiss_known_dialogs(
+                    wait_seconds=0.0,
+                    pause_event=pause_event,
+                )
+            except ChallengeDetectedError:
+                raise
+
+            challenge = await detect_challenge(self._page)
+            if challenge != ChallengeType.NONE:
+                raise ChallengeDetectedError(self._id, challenge.value)
+
+            latest = await self._get_generation_start_snapshot()
+            if latest.get("generation_started"):
+                return latest
+
+            await self._sleep_with_controls(poll_interval, pause_event)
+
+        return latest
+
+    async def _recover_submit_path_after_challenge(
+        self,
+        exc: ChallengeDetectedError,
+        retry_on_challenge: int,
+        pause_event: Optional[asyncio.Event],
+        message: str,
+    ) -> None:
+        if retry_on_challenge <= 0 or self._context_recreator is None:
+            raise exc
+        if self.state_machine.state != WorkerState.WAITING_FOR_CHALLENGE:
+            await self.state_machine.transition(
+                WorkerState.WAITING_FOR_CHALLENGE
+            )
+        recovery_challenge = (
+            ChallengeType(exc.challenge_type)
+            if exc.challenge_type in {item.value for item in ChallengeType}
+            else ChallengeType.SECURITY_MODAL
+        )
+        await self._log("warning", message)
+        await self._handle_challenge(
+            recovery_challenge,
+            max_retries=1,
+            clear_cookies=False,
+            pause_event=pause_event,
+        )
+        if self.state_machine.state != WorkerState.READY:
+            await self.state_machine.transition(WorkerState.READY)
+        return await self.submit_prompt(
+            prompt=self._last_prompt,
+            model_a=self._last_model_a,
+            model_b=self._last_model_b,
+            retry_on_challenge=retry_on_challenge - 1,
+            pause_event=pause_event,
+        )
 
     @staticmethod
     def _should_retry_submit(snapshot: Optional[dict]) -> bool:
@@ -2131,17 +2736,24 @@ class ArenaWorker:
         search for *model_name*, and select it.
         """
         label = "A" if index == 0 else "B"
+        timeout_seconds = 30.0
+        deadline = asyncio.get_running_loop().time() + timeout_seconds
+        last_issue = f"Model {label} selector was not usable"
         try:
             option_sel = self._selectors.get("model_option")
-            for attempt in range(1, 4):
+            attempt = 0
+            while asyncio.get_running_loop().time() < deadline:
+                attempt += 1
                 await self._ensure_active(pause_event)
                 dropdown = await self._find_model_dropdown_button(index)
                 if dropdown is None:
+                    last_issue = f"Could not find model {label} dropdown button"
                     await self._log(
-                        "warning",
-                        f"Could not find model {label} dropdown button",
+                        "debug",
+                        f"{last_issue} on attempt {attempt}; retrying",
                     )
-                    return
+                    await self._sleep_with_controls(0.5, pause_event)
+                    continue
 
                 await self._ensure_active(pause_event)
                 await self._human.click_element(self._page, dropdown)
@@ -2149,10 +2761,12 @@ class ArenaWorker:
                     pause_event=pause_event
                 )
                 if search_input is None:
+                    last_issue = (
+                        f"Model {label} picker search input was not ready"
+                    )
                     await self._log(
                         "debug",
-                        f"Model {label} picker search input was not ready on "
-                        f"attempt {attempt}; retrying",
+                        f"{last_issue} on attempt {attempt}; retrying",
                     )
                     await self._ensure_active(pause_event)
                     await self._page.keyboard.press("Escape")
@@ -2260,10 +2874,12 @@ class ArenaWorker:
                     )
                     return
 
+                last_issue = (
+                    f"Model {label} option for '{model_name}' was not ready"
+                )
                 await self._log(
                     "debug",
-                    f"Model {label} option for '{model_name}' was not ready on "
-                    f"attempt {attempt}; retrying",
+                    f"{last_issue} on attempt {attempt}; retrying",
                 )
                 await self._ensure_active(pause_event)
                 await self._page.keyboard.press("Escape")
@@ -2271,7 +2887,7 @@ class ArenaWorker:
 
             await self._log(
                 "warning",
-                f"No model {label} option found for '{model_name}'",
+                f"{last_issue} for 30s; forcing fresh window reload",
             )
             try:
                 await self._ensure_active(pause_event)
@@ -2279,10 +2895,13 @@ class ArenaWorker:
                 await self._sleep_with_controls(0.3, pause_event)
             except Exception:
                 pass
+            raise ModelSelectionError(self._id, model_name)
+        except ModelSelectionError:
+            raise
         except Exception as exc:
             await self._log(
                 "warning",
-                f"Model selection failed: {exc}. Using Arena default.",
+                f"Model selection failed: {exc}",
             )
             # Always close the dialog to avoid stealing focus from prompt input
             try:
@@ -2291,6 +2910,7 @@ class ArenaWorker:
                 await self._sleep_with_controls(0.3, pause_event)
             except Exception:
                 pass
+            raise ModelSelectionError(self._id, model_name) from exc
 
     # ── Polling ──
 
@@ -2385,6 +3005,24 @@ class ArenaWorker:
                 ),
                 recovery_type="generation_error",
                 proxy_log_context="Generation-error retry proxy",
+                baseline_responses=baseline_responses,
+                pause_event=pause_event,
+                recovery_retries=_recovery_retries,
+                poll_timeout_retries=_poll_timeout_retries,
+                poll_timeout_override_seconds=_poll_timeout_override_seconds,
+            )
+
+        except ChallengeDetectedError as exc:
+            if _recovery_retries <= 0 or self._context_recreator is None:
+                raise
+
+            return await self._recover_from_polling_restart(
+                reason_text=(
+                    f"Challenge ({exc.challenge_type}) detected during polling - "
+                    "closing window, reopening fresh, and retrying"
+                ),
+                recovery_type=exc.challenge_type,
+                proxy_log_context="Challenge retry proxy",
                 baseline_responses=baseline_responses,
                 pause_event=pause_event,
                 recovery_retries=_recovery_retries,
@@ -2513,6 +3151,7 @@ class ArenaWorker:
             f"Requesting a fresh browser context after '{recovery_type}' while polling",
         )
         self._context = await self._context_recreator(self._id)
+        self._reset_zoom_service_worker_cache()
         self._page = (
             self._context.pages[0]
             if self._context.pages
@@ -2617,6 +3256,7 @@ class ArenaWorker:
         # 3. Recreate the browser context (closes old window, opens fresh one)
         await self._ensure_active(pause_event)
         self._context = await self._context_recreator(self._id)
+        self._reset_zoom_service_worker_cache()
         await self._log_current_proxy("Recovery reset proxy")
 
         # 4. Navigate to Arena (handles challenges, TOS, login dialogs)

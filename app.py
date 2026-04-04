@@ -36,6 +36,7 @@ from src.orchestrator.run_orchestrator import RunOrchestrator
 from src.proxy.pool import ProxyPool
 from src.transport.ws_broadcaster import WsBroadcaster
 from src.transport.ws_handler import WsHandler
+from src.preview.screenshot_service import ScreenshotService
 
 # ── Logging ──
 
@@ -54,13 +55,14 @@ broadcaster: WsBroadcaster
 browser_manager: BrowserManager
 checkpoint_manager: CheckpointManager
 ws_handler: WsHandler
+screenshot_service: ScreenshotService
 proxy_pool: ProxyPool
 
 
 @asynccontextmanager
 async def lifespan(application: FastAPI):
     """Startup / shutdown lifecycle."""
-    global config, event_bus, broadcaster, browser_manager, checkpoint_manager, ws_handler, proxy_pool
+    global config, event_bus, broadcaster, browser_manager, checkpoint_manager, ws_handler, proxy_pool, screenshot_service
 
     config = AppConfig.from_yaml("config/default_config.yaml")
     SelectorRegistry.load("config/selectors.yaml")
@@ -93,13 +95,15 @@ async def lifespan(application: FastAPI):
     browser_manager = BrowserManager(config, proxy_pool=proxy_pool)
     checkpoint_manager = CheckpointManager(config.output_dir)
     await browser_manager.start()
+    screenshot_service = ScreenshotService(browser_manager, config.preview)
+    await screenshot_service.start()
 
     def orchestrator_factory() -> RunOrchestrator:
         return RunOrchestrator(
             config, event_bus, browser_manager, checkpoint_manager
         )
 
-    ws_handler = WsHandler(orchestrator_factory, broadcaster, checkpoint_manager)
+    ws_handler = WsHandler(orchestrator_factory, broadcaster, checkpoint_manager, screenshot_service=screenshot_service)
 
     logger.info("Server ready — open http://localhost:8000")
     yield
@@ -107,6 +111,7 @@ async def lifespan(application: FastAPI):
     # Shutdown: stop the task but preserve the saved auto-refresh preference
     await proxy_pool.stop_auto_refresh(clear_enabled=False)
     proxy_pool.save_to_file()
+    await screenshot_service.stop()
     await browser_manager.close_all()
     logger.info("Shutdown complete")
 
@@ -538,7 +543,34 @@ async def get_run_state():
     return {"running": False}
 
 
+@app.post("/api/toggle-headless")
+async def toggle_headless(enabled: bool = True):
+    """Toggle headless mode at runtime."""
+    config.browser.headless = enabled
+    return {"headless": config.browser.headless}
+
+
+@app.post("/api/preview/open-window")
+async def open_preview_window(
+    worker_id: int,
+    run_id: str | None = None,
+):
+    """Bring a previewed browser window to the front when available."""
+    return await browser_manager.focus_window(
+        worker_id=worker_id,
+        run_id=run_id,
+    )
+
+
 # ── Free proxy endpoint ──
+
+@app.post("/api/close-all-windows")
+async def close_all_windows():
+    """Stop active runs and close every currently open browser window."""
+    await ws_handler._handle_stop_run()
+    await browser_manager.close_open_windows()
+    return {"ok": True}
+
 
 PROXIFLY_URL = (
     "https://cdn.jsdelivr.net/gh/proxifly/free-proxy-list@main"

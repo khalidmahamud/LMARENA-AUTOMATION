@@ -38,10 +38,12 @@ class WsHandler:
         orchestrator_factory: OrchestratorFactory,
         broadcaster: WsBroadcaster,
         checkpoint_manager: Optional[CheckpointManager] = None,
+        screenshot_service=None,
     ) -> None:
         self._orchestrator_factory = orchestrator_factory
         self._broadcaster = broadcaster
         self._checkpoint_manager = checkpoint_manager
+        self._screenshot_service = screenshot_service
         self._orchestrators: Dict[str, RunOrchestrator] = {}
         self._run_tasks: Dict[str, asyncio.Task] = {}
 
@@ -109,6 +111,14 @@ class WsHandler:
                         request, resume_checkpoint=checkpoint
                     )
 
+                elif msg_type == "subscribe_preview":
+                    if self._screenshot_service:
+                        self._screenshot_service.add_subscriber(websocket)
+
+                elif msg_type == "unsubscribe_preview":
+                    if self._screenshot_service:
+                        self._screenshot_service.remove_subscriber(websocket)
+
                 elif msg_type == "ping":
                     await websocket.send_text(
                         PongMessage().model_dump_json()
@@ -127,6 +137,8 @@ class WsHandler:
             logger.error("WebSocket error: %s", exc, exc_info=True)
         finally:
             self._broadcaster.remove_client(websocket)
+            if self._screenshot_service:
+                self._screenshot_service.remove_subscriber(websocket)
 
     async def _handle_start_run(
         self,

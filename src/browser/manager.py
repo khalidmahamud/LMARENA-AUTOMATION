@@ -32,7 +32,8 @@ class _RunGroup:
         "contexts", "tiles", "profile_base", "context_dirs",
         "proxies", "proxy_on_challenge", "proxy_assign_counter",
         "context_proxies", "incognito_mode", "zoom_pct",
-        "windows_per_proxy", "layout_group_id",
+        "windows_per_proxy", "layout_group_id", "headless_mode",
+        "minimized_mode",
     )
 
     def __init__(self) -> None:
@@ -45,6 +46,8 @@ class _RunGroup:
         self.proxy_assign_counter: int = 0
         self.context_proxies: Dict[int, Optional[str]] = {}
         self.incognito_mode: bool = False
+        self.headless_mode: bool = False
+        self.minimized_mode: bool = False
         self.zoom_pct: int = 100
         self.windows_per_proxy: int = 4
         self.layout_group_id: Optional[str] = None
@@ -83,6 +86,8 @@ class BrowserManager:
         self,
         count: int,
         display_override: Optional[DisplayConfig] = None,
+        headless: Optional[bool] = None,
+        minimized: Optional[bool] = None,
         incognito: Optional[bool] = None,
         proxies: Optional[List[dict]] = None,
         proxy_on_challenge: bool = False,
@@ -117,6 +122,16 @@ class BrowserManager:
             group.layout_group_id = layout_group_id
 
             disp = display_override or self._config.display
+            group.headless_mode = (
+                self._config.browser.headless if headless is None else headless
+            )
+            group.minimized_mode = (
+                False if group.headless_mode
+                else (
+                    self._config.browser.minimized
+                    if minimized is None else minimized
+                )
+            )
             group.incognito_mode = (
                 self._config.browser.incognito if incognito is None else incognito
             )
@@ -152,7 +167,13 @@ class BrowserManager:
                         else:
                             other_group.tiles[idx] = tile
                         retile_tasks.append(
-                            asyncio.create_task(self._retile_context(ctx, tile))
+                            asyncio.create_task(
+                                self._retile_context(
+                                    ctx,
+                                    tile,
+                                    minimized=other_group.minimized_mode,
+                                )
+                            )
                         )
 
                 all_tiles = compute_tile_positions(
@@ -204,7 +225,13 @@ class BrowserManager:
                     else:
                         other_group.tiles[idx] = tile
                     retile_tasks.append(
-                        asyncio.create_task(self._retile_context(ctx, tile))
+                        asyncio.create_task(
+                            self._retile_context(
+                                ctx,
+                                tile,
+                                minimized=other_group.minimized_mode,
+                            )
+                        )
                     )
 
                 group.tiles = all_tiles[tile_cursor : tile_cursor + count]
@@ -249,10 +276,14 @@ class BrowserManager:
                     )
                 ctx = await self._launch_context(
                     profile_dir, tile, proxy=proxy,
+                    headless_mode=group.headless_mode,
                     incognito_mode=group.incognito_mode,
                     zoom_pct=group.zoom_pct,
                 )
-                await self._retile_context(ctx, tile)
+                if not group.headless_mode:
+                    await self._retile_context(
+                        ctx, tile, minimized=group.minimized_mode
+                    )
 
                 group.contexts.append(ctx)
                 group.context_dirs[i] = profile_dir
@@ -411,7 +442,12 @@ class BrowserManager:
             return None
         return fallback
 
-    async def _retile_context(self, ctx: BrowserContext, tile: TileLayout) -> None:
+    async def _retile_context(
+        self,
+        ctx: BrowserContext,
+        tile: TileLayout,
+        minimized: bool = False,
+    ) -> None:
         """Move and resize an already-open Chromium window."""
         try:
             page = ctx.pages[0] if ctx.pages else await ctx.new_page()
@@ -430,6 +466,14 @@ class BrowserManager:
                     },
                 },
             )
+            if minimized:
+                await session.send(
+                    "Browser.setWindowBounds",
+                    {
+                        "windowId": window_info["windowId"],
+                        "bounds": {"windowState": "minimized"},
+                    },
+                )
             await session.detach()
         except Exception as exc:
             logger.debug("Window re-tiling skipped: %s", exc)
@@ -455,6 +499,11 @@ class BrowserManager:
             await self._playwright.stop()
             self._playwright = None
         logger.info("Playwright engine stopped")
+
+    async def close_open_windows(self) -> None:
+        """Close every open browser window without stopping Playwright itself."""
+        for gkey in list(self._groups):
+            await self.close_contexts(run_id=gkey)
 
     async def recreate_context(self, index: int, run_id: Optional[str] = None) -> BrowserContext:
         """Close context *index* and launch a fresh window in the same tile."""
@@ -520,10 +569,14 @@ class BrowserManager:
             proxy = group.proxies[index % len(group.proxies)] if group.proxies else None
         ctx = await self._launch_context(
             profile_dir, tile, proxy=proxy,
+            headless_mode=group.headless_mode,
             incognito_mode=group.incognito_mode,
             zoom_pct=group.zoom_pct,
         )
-        await self._retile_context(ctx, tile)
+        if not group.headless_mode:
+            await self._retile_context(
+                ctx, tile, minimized=group.minimized_mode
+            )
 
         group.contexts[index] = ctx
         group.context_dirs[index] = profile_dir
@@ -536,6 +589,104 @@ class BrowserManager:
         """Backward compat: return default group's contexts."""
         group = self._groups.get(self._default_group_key)
         return list(group.contexts) if group else []
+
+    def get_all_pages(self) -> list:
+        """Return (run_id, worker_index, Page) for every active context."""
+        result = []
+        for gkey, group in self._groups.items():
+            for idx, ctx in enumerate(group.contexts):
+                pages = ctx.pages
+                if pages:
+                    result.append((gkey, idx, pages[0]))
+        return result
+
+    async def focus_window(
+        self,
+        worker_index: int,
+        run_id: Optional[str] = None,
+    ) -> dict:
+        """Bring a headed Chromium window to front and maximize it.
+
+        Returns a small status dict so the API/UI can surface a helpful
+        message instead of guessing why a window could not be shown.
+        """
+        gkey = run_id or self._default_group_key
+        group = self._groups.get(gkey)
+        if group is None:
+            return {
+                "ok": False,
+                "reason": "run_not_found",
+                "message": "Run is no longer active.",
+            }
+
+        if group.headless_mode:
+            return {
+                "ok": False,
+                "reason": "headless",
+                "message": "Original window is unavailable in headless mode.",
+            }
+        if worker_index < 0 or worker_index >= len(group.contexts):
+            return {
+                "ok": False,
+                "reason": "worker_not_found",
+                "message": "Window was not found.",
+            }
+
+        ctx = group.contexts[worker_index]
+        pages = ctx.pages
+        if not pages:
+            return {
+                "ok": False,
+                "reason": "page_not_found",
+                "message": "Window page is not available yet.",
+            }
+
+        page = pages[0]
+        maximized = False
+        try:
+            await page.bring_to_front()
+        except Exception as exc:
+            logger.debug(
+                "Failed to bring window to front (run=%s worker=%d): %s",
+                gkey,
+                worker_index,
+                exc,
+                exc_info=True,
+            )
+
+        try:
+            session = await ctx.new_cdp_session(page)
+            window_info = await session.send("Browser.getWindowForTarget")
+            window_id = window_info.get("windowId")
+            if window_id is not None:
+                await session.send(
+                    "Browser.setWindowBounds",
+                    {
+                        "windowId": window_id,
+                        "bounds": {"windowState": "maximized"},
+                    },
+                )
+                maximized = True
+        except Exception as exc:
+            logger.debug(
+                "Failed to maximize window (run=%s worker=%d): %s",
+                gkey,
+                worker_index,
+                exc,
+                exc_info=True,
+            )
+
+        try:
+            await page.evaluate("() => window.focus()")
+        except Exception:
+            pass
+
+        return {
+            "ok": True,
+            "reason": "ok",
+            "maximized": maximized,
+            "message": "Window opened.",
+        }
 
     def get_context_proxy(self, index: int, run_id: Optional[str] = None) -> Optional[str]:
         """Return the proxy server string for context *index*, or None."""
@@ -641,16 +792,25 @@ class BrowserManager:
         profile_dir: Path,
         tile: TileLayout,
         proxy: Optional[dict] = None,
+        headless_mode: bool = False,
         incognito_mode: bool = False,
         zoom_pct: int = 100,
     ) -> BrowserContext:
         launch_kwargs = dict(
             user_data_dir=str(profile_dir),
-            headless=self._config.browser.headless,
-            no_viewport=True,
-            args=self._launch_args(tile, incognito_mode, zoom_pct),
+            headless=headless_mode,
             ignore_default_args=["--enable-automation"],
         )
+        if headless_mode:
+            launch_kwargs["viewport"] = {"width": 1280, "height": 800}
+            launch_kwargs["args"] = [
+                "--disable-blink-features=AutomationControlled",
+                "--disable-dev-shm-usage",
+                "--no-first-run",
+            ]
+        else:
+            launch_kwargs["no_viewport"] = True
+            launch_kwargs["args"] = self._launch_args(tile, incognito_mode, zoom_pct)
         if proxy:
             launch_kwargs["proxy"] = proxy
             logger.info("Launching context with proxy: %s", proxy.get("server", "???"))

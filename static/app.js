@@ -11,6 +11,7 @@
   let pauseTransitionPending = false;
   let autoScroll = true;
   let runStartTime = null;
+  let activeRunId = null;
   let runResults = null; // last run results for JSON view
   let workerStartTimes = {};
   let workerData = {};   // live data per worker
@@ -22,6 +23,13 @@
 
   function generateCardId() {
     return "card_" + Date.now() + "_" + (nextCardIndex++);
+  }
+
+  function generateRunId() {
+    if (window.crypto && typeof window.crypto.randomUUID === "function") {
+      return window.crypto.randomUUID().replace(/-/g, "").slice(0, 8);
+    }
+    return (Date.now().toString(36) + Math.random().toString(36).slice(2, 6)).slice(0, 8);
   }
 
   // File upload state
@@ -46,6 +54,7 @@
   const zoomInput         = document.getElementById("zoom");
   const clearCookiesInput = document.getElementById("clear-cookies");
   const incognitoModeInput = document.getElementById("incognito-mode");
+  const minimizedModeInput = document.getElementById("minimized-mode");
   const simultaneousStartInput = document.getElementById("simultaneous-start");
   const proxyListInput    = document.getElementById("proxy-list");
   const proxyProtocolInput = document.getElementById("proxy-protocol");
@@ -67,6 +76,15 @@
   const poolMaxSizeInput    = document.getElementById("pool-max-size");
   const poolMaxLatencyInput = document.getElementById("pool-max-latency");
   const poolRefreshIntervalInput = document.getElementById("pool-refresh-interval");
+  // Preview DOM refs
+  const previewGridWrap   = document.getElementById("preview-grid-wrap");
+  const previewGrid       = document.getElementById("preview-grid");
+  const previewStatus     = document.getElementById("preview-status");
+  const headlessModeInput = document.getElementById("headless-mode");
+
+  // Preview state
+  let previewSubscribed = false;
+
   // Log tabs
   const logTabProcessing  = document.getElementById("log-tab-processing");
   const logTabProxy       = document.getElementById("log-tab-proxy");
@@ -91,6 +109,8 @@
   const tilePreviewLabel  = document.getElementById("tile-preview-label");
   const startBtn          = document.getElementById("btn-start");
   const stopBtn           = document.getElementById("btn-stop");
+  const closeAllBtn       = document.getElementById("btn-close-all");
+  const clearAllBtn       = document.getElementById("btn-clear-all");
   const exportBtn         = document.getElementById("btn-export");
   const pasteBtn          = document.getElementById("btn-paste");
   const clearBtn          = document.getElementById("btn-clear");
@@ -186,6 +206,7 @@
       setStatus(true);
       fetchCheckpoints();
       syncRunState();
+      resubscribePreview();
     };
 
     ws.onclose = () => {
@@ -709,6 +730,9 @@
       case "toast":
         showToast(msg.message, msg.level || "success");
         break;
+      case "preview_screenshots":
+        onPreviewScreenshots(msg.screenshots || []);
+        break;
       case "pong":
         break;
     }
@@ -743,8 +767,45 @@
     running = false;
     paused = false;
     pauseTransitionPending = false;
+    activeRunId = null;
     updateStartButton();
     stopBtn.disabled = true;
+  }
+
+  function resetPreviewGrid() {
+    previewGrid.innerHTML =
+      '<div class="preview-empty">' +
+      '<div class="preview-empty-icon">&#128247;</div>' +
+      '<span>No windows active</span>' +
+      '<span>Start a run to see live previews</span>' +
+      '</div>';
+    previewStatus.textContent = "No windows active";
+  }
+
+  function clearDashboardState() {
+    resetRunControlState();
+    workerStartTimes = {};
+    workerData = {};
+    incrementalResults = {};
+    runResults = null;
+    htmlBlocksCache = {};
+    previewEntryKeys = [];
+    previewIndex = 0;
+    currentResponseText = "";
+    currentResponseModelName = "";
+
+    workersContainer.innerHTML = "";
+    resultsBody.innerHTML = "";
+    resultsJsonPre.textContent = "";
+    htmlResultsList.innerHTML = '<div class="html-empty">No results yet</div>';
+    logBox.innerHTML = "";
+    progressFill.style.width = "0%";
+    progressPct.textContent = "0%";
+    etaText.textContent = "ETA: \u2014";
+    exportBtn.disabled = true;
+    responseModal.classList.add("hidden");
+    htmlPreviewModal.classList.add("hidden");
+    resetPreviewGrid();
   }
 
   // ══════════════════════════════════════
@@ -779,6 +840,15 @@
     const cardId = getWorkerDomId(id, runId);
     const runLabel = getRunLabel(runId);
     let card = document.getElementById(cardId);
+    if (!card && runId) {
+      const legacyCard = document.getElementById(getWorkerDomId(id, null));
+      if (legacyCard && (!legacyCard.dataset.runId || legacyCard.dataset.runId === "")) {
+        legacyCard.id = cardId;
+        legacyCard.dataset.workerKey = getWorkerKey(id, runId);
+        legacyCard.dataset.runId = runId;
+        card = legacyCard;
+      }
+    }
     if (!card) {
       card = document.createElement("div");
       card.id = cardId;
@@ -908,6 +978,13 @@
     const resultId = getResultDomId(id, runId);
     const runLabel = getRunLabel(runId);
     let row = document.getElementById(resultId);
+    if (!row && runId) {
+      const legacyRow = document.getElementById(getResultDomId(id, null));
+      if (legacyRow) {
+        legacyRow.id = resultId;
+        row = legacyRow;
+      }
+    }
     if (!row) {
       row = document.createElement("tr");
       row.id = resultId;
@@ -1257,7 +1334,9 @@
       pauseTransitionPending = true;
       updateStartButton();
       etaText.textContent = paused ? "Resuming..." : "Pausing...";
-      send({ type: paused ? "resume_run" : "pause_run" });
+      const controlMsg = { type: paused ? "resume_run" : "pause_run" };
+      if (activeRunId) controlMsg.run_id = activeRunId;
+      send(controlMsg);
       return;
     }
 
@@ -1283,6 +1362,7 @@
     running = true;
     paused = false;
     pauseTransitionPending = false;
+    activeRunId = generateRunId();
     runStartTime = Date.now();
     workerStartTimes = {};
     workerData = {};
@@ -1310,12 +1390,13 @@
 
     // Pre-create worker cards and result rows
     for (let i = 0; i < windowCount; i++) {
-      ensureWorkerCard(i);
-      ensureResultRow(i);
+      ensureWorkerCard(i, activeRunId);
+      ensureResultRow(i, activeRunId);
     }
 
     send({
       type: "start_run",
+      run_id: activeRunId,
       prompt: singlePrompt,
       prompts: isFileMode ? prompts : null,
       system_prompt: systemPromptInput.value.trim() || "",
@@ -1327,6 +1408,8 @@
       retain_output: retainOutputInput.value,
       clear_cookies: clearCookiesInput.checked,
       incognito: incognitoModeInput.checked,
+      minimized: minimizedModeInput.checked,
+      headless: headlessModeInput.checked,
       images: (!isFileMode && uploadedImages.length > 0)
         ? uploadedImages.map((img) => ({
             data: img.data,
@@ -1375,8 +1458,40 @@
   });
 
   stopBtn.addEventListener("click", () => {
-    send({ type: "stop_run" });
+    const stopMsg = { type: "stop_run" };
+    if (activeRunId) stopMsg.run_id = activeRunId;
+    send(stopMsg);
     appendLog("warning", "Stop requested...");
+  });
+
+  closeAllBtn.addEventListener("click", () => {
+    closeAllBtn.disabled = true;
+    fetch("/api/close-all-windows", { method: "POST" })
+      .then(function (res) {
+        if (!res.ok) throw new Error("status " + res.status);
+        return res.json();
+      })
+      .then(function () {
+        resetRunControlState();
+        resetPreviewGrid();
+        appendLog("warning", "Close All requested - all open windows closed");
+        showToast("All open windows closed", "info");
+      })
+      .catch(function (err) {
+        showToast("Failed to close windows: " + err.message, "error");
+      })
+      .finally(function () {
+        closeAllBtn.disabled = false;
+      });
+  });
+
+  clearAllBtn.addEventListener("click", () => {
+    const hadRunning = running;
+    clearDashboardState();
+    appendLog("info", hadRunning
+      ? "Dashboard cleared - incoming updates may appear again while a run is still active"
+      : "Dashboard cleared");
+    showToast("Processing, windows, and logs cleared", "info");
   });
 
   // Paste button
@@ -1966,10 +2081,36 @@
   });
 
   // ══════════════════════════════════════
-  // Tabs (Table View / JSON / HTML)
+  // Main Tabs (Main / Live Preview)
   // ══════════════════════════════════════
 
-  function setResultsTab(active) {
+  const mainTabResults  = document.getElementById("main-tab-results");
+  const mainTabPreview  = document.getElementById("main-tab-preview");
+
+  let currentMainTab = "results";   // "results" or "preview"
+  let currentSubTab  = "table";     // "table", "json", "html"
+
+  function setMainTab(tab) {
+    currentMainTab = tab;
+    mainTabResults.classList.toggle("active", tab === "results");
+    mainTabPreview.classList.toggle("active", tab === "preview");
+
+    // Toggle full-screen preview mode
+    document.body.classList.toggle("preview-active", tab === "preview");
+    previewGridWrap.classList.toggle("hidden", tab !== "preview");
+
+    // Subscribe/unsubscribe to preview screenshots
+    if (tab === "preview" && !previewSubscribed) {
+      send({ type: "subscribe_preview" });
+      previewSubscribed = true;
+    } else if (tab !== "preview" && previewSubscribed) {
+      send({ type: "unsubscribe_preview" });
+      previewSubscribed = false;
+    }
+  }
+
+  function setSubTab(active) {
+    currentSubTab = active;
     tabTable.classList.toggle("active", active === "table");
     tabJson.classList.toggle("active", active === "json");
     tabHtml.classList.toggle("active", active === "html");
@@ -1978,16 +2119,24 @@
     resultsHtmlWrap.classList.toggle("hidden", active !== "html");
   }
 
+  mainTabResults.addEventListener("click", () => {
+    setMainTab("results");
+  });
+
+  mainTabPreview.addEventListener("click", () => {
+    setMainTab("preview");
+  });
+
   tabTable.addEventListener("click", () => {
-    setResultsTab("table");
+    setSubTab("table");
   });
 
   tabJson.addEventListener("click", () => {
-    setResultsTab("json");
+    setSubTab("json");
   });
 
   tabHtml.addEventListener("click", () => {
-    setResultsTab("html");
+    setSubTab("html");
     renderHtmlPreviews();
   });
 
@@ -2952,6 +3101,8 @@ html, body { margin: 0; padding: 0; background: #fff; color: #111;
       retain_output: retain,
       clear_cookies: clearCookies,
       incognito: incognito,
+      minimized: minimizedModeInput.checked,
+      headless: headlessModeInput.checked,
       simultaneous_start: simultaneous,
       zoom_pct: zoom,
       monitor_count: parseInt(monitorCountInput.value, 10) || 1,
@@ -3509,6 +3660,8 @@ html, body { margin: 0; padding: 0; background: #fff; color: #111;
     { el: zoomInput,          key: "zoom" },
     { el: clearCookiesInput,  key: "clear_cookies", checkbox: true },
     { el: incognitoModeInput, key: "incognito_mode", checkbox: true },
+    { el: minimizedModeInput, key: "minimized_mode", checkbox: true },
+    { el: headlessModeInput, key: "headless_mode", checkbox: true },
     { el: simultaneousStartInput, key: "simultaneous_start", checkbox: true },
     { el: monitorCountInput,  key: "monitor_count" },
     { el: monitorWidthInput,  key: "monitor_width" },
@@ -3705,6 +3858,7 @@ html, body { margin: 0; padding: 0; background: #fff; color: #111;
         // Restore running state
         running = true;
         paused = state.paused || false;
+        activeRunId = state.run_id || null;
         runStartTime = runStartTime || Date.now();
         updateStartButton();
         stopBtn.disabled = false;
@@ -3760,6 +3914,210 @@ html, body { margin: 0; padding: 0; background: #fff; color: #111;
   }
 
   // ══════════════════════════════════════
+  // Live Preview — Screenshot Handler
+  // ══════════════════════════════════════
+
+  function syncPreviewOpenButton(button, shot) {
+    if (!button) return;
+    if (shot) {
+      button.dataset.runId = shot.run_id || "";
+      button.dataset.workerId = String(shot.worker_index);
+    }
+    const headless = !!headlessModeInput.checked;
+    button.classList.toggle("headless", headless);
+    button.setAttribute("aria-disabled", headless ? "true" : "false");
+    button.title = headless
+      ? "Original window is unavailable in headless mode"
+      : "Open original window";
+  }
+
+  function syncAllPreviewOpenButtons() {
+    previewGrid.querySelectorAll(".preview-open-btn").forEach(function (button) {
+      syncPreviewOpenButton(button);
+    });
+  }
+
+  function onPreviewScreenshots(screenshots) {
+    if (!screenshots.length) {
+      if (!previewGrid.children.length) {
+        previewGrid.innerHTML =
+          '<div class="preview-empty">' +
+          '<div class="preview-empty-icon">&#128247;</div>' +
+          '<span>No windows active</span>' +
+          '<span>Start a run to see live previews</span>' +
+          '</div>';
+      }
+      previewStatus.textContent = "No windows active";
+      return;
+    }
+
+    previewStatus.textContent = screenshots.length + " window" + (screenshots.length !== 1 ? "s" : "") + " active";
+
+    // Build a set of current keys to detect removed cards
+    const activeKeys = new Set();
+
+    screenshots.forEach(function (shot) {
+      const key = shot.run_id + "_w" + shot.worker_index;
+      activeKeys.add(key);
+
+      let card = previewGrid.querySelector('[data-preview-key="' + key + '"]');
+      if (!card) {
+        card = createPreviewCard(key, shot);
+        previewGrid.appendChild(card);
+      }
+
+      // Update screenshot image
+      const img = card.querySelector(".preview-screenshot-img");
+      if (img) {
+        img.src = "data:image/jpeg;base64," + shot.data;
+      }
+
+      const openBtn = card.querySelector(".preview-open-btn");
+      syncPreviewOpenButton(openBtn, shot);
+
+      // Update state badge from workerData
+      const wKey = getWorkerKey(shot.worker_index, shot.run_id || null);
+      const wd = workerData[wKey] || workerData[getWorkerKey(shot.worker_index, null)];
+      if (wd) {
+        const stateBadge = card.querySelector(".preview-card-state");
+        if (stateBadge) {
+          const st = (wd.state || "idle").toLowerCase();
+          stateBadge.textContent = st;
+          stateBadge.className = "preview-card-state st-" + st.replace(/[^a-z]/g, "");
+        }
+        const proxyEl = card.querySelector(".preview-card-proxy");
+        if (proxyEl && wd.proxy) {
+          proxyEl.textContent = wd.proxy;
+        }
+      }
+
+      // Update timestamp
+      const timeEl = card.querySelector(".preview-card-time");
+      if (timeEl && shot.timestamp) {
+        const d = new Date(shot.timestamp * 1000);
+        timeEl.textContent = d.toLocaleTimeString();
+      }
+    });
+
+    // Remove cards for windows that are no longer active
+    Array.from(previewGrid.querySelectorAll(".preview-card")).forEach(function (card) {
+      if (!activeKeys.has(card.dataset.previewKey)) {
+        card.remove();
+      }
+    });
+
+    // Remove empty placeholder if we have real cards
+    const emptyEl = previewGrid.querySelector(".preview-empty");
+    if (emptyEl && screenshots.length > 0) {
+      emptyEl.remove();
+    }
+  }
+
+  function createPreviewCard(key, shot) {
+    const card = document.createElement("div");
+    card.className = "preview-card";
+    card.dataset.previewKey = key;
+    card.innerHTML =
+      '<div class="preview-card-header">' +
+      '  <div class="preview-card-title-row">' +
+      '    <span class="preview-card-title">Window ' + (shot.worker_index + 1) + '</span>' +
+      '    <button class="preview-open-btn" type="button" title="Open original window">&#9974;</button>' +
+      '  </div>' +
+      '  <span class="preview-card-state st-idle">idle</span>' +
+      '</div>' +
+      '<div class="preview-card-screenshot">' +
+      '  <img class="preview-screenshot-img" src="" alt="Preview" />' +
+      '</div>' +
+      '<div class="preview-card-footer">' +
+      '  <span class="preview-card-proxy"></span>' +
+      '  <span class="preview-card-time"></span>' +
+      '</div>';
+
+    const openBtn = card.querySelector(".preview-open-btn");
+    syncPreviewOpenButton(openBtn, shot);
+    if (openBtn) {
+      openBtn.addEventListener("click", function (event) {
+        event.stopPropagation();
+        const workerId = parseInt(openBtn.dataset.workerId, 10);
+        if (!Number.isFinite(workerId)) {
+          showToast("Window is not ready yet", "warning");
+          return;
+        }
+        if (headlessModeInput.checked) {
+          showToast("Headless mode is active, so no original window is available", "warning");
+          return;
+        }
+
+        const qs = new URLSearchParams({ worker_id: String(workerId) });
+        const runId = openBtn.dataset.runId || "";
+        if (runId) qs.set("run_id", runId);
+
+        fetch("/api/preview/open-window?" + qs.toString(), { method: "POST" })
+          .then(function (res) { return res.json(); })
+          .then(function (data) {
+            if (data && data.ok) {
+              showToast(data.maximized ? "Original window opened" : "Window focused", "info");
+              return;
+            }
+            showToast((data && data.message) || "Failed to open original window", data && data.reason === "headless" ? "warning" : "error");
+          })
+          .catch(function () {
+            showToast("Failed to open original window", "error");
+          });
+      });
+    }
+
+    // Click to expand
+    card.addEventListener("click", function (event) {
+      if (event.target.closest(".preview-open-btn")) return;
+      const img = card.querySelector(".preview-screenshot-img");
+      if (img && img.src && !img.src.endsWith("/")) {
+        openPreviewExpandModal(img.src);
+      }
+    });
+
+    return card;
+  }
+
+  function openPreviewExpandModal(imageSrc) {
+    const overlay = document.createElement("div");
+    overlay.className = "preview-expand-modal";
+    overlay.innerHTML = '<img src="' + escapeAttr(imageSrc) + '" />';
+    overlay.addEventListener("click", function () {
+      overlay.remove();
+    });
+    document.body.appendChild(overlay);
+  }
+
+  // Re-subscribe on reconnect if the preview tab is active
+  function resubscribePreview() {
+    if (previewSubscribed) {
+      previewSubscribed = false;
+      if (currentMainTab === "preview") {
+        send({ type: "subscribe_preview" });
+        previewSubscribed = true;
+      }
+    }
+  }
+
+  // ══════════════════════════════════════
+  // Headless Mode Toggle
+  // ══════════════════════════════════════
+
+  headlessModeInput.addEventListener("change", function () {
+    const enabled = headlessModeInput.checked;
+    fetch("/api/toggle-headless?enabled=" + enabled, { method: "POST" })
+      .then(function (r) { return r.json(); })
+      .then(function (data) {
+        syncAllPreviewOpenButtons();
+        showToast("Headless mode " + (data.headless ? "enabled" : "disabled"), "info");
+      })
+      .catch(function () {
+        showToast("Failed to toggle headless mode", "error");
+      });
+  });
+
+  // ══════════════════════════════════════
   // Init
   // ══════════════════════════════════════
 
@@ -3779,6 +4137,7 @@ html, body { margin: 0; padding: 0; background: #fff; color: #111;
   initScreenDefaults();
   updateTilePreview();
   updateStartButton();
+  syncAllPreviewOpenButtons();
 
   // Auto-expand system prompt if it has saved content
   if (systemPromptInput.value.trim()) {

@@ -1,0 +1,8 @@
+ok, create a proxy_saver folder,
+
+- create a separate new py script, that will check cdn 100 ips batch continouioly and save the best ips to a excel file which latency less then 3000ms. it will not delete any existing ips, just new ips will added to the lists.
+
+py script can be configurable (batch size, latency, time etc) at bottom part easily. so make the script dynamic.
+
+i will run continouioly in another pc that script 
+to make a good 1k ip lists.s

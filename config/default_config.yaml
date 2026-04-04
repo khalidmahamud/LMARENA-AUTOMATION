@@ -33,6 +33,13 @@ typing:
   min_delay_ms: 50
   max_delay_ms: 150
 
+preview:
+  enabled: true
+  interval_seconds: 2.0
+  jpeg_quality: 65
+  max_width: 640
+  max_height: 480
+
 arena_url: "https://arena.ai/text/side-by-side"
 output_dir: "outputs"
 log_level: "INFO"

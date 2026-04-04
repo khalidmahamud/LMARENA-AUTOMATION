@@ -6,6 +6,7 @@ submit_button: "form button[type='submit']:has(svg), form button[type='submit'],
 
 # Model pickers — side-by-side has two model dropdown buttons
 model_dropdown: "button[aria-haspopup='dialog']"
+side_by_side_button: "button[role='combobox']:has-text('Side by Side')"
 model_search_input: "input[cmdk-input], input[placeholder='Search models'], input[placeholder*='Search model']"
 model_option: "[cmdk-item][role='option'], [cmdk-item], [role='option'][data-value], button[type='button']:has(span.font-mono)"
 
@@ -21,7 +22,7 @@ model_name_label: "button[aria-haspopup='dialog'][class*='max-w-'] span.truncate
 
 # Terms of Use / cookie dialogs
 tos_agree_button: "[role='dialog'] button[type='submit']"
-cookie_accept_button: "[role='dialog'] button:has-text('Accept Cookies')"
+cookie_accept_button: "[role='dialog'] button:has-text('Accept Cookies'), [role='dialog'] button:has-text('Accept All Cookies'), button:has-text('Accept Cookies'), button:has-text('Accept All Cookies'), [role='button']:has-text('Accept Cookies'), [role='button']:has-text('Accept All Cookies')"
 voting_onboarding_got_it_button: "[role='dialog'] button:has-text('Got it')"
 
 # Login dialog (dismiss by clicking the X — it's a direct child of the dialog)
