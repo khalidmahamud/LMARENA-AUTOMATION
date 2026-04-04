@@ -1,6 +1,6 @@
 import unittest
 
-from src.core.tiling import compute_tile_positions
+from src.core.tiling import MonitorWorkArea, compute_tile_positions
 
 
 class ComputeTilePositionsTests(unittest.TestCase):
@@ -72,6 +72,27 @@ class ComputeTilePositionsTests(unittest.TestCase):
         self.assertEqual(left.x, 1920)
         self.assertEqual(right.x, 2873)
         self.assertLessEqual(right.x + right.width, 3840)
+
+    def test_actual_monitor_work_areas_handle_negative_coordinates(self) -> None:
+        tiles = compute_tile_positions(
+            count=4,
+            margin=0,
+            border_offset=7,
+            monitor_work_areas=[
+                MonitorWorkArea(x=0, y=0, width=1920, height=1040),
+                MonitorWorkArea(x=-1920, y=0, width=1920, height=1040),
+            ],
+        )
+
+        self.assertEqual(len(tiles), 4)
+
+        first, second, third, fourth = tiles
+        self.assertGreaterEqual(first.x, 0)
+        self.assertGreaterEqual(second.x, 0)
+        self.assertLess(third.x, 0)
+        self.assertLess(fourth.x, 0)
+        self.assertLessEqual(second.x + second.width, 1920)
+        self.assertLessEqual(fourth.x + fourth.width, 0)
 
 
 if __name__ == "__main__":

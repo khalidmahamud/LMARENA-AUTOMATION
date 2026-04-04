@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import ctypes
 import logging
 import shutil
+import sys
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -10,7 +12,7 @@ from typing import Dict, List, Optional
 
 from playwright.async_api import BrowserContext, Playwright, Worker, async_playwright
 
-from src.core.tiling import TileLayout, compute_tile_positions
+from src.core.tiling import MonitorWorkArea, TileLayout, compute_tile_positions
 from src.models.config import AppConfig, DisplayConfig
 from src.proxy.pool import ProxyPool
 
@@ -122,6 +124,7 @@ class BrowserManager:
             group.layout_group_id = layout_group_id
 
             disp = display_override or self._config.display
+            monitor_work_areas = self._resolve_monitor_work_areas(disp)
             group.headless_mode = (
                 self._config.browser.headless if headless is None else headless
             )
@@ -148,11 +151,7 @@ class BrowserManager:
                     self._layout_reservations[layout_group_id] = reservation
                     all_tiles = compute_tile_positions(
                         count=reservation.base_offset + reservation.total_windows,
-                        start_monitor=disp.start_monitor,
-                        monitor_count=disp.monitor_count,
-                        monitor_width=disp.monitor_width,
-                        monitor_height=disp.monitor_height,
-                        taskbar_height=disp.taskbar_height,
+                        monitor_work_areas=monitor_work_areas,
                         margin=disp.margin,
                         border_offset=disp.border_offset,
                     )
@@ -179,11 +178,7 @@ class BrowserManager:
 
                 all_tiles = compute_tile_positions(
                     count=reservation.base_offset + reservation.total_windows,
-                    start_monitor=disp.start_monitor,
-                    monitor_count=disp.monitor_count,
-                    monitor_width=disp.monitor_width,
-                    monitor_height=disp.monitor_height,
-                    taskbar_height=disp.taskbar_height,
+                    monitor_work_areas=monitor_work_areas,
                     margin=disp.margin,
                     border_offset=disp.border_offset,
                 )
@@ -193,11 +188,7 @@ class BrowserManager:
                 # Backward-compatible pre-computed tiling for a single run.
                 all_tiles = compute_tile_positions(
                     count=total_windows,
-                    start_monitor=disp.start_monitor,
-                    monitor_count=disp.monitor_count,
-                    monitor_width=disp.monitor_width,
-                    monitor_height=disp.monitor_height,
-                    taskbar_height=disp.taskbar_height,
+                    monitor_work_areas=monitor_work_areas,
                     margin=disp.margin,
                     border_offset=disp.border_offset,
                 )
@@ -207,11 +198,7 @@ class BrowserManager:
                 existing_context_entries = self._collect_existing_context_entries()
                 all_tiles = compute_tile_positions(
                     count=len(existing_context_entries) + count,
-                    start_monitor=disp.start_monitor,
-                    monitor_count=disp.monitor_count,
-                    monitor_width=disp.monitor_width,
-                    monitor_height=disp.monitor_height,
-                    taskbar_height=disp.taskbar_height,
+                    monitor_work_areas=monitor_work_areas,
                     margin=disp.margin,
                     border_offset=disp.border_offset,
                 )
@@ -309,6 +296,101 @@ class BrowserManager:
             )
 
             return list(group.contexts)
+
+    def _resolve_monitor_work_areas(
+        self,
+        disp: DisplayConfig,
+    ) -> List[MonitorWorkArea]:
+        detected = self._detect_windows_monitor_work_areas()
+        if detected:
+            start_idx = min(max(disp.start_monitor - 1, 0), len(detected) - 1)
+            end_idx = min(start_idx + disp.monitor_count, len(detected))
+            selected = detected[start_idx:end_idx]
+            logger.info(
+                "Using detected monitor work areas: %s",
+                [(m.x, m.y, m.width, m.height) for m in selected],
+            )
+            return selected
+
+        selected: List[MonitorWorkArea] = []
+        work_height = max(1, disp.monitor_height - disp.taskbar_height)
+        for idx in range(disp.monitor_count):
+            selected.append(
+                MonitorWorkArea(
+                    x=(disp.start_monitor - 1 + idx) * disp.monitor_width,
+                    y=0,
+                    width=disp.monitor_width,
+                    height=work_height,
+                )
+            )
+        logger.info(
+            "Using synthetic monitor work areas: %s",
+            [(m.x, m.y, m.width, m.height) for m in selected],
+        )
+        return selected
+
+    def _detect_windows_monitor_work_areas(self) -> List[MonitorWorkArea]:
+        if sys.platform != "win32":
+            return []
+
+        class RECT(ctypes.Structure):
+            _fields_ = [
+                ("left", ctypes.c_long),
+                ("top", ctypes.c_long),
+                ("right", ctypes.c_long),
+                ("bottom", ctypes.c_long),
+            ]
+
+        class MONITORINFO(ctypes.Structure):
+            _fields_ = [
+                ("cbSize", ctypes.c_ulong),
+                ("rcMonitor", RECT),
+                ("rcWork", RECT),
+                ("dwFlags", ctypes.c_ulong),
+            ]
+
+        monitors: List[tuple[int, int, int, int, int]] = []
+        user32 = ctypes.windll.user32
+        MONITORINFOF_PRIMARY = 1
+        monitor_enum_proc = ctypes.WINFUNCTYPE(
+            ctypes.c_int,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.POINTER(RECT),
+            ctypes.c_longlong,
+        )
+
+        def _callback(hmonitor, _hdc, _rect, _data) -> int:
+            info = MONITORINFO()
+            info.cbSize = ctypes.sizeof(MONITORINFO)
+            if not user32.GetMonitorInfoW(hmonitor, ctypes.byref(info)):
+                return 1
+            work = info.rcWork
+            width = work.right - work.left
+            height = work.bottom - work.top
+            if width > 0 and height > 0:
+                is_primary = 1 if (info.dwFlags & MONITORINFOF_PRIMARY) else 0
+                monitors.append((is_primary, work.left, work.top, width, height))
+            return 1
+
+        try:
+            ok = user32.EnumDisplayMonitors(
+                0,
+                0,
+                monitor_enum_proc(_callback),
+                0,
+            )
+            if not ok:
+                return []
+        except Exception as exc:
+            logger.warning("Failed to detect monitor work areas: %s", exc)
+            return []
+
+        monitors.sort(key=lambda item: (0 if item[0] else 1, item[1], item[2]))
+        return [
+            MonitorWorkArea(x=x, y=y, width=width, height=height)
+            for _primary, x, y, width, height in monitors
+        ]
 
     def _collect_existing_context_entries(
         self,
