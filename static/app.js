@@ -160,6 +160,8 @@
   const rowRangeInfo      = document.getElementById("row-range-info");
   const filePreviewDiv    = document.getElementById("file-preview");
   const batchInfoDiv      = document.getElementById("batch-info");
+  const batchAggSizeInput = document.getElementById("batch-aggregate-size");
+  const batchAggInfo      = document.getElementById("batch-aggregate-info");
 
   // Image upload DOM refs
   const imageUploadArea  = document.getElementById("image-upload-area");
@@ -1839,6 +1841,7 @@
         selectedColumns: cols,
         rowStart: rowStartInput.value,
         rowEnd: rowEndInput.value,
+        batchAggSize: batchAggSizeInput.value,
       };
       localStorage.setItem(FILE_STATE_KEY, JSON.stringify(state));
     } catch {}
@@ -1866,6 +1869,7 @@
       // Restore row range
       rowStartInput.value = state.rowStart || 1;
       rowEndInput.value = state.rowEnd || "";
+      batchAggSizeInput.value = state.batchAggSize || 1;
       rowEndInput.placeholder = `${state.rowCount || state.rows.length} (all)`;
 
       // Restore column checkboxes
@@ -1918,7 +1922,25 @@
     const start = Math.max(1, parseInt(rowStartInput.value, 10) || 1);
     const end = parseInt(rowEndInput.value, 10) || allPrompts.length;
     const clampedEnd = Math.min(end, allPrompts.length);
-    uploadedPrompts = allPrompts.slice(start - 1, clampedEnd);
+    const rangedPrompts = allPrompts.slice(start - 1, clampedEnd);
+
+    // Aggregate N rows into a single prompt (batch aggregation)
+    const aggSize = Math.max(1, parseInt(batchAggSizeInput.value, 10) || 1);
+    if (aggSize > 1) {
+      uploadedPrompts = [];
+      for (let i = 0; i < rangedPrompts.length; i += aggSize) {
+        uploadedPrompts.push(rangedPrompts.slice(i, i + aggSize).join("\n\n"));
+      }
+    } else {
+      uploadedPrompts = rangedPrompts;
+    }
+
+    // Update aggregation info
+    if (aggSize > 1) {
+      batchAggInfo.textContent = `(${rangedPrompts.length} rows \u2192 ${uploadedPrompts.length} prompt(s))`;
+    } else {
+      batchAggInfo.textContent = "";
+    }
 
     // Update range info
     rowRangeInfo.textContent = `(using rows ${start}\u2013${clampedEnd} of ${allPrompts.length})`;
@@ -1943,6 +1965,7 @@
   // Re-extract prompts when row range changes
   rowStartInput.addEventListener("input", onColumnChange);
   rowEndInput.addEventListener("input", onColumnChange);
+  batchAggSizeInput.addEventListener("input", onColumnChange);
 
   function updateBatchInfo() {
     const wc = parseInt(windowCountInput.value, 10) || 4;
