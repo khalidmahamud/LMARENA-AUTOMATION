@@ -401,6 +401,11 @@ class RunOrchestrator:
             if self._cancelled:
                 break
 
+            # Only send system prompt on the first batch of each session
+            pps = request.prompts_per_session
+            is_first_in_session = (batch_idx % pps == 0)
+            batch_system_prompt = system_prompt if is_first_in_session else ""
+
             # Submit this batch's prompts (sequential with gap)
             workers_in_batch = min(len(batch_prompts), count)
             if simultaneous_start:
@@ -409,7 +414,7 @@ class RunOrchestrator:
                     total_batches=total_batches,
                     batch_prompts=batch_prompts,
                     request=request,
-                    system_prompt=system_prompt,
+                    system_prompt=batch_system_prompt,
                     turn_list=turn_list,
                     image_dicts=image_dicts,
                     gap=gap,
@@ -466,7 +471,7 @@ class RunOrchestrator:
             ] = []
             ready_for_actual: dict[int, Tuple[str, str]] = {}
 
-            if system_prompt:
+            if batch_system_prompt:
                 await self._publish(
                     Event(
                         type=EventType.LOG,
@@ -509,7 +514,7 @@ class RunOrchestrator:
                                 prompt,
                                 asyncio.create_task(
                                     worker.prepare_prompt(
-                                        prompt=system_prompt,
+                                        prompt=batch_system_prompt,
                                         model_a=request.model_a,
                                         model_b=request.model_b,
                                         mark_started=False,
@@ -521,7 +526,7 @@ class RunOrchestrator:
                     else:
                         try:
                             await worker.submit_prompt(
-                                prompt=system_prompt,
+                                prompt=batch_system_prompt,
                                 model_a=request.model_a,
                                 model_b=request.model_b,
                                 pause_event=self._resume_event,
@@ -695,7 +700,7 @@ class RunOrchestrator:
                     await self._wait_if_paused()
                     if self._cancelled:
                         break
-                    if system_prompt:
+                    if batch_system_prompt:
                         baseline_responses = ready_for_actual.get(i)
                         if baseline_responses is None:
                             continue
@@ -716,8 +721,8 @@ class RunOrchestrator:
                             asyncio.create_task(
                                 worker.prepare_prompt(
                                     prompt=prompt,
-                                    model_a=None if system_prompt else request.model_a,
-                                    model_b=None if system_prompt else request.model_b,
+                                    model_a=None if batch_system_prompt else request.model_a,
+                                    model_b=None if batch_system_prompt else request.model_b,
                                     mark_started=False,
                                     pause_event=self._resume_event,
                                     images=image_dicts,
@@ -809,7 +814,7 @@ class RunOrchestrator:
                     await self._wait_if_paused()
                     if self._cancelled:
                         break
-                    if system_prompt:
+                    if batch_system_prompt:
                         baseline_responses = ready_for_actual.get(i)
                         if baseline_responses is None:
                             continue
@@ -824,8 +829,8 @@ class RunOrchestrator:
                     try:
                         await worker.submit_prompt(
                             prompt=prompt,
-                            model_a=None if system_prompt else request.model_a,
-                            model_b=None if system_prompt else request.model_b,
+                            model_a=None if batch_system_prompt else request.model_a,
+                            model_b=None if batch_system_prompt else request.model_b,
                             pause_event=self._resume_event,
                             images=image_dicts,
                         )
@@ -921,7 +926,7 @@ class RunOrchestrator:
                         prompt=prompt,
                         batch_idx=batch_idx,
                         request=request,
-                        system_prompt=system_prompt,
+                        system_prompt=batch_system_prompt,
                         image_dicts=image_dicts,
                     )
                     for widx, worker, prompt in all_failures

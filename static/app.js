@@ -1977,7 +1977,10 @@
       return;
     }
     const batches = Math.ceil(total / wc);
-    batchInfoDiv.textContent = `${total} prompt(s) \u2192 ${batches} batch(es) of ${wc} window(s)`;
+    const pps = parseInt(promptsPerSessionInput.value, 10) || 1;
+    const sessions = Math.ceil(batches / pps);
+    const navs = Math.max(sessions - 1, 0);
+    batchInfoDiv.textContent = `${total} prompt(s) \u2192 ${batches} batch(es) of ${wc} window(s) \u2192 ${sessions} session(s), ${navs} re-nav(s)`;
   }
 
   // Update batch info when window count changes
