@@ -15,6 +15,7 @@ browser:
   #   - server: "socks5://proxy3.example.com:1080"
 
 display:
+  start_monitor: 1
   monitor_count: 1
   monitor_width: 1920
   monitor_height: 1080

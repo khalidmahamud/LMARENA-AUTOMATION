@@ -22,6 +22,7 @@ class WindowSize(BaseModel):
 class DisplayConfig(BaseModel):
     """Monitor and tiling configuration."""
 
+    start_monitor: int = Field(default=1, ge=1, le=8)
     monitor_count: int = Field(default=1, ge=1, le=8)
     monitor_width: int = Field(default=1920, ge=800, le=7680)
     monitor_height: int = Field(default=1080, ge=600, le=4320)

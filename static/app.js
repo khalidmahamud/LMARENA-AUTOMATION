@@ -102,6 +102,7 @@
   const systemPromptInput = document.getElementById("system-prompt");
   const combineWithFirstInput = document.getElementById("combine-with-first");
   const promptInput       = document.getElementById("prompt");
+  const startMonitorInput = document.getElementById("start-monitor");
   const monitorCountInput = document.getElementById("monitor-count");
   const monitorWidthInput = document.getElementById("monitor-width");
   const monitorHeightInput = document.getElementById("monitor-height");
@@ -1423,6 +1424,7 @@
         : null,
       simultaneous_start: simultaneousStartInput.checked,
       zoom_pct: parseInt(zoomInput.value, 10) || 100,
+      start_monitor: parseInt(startMonitorInput.value, 10) || 1,
       monitor_count: parseInt(monitorCountInput.value, 10) || 1,
       monitor_width: monW,
       monitor_height: monH,
@@ -3135,6 +3137,7 @@ html, body { margin: 0; padding: 0; background: #fff; color: #111;
       headless: headlessModeInput.checked,
       simultaneous_start: simultaneous,
       zoom_pct: zoom,
+      start_monitor: parseInt(startMonitorInput.value, 10) || 1,
       monitor_count: parseInt(monitorCountInput.value, 10) || 1,
       monitor_width: monW,
       monitor_height: monH,
@@ -3694,6 +3697,7 @@ html, body { margin: 0; padding: 0; background: #fff; color: #111;
     { el: minimizedModeInput, key: "minimized_mode", checkbox: true },
     { el: headlessModeInput, key: "headless_mode", checkbox: true },
     { el: simultaneousStartInput, key: "simultaneous_start", checkbox: true },
+    { el: startMonitorInput,  key: "start_monitor" },
     { el: monitorCountInput,  key: "monitor_count" },
     { el: monitorWidthInput,  key: "monitor_width" },
     { el: monitorHeightInput, key: "monitor_height" },
@@ -3743,6 +3747,7 @@ html, body { margin: 0; padding: 0; background: #fff; color: #111;
 
   function updateTilePreview() {
     const count = parseInt(windowCountInput.value, 10) || 4;
+    const startMonitor = parseInt(startMonitorInput.value, 10) || 1;
     const monitors = parseInt(monitorCountInput.value, 10) || 1;
     const mw = parseInt(monitorWidthInput.value, 10) || screen.availWidth || 1920;
     const mh = parseInt(monitorHeightInput.value, 10) || screen.availHeight || 1080;
@@ -3760,11 +3765,11 @@ html, body { margin: 0; padding: 0; background: #fff; color: #111;
     windowSizeInput.value = `${winW} \u00d7 ${winH}`;
 
     tilePreviewLabel.textContent =
-      `${cols}\u00d7${rows} grid \u2014 each window ${winW}\u00d7${winH}px` +
+      `Start monitor ${startMonitor} \u2014 ${cols}\u00d7${rows} grid \u2014 each window ${winW}\u00d7${winH}px` +
       (monitors > 1 ? ` across ${totalW}\u00d7${totalH} total` : "");
   }
 
-  [windowCountInput, monitorCountInput, monitorWidthInput,
+  [windowCountInput, startMonitorInput, monitorCountInput, monitorWidthInput,
    monitorHeightInput, taskbarHeightInput, tileMarginInput
   ].forEach((el) => el.addEventListener("input", updateTilePreview));
 

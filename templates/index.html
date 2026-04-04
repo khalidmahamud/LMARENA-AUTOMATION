@@ -56,7 +56,7 @@
           </div>
           <div class="config-field">
             <label>PROMPTS/SESSION</label>
-            <input type="number" id="prompts-per-session" value="1" min="1" max="50" />
+            <input type="number" id="prompts-per-session" value="1" min="1" max="50" title="1 means a new chat each batch. Increase this to reuse the same chat session, model selection, and one-time system prompt across multiple prompts." />
           </div>
           <div class="config-field">
             <label>ARENA URL</label>
@@ -480,7 +480,11 @@
           <summary>Display &amp; Tiling</summary>
           <div class="settings-grid">
             <div class="form-group">
-              <label for="monitor-count">Monitors</label>
+              <label for="start-monitor">Start Monitor</label>
+              <input type="number" id="start-monitor" value="1" min="1" max="8" />
+            </div>
+            <div class="form-group">
+              <label for="monitor-count">Monitors Used</label>
               <input type="number" id="monitor-count" value="1" min="1" max="8" />
             </div>
             <div class="form-group">

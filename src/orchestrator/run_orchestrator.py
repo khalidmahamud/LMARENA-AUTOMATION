@@ -16,6 +16,10 @@ from src.models.config import AppConfig, DisplayConfig
 from src.models.messages import PromptTurn, StartRunRequest
 from src.models.results import RunResult, WindowResult
 from src.models.worker import WorkerState
+from src.orchestrator.session_rules import (
+    is_first_batch_in_session,
+    prompt_models_for_batch,
+)
 from src.workers.arena_worker import ArenaWorker
 
 logger = logging.getLogger(__name__)
@@ -169,6 +173,7 @@ class RunOrchestrator:
         # Build display config from request overrides (fall back to YAML defaults)
         base = self._config.display
         display_override = DisplayConfig(
+            start_monitor=request.start_monitor or base.start_monitor,
             monitor_count=request.monitor_count or base.monitor_count,
             monitor_width=request.monitor_width or base.monitor_width,
             monitor_height=request.monitor_height or base.monitor_height,
@@ -403,8 +408,18 @@ class RunOrchestrator:
 
             # Only send system prompt on the first batch of each session
             pps = request.prompts_per_session
-            is_first_in_session = (batch_idx % pps == 0)
+            is_first_in_session = is_first_batch_in_session(
+                batch_idx,
+                pps,
+            )
             batch_system_prompt = system_prompt if is_first_in_session else ""
+            batch_model_a, batch_model_b = prompt_models_for_batch(
+                batch_idx=batch_idx,
+                prompts_per_session=pps,
+                system_prompt=batch_system_prompt,
+                model_a=request.model_a,
+                model_b=request.model_b,
+            )
 
             # Submit this batch's prompts (sequential with gap)
             workers_in_batch = min(len(batch_prompts), count)
@@ -721,8 +736,8 @@ class RunOrchestrator:
                             asyncio.create_task(
                                 worker.prepare_prompt(
                                     prompt=prompt,
-                                    model_a=None if batch_system_prompt else request.model_a,
-                                    model_b=None if batch_system_prompt else request.model_b,
+                                    model_a=batch_model_a,
+                                    model_b=batch_model_b,
                                     mark_started=False,
                                     pause_event=self._resume_event,
                                     images=image_dicts,
@@ -829,8 +844,8 @@ class RunOrchestrator:
                     try:
                         await worker.submit_prompt(
                             prompt=prompt,
-                            model_a=None if batch_system_prompt else request.model_a,
-                            model_b=None if batch_system_prompt else request.model_b,
+                            model_a=batch_model_a,
+                            model_b=batch_model_b,
                             pause_event=self._resume_event,
                             images=image_dicts,
                         )
@@ -1460,9 +1475,16 @@ class RunOrchestrator:
                 if not system_result.success:
                     raise RuntimeError(
                         system_result.error or "System prompt phase failed"
-                    )
+                )
                 baseline_responses = await worker.prepare_for_followup_prompt()
 
+            prompt_model_a, prompt_model_b = prompt_models_for_batch(
+                batch_idx=batch_idx,
+                prompts_per_session=request.prompts_per_session,
+                system_prompt=system_prompt,
+                model_a=request.model_a,
+                model_b=request.model_b,
+            )
             first_result = await self._prepare_submit_and_poll_prompt(
                 worker=worker,
                 worker_idx=worker_idx,
@@ -1472,8 +1494,8 @@ class RunOrchestrator:
                 retain=request.retain_output,
                 baseline_responses=baseline_responses,
                 turn_index=0,
-                model_a=None if system_prompt else request.model_a,
-                model_b=None if system_prompt else request.model_b,
+                model_a=prompt_model_a,
+                model_b=prompt_model_b,
                 images=image_dicts,
                 on_submit=on_submit,
             )
@@ -2154,6 +2176,13 @@ class RunOrchestrator:
                 )
                 recovery_baseline = await worker.prepare_for_followup_prompt()
 
+            prompt_model_a, prompt_model_b = prompt_models_for_batch(
+                batch_idx=batch_idx,
+                prompts_per_session=request.prompts_per_session,
+                system_prompt=system_prompt,
+                model_a=request.model_a,
+                model_b=request.model_b,
+            )
             # Submit actual prompt
             await self._wait_if_paused()
             await self._publish(
@@ -2173,8 +2202,8 @@ class RunOrchestrator:
                 worker_idx=worker_idx,
                 prompt=prompt,
                 gap=recovery_gap,
-                model_a=None if system_prompt else request.model_a,
-                model_b=None if system_prompt else request.model_b,
+                model_a=prompt_model_a,
+                model_b=prompt_model_b,
                 images=image_dicts,
             )
 

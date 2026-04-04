@@ -148,6 +148,7 @@ class BrowserManager:
                     self._layout_reservations[layout_group_id] = reservation
                     all_tiles = compute_tile_positions(
                         count=reservation.base_offset + reservation.total_windows,
+                        start_monitor=disp.start_monitor,
                         monitor_count=disp.monitor_count,
                         monitor_width=disp.monitor_width,
                         monitor_height=disp.monitor_height,
@@ -178,6 +179,7 @@ class BrowserManager:
 
                 all_tiles = compute_tile_positions(
                     count=reservation.base_offset + reservation.total_windows,
+                    start_monitor=disp.start_monitor,
                     monitor_count=disp.monitor_count,
                     monitor_width=disp.monitor_width,
                     monitor_height=disp.monitor_height,
@@ -191,6 +193,7 @@ class BrowserManager:
                 # Backward-compatible pre-computed tiling for a single run.
                 all_tiles = compute_tile_positions(
                     count=total_windows,
+                    start_monitor=disp.start_monitor,
                     monitor_count=disp.monitor_count,
                     monitor_width=disp.monitor_width,
                     monitor_height=disp.monitor_height,
@@ -204,6 +207,7 @@ class BrowserManager:
                 existing_context_entries = self._collect_existing_context_entries()
                 all_tiles = compute_tile_positions(
                     count=len(existing_context_entries) + count,
+                    start_monitor=disp.start_monitor,
                     monitor_count=disp.monitor_count,
                     monitor_width=disp.monitor_width,
                     monitor_height=disp.monitor_height,
@@ -449,34 +453,55 @@ class BrowserManager:
         minimized: bool = False,
     ) -> None:
         """Move and resize an already-open Chromium window."""
-        try:
-            page = ctx.pages[0] if ctx.pages else await ctx.new_page()
-            session = await ctx.new_cdp_session(page)
-            window_info = await session.send("Browser.getWindowForTarget")
-            await session.send(
-                "Browser.setWindowBounds",
-                {
-                    "windowId": window_info["windowId"],
-                    "bounds": {
-                        "left": tile.x,
-                        "top": tile.y,
-                        "width": tile.width,
-                        "height": tile.height,
-                        "windowState": "normal",
-                    },
-                },
-            )
-            if minimized:
+        last_exc: Optional[Exception] = None
+        for attempt in range(3):
+            session = None
+            try:
+                page = ctx.pages[0] if ctx.pages else await ctx.new_page()
+                session = await ctx.new_cdp_session(page)
+                window_info = await session.send("Browser.getWindowForTarget")
+                window_id = window_info["windowId"]
+
+                # Some Chromium builds ignore geometry updates until the window
+                # has been restored to "normal" first.
                 await session.send(
                     "Browser.setWindowBounds",
                     {
-                        "windowId": window_info["windowId"],
-                        "bounds": {"windowState": "minimized"},
+                        "windowId": window_id,
+                        "bounds": {"windowState": "normal"},
                     },
                 )
-            await session.detach()
-        except Exception as exc:
-            logger.debug("Window re-tiling skipped: %s", exc)
+                await session.send(
+                    "Browser.setWindowBounds",
+                    {
+                        "windowId": window_id,
+                        "bounds": {
+                            "left": tile.x,
+                            "top": tile.y,
+                            "width": tile.width,
+                            "height": tile.height,
+                        },
+                    },
+                )
+                if minimized:
+                    await session.send(
+                        "Browser.setWindowBounds",
+                        {
+                            "windowId": window_id,
+                            "bounds": {"windowState": "minimized"},
+                        },
+                    )
+                return
+            except Exception as exc:
+                last_exc = exc
+                await asyncio.sleep(0.2 * (attempt + 1))
+            finally:
+                if session is not None:
+                    try:
+                        await session.detach()
+                    except Exception:
+                        pass
+        logger.warning("Window re-tiling failed after retries: %s", last_exc)
 
     async def close_contexts(self, run_id: Optional[str] = None) -> None:
         """Close browser contexts for a specific run (or default group).

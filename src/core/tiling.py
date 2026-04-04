@@ -17,6 +17,7 @@ class TileLayout:
 
 def compute_tile_positions(
     count: int,
+    start_monitor: int = 1,
     monitor_count: int = 1,
     monitor_width: int = 1920,
     monitor_height: int = 1080,
@@ -27,8 +28,8 @@ def compute_tile_positions(
     """Compute position and size for *count* windows tiled across monitors.
 
     Windows are distributed across monitors first, then tiled within each
-    monitor using a sub-grid.  This avoids windows straddling monitor
-    boundaries.
+    monitor using a sub-grid. This avoids windows straddling monitor
+    boundaries. *start_monitor* is a 1-based monitor index.
 
     *border_offset* compensates for the invisible window shadow on
     Windows 10/11 (~7 px on each side).  Set to 0 on Linux/macOS.
@@ -44,14 +45,13 @@ def compute_tile_positions(
     extra = count % monitor_count  # first `extra` monitors get base+1
 
     tiles: List[TileLayout] = []
-    window_idx = 0
 
     for m in range(monitor_count):
         n = base_per_monitor + (1 if m < extra else 0)
         if n == 0:
             continue
 
-        monitor_x = m * monitor_width
+        monitor_x = (start_monitor - 1 + m) * monitor_width
 
         # ── Sub-grid for this monitor ──
         cols = math.ceil(math.sqrt(n))
@@ -72,20 +72,17 @@ def compute_tile_positions(
             x = monitor_x + margin + col * (win_w + margin)
             y = margin + row * (win_h + margin)
 
-            # Apply Windows border compensation:
-            # Expand size and shift position so the *visible* content
-            # fills the tile exactly (shadows overlap between windows,
-            # same as Windows Snap behaviour).
-            adj_x = x - border_offset
-            adj_w = win_w + 2 * border_offset
-            adj_h = win_h + border_offset  # bottom shadow only
+            # Only overlap on internal edges. Expanding outer edges past the
+            # monitor work area can make Windows clamp or restack the window.
+            expand_left = border_offset if col > 0 else 0
+            expand_right = border_offset if col < cols - 1 else 0
+            expand_bottom = border_offset if row < rows - 1 else 0
 
             tiles.append(TileLayout(
-                x=adj_x,
+                x=x - expand_left,
                 y=y,
-                width=adj_w,
-                height=adj_h,
+                width=win_w + expand_left + expand_right,
+                height=win_h + expand_bottom,
             ))
-            window_idx += 1
 
     return tiles
