@@ -343,36 +343,60 @@ class RunOrchestrator:
                 )
             )
 
-            # Re-navigate for subsequent batches
+            # Re-navigate or lightweight reset for subsequent batches
             if batch_idx > 0:
                 await self._wait_if_paused()
-                for worker in self._workers:
-                    await worker.state_machine.reset()
-                if simultaneous_start:
-                    batch_navigation_tasks = [
-                        asyncio.create_task(
-                            w.navigate_to_arena(
+                pps = request.prompts_per_session
+                needs_full_nav = (batch_idx % pps == 0)
+
+                if needs_full_nav:
+                    # Full re-navigation (new session)
+                    for worker in self._workers:
+                        await worker.state_machine.reset()
+                    if simultaneous_start:
+                        batch_navigation_tasks = [
+                            asyncio.create_task(
+                                w.navigate_to_arena(
+                                    zoom_pct=request.zoom_pct,
+                                    pause_event=self._resume_event,
+                                )
+                            )
+                            for w in self._workers
+                        ]
+                    else:
+                        nav_results = await asyncio.gather(
+                            *(w.navigate_to_arena(
                                 zoom_pct=request.zoom_pct,
                                 pause_event=self._resume_event,
                             )
+                              for w in self._workers),
+                            return_exceptions=True,
                         )
-                        for w in self._workers
-                    ]
+                        for i, result in enumerate(nav_results):
+                            if isinstance(result, BaseException):
+                                logger.error(
+                                    "Worker %d re-navigation failed (batch %d): %s",
+                                    i, batch_idx, result,
+                                )
                 else:
-                    nav_results = await asyncio.gather(
-                        *(w.navigate_to_arena(
-                            zoom_pct=request.zoom_pct,
-                            pause_event=self._resume_event,
+                    # Lightweight reset — same session, no navigation
+                    for worker in self._workers:
+                        if worker.state_machine.state == WorkerState.COMPLETE:
+                            await worker.prepare_for_followup_prompt()
+                        elif worker.state_machine.is_terminal:
+                            await worker.state_machine.reset()
+                    await self._publish(
+                        Event(
+                            type=EventType.LOG,
+                            data={
+                                "level": "info",
+                                "text": (
+                                    f"Batch {batch_idx + 1}/{total_batches}: "
+                                    f"reusing session (prompt {(batch_idx % pps) + 1}/{pps})"
+                                ),
+                            },
                         )
-                          for w in self._workers),
-                        return_exceptions=True,
                     )
-                    for i, result in enumerate(nav_results):
-                        if isinstance(result, BaseException):
-                            logger.error(
-                                "Worker %d re-navigation failed (batch %d): %s",
-                                i, batch_idx, result,
-                            )
 
             if self._cancelled:
                 break

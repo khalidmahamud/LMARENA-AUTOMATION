@@ -47,6 +47,7 @@
   const windowCountInput  = document.getElementById("window-count");
   const windowSizeInput   = document.getElementById("window-size");
   const submissionGapInput = document.getElementById("submission-gap");
+  const promptsPerSessionInput = document.getElementById("prompts-per-session");
   const arenaUrlInput     = document.getElementById("arena-url");
   const modelAInput       = document.getElementById("model-a");
   const modelBInput       = document.getElementById("model-b");
@@ -1405,6 +1406,7 @@
       combine_with_first: combineWithFirstInput.checked,
       window_count: windowCount,
       submission_gap_seconds: parseFloat(submissionGapInput.value) || null,
+      prompts_per_session: parseInt(promptsPerSessionInput.value, 10) || 1,
       model_a: modelAInput.value.trim() || null,
       model_b: modelBInput.value.trim() || null,
       retain_output: retainOutputInput.value,
@@ -1980,6 +1982,7 @@
 
   // Update batch info when window count changes
   windowCountInput.addEventListener("input", updateBatchInfo);
+  promptsPerSessionInput.addEventListener("input", updateBatchInfo);
 
   // ══════════════════════════════════════
   // Settings Modal
@@ -3119,6 +3122,7 @@ html, body { margin: 0; padding: 0; background: #fff; color: #111;
       combine_with_first: false,
       window_count: windowCount,
       submission_gap_seconds: gap,
+      prompts_per_session: parseInt(promptsPerSessionInput.value, 10) || 1,
       model_a: modelA,
       model_b: modelB,
       retain_output: retain,
@@ -3676,6 +3680,7 @@ html, body { margin: 0; padding: 0; background: #fff; color: #111;
   const settingsFields = [
     { el: windowCountInput,   key: "window_count" },
     { el: submissionGapInput, key: "submission_gap" },
+    { el: promptsPerSessionInput, key: "prompts_per_session" },
     { el: arenaUrlInput,      key: "arena_url" },
     { el: modelAInput,        key: "model_a" },
     { el: modelBInput,        key: "model_b" },

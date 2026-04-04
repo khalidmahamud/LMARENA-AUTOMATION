@@ -60,6 +60,7 @@ class StartRunRequest(BaseModel):
     images: Optional[List[ImagePayload]] = Field(default=None, max_length=10)
     simultaneous_start: bool = False
     zoom_pct: int = Field(default=100, ge=25, le=200)
+    prompts_per_session: int = Field(default=1, ge=1, le=50)
     # Display / tiling overrides (sent from UI, fall back to config defaults)
     monitor_count: Optional[int] = Field(default=None, ge=1, le=8)
     monitor_width: Optional[int] = Field(default=None, ge=800, le=7680)
