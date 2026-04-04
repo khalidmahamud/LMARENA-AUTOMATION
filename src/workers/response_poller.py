@@ -566,7 +566,7 @@ class ResponsePoller:
                             if (responseNode) {
                                 rawHtml = responseNode.innerHTML.trim();
                                 cleanText = responseNode.innerText.trim()
-                                    .replace(/^(HTML|CSS|JavaScript|JS|TypeScript|TS|Python|JSON|XML|Bash|Shell|SQL|Go|Rust|Java|Ruby|PHP)\\s*(?=<)/i, "");
+                                    .replace(/^(HTML|CSS|JavaScript|JS|TypeScript|TS|Python|JSON|XML|Bash|Shell|SQL|Go|Rust|Java|Ruby|PHP)\\s*(?=<|\\n)/i, "");
                             }
 
                             return {
