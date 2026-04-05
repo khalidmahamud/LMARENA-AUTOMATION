@@ -20,7 +20,7 @@ from src.orchestrator.session_rules import (
     is_first_batch_in_session,
     prompt_models_for_batch,
 )
-from src.workers.arena_worker import ArenaWorker
+from src.workers.arena_worker import ArenaWorker, CHALLENGE_RETRY_LIMIT
 
 logger = logging.getLogger(__name__)
 
@@ -2042,7 +2042,7 @@ class RunOrchestrator:
             or self._config.timing.submission_gap_seconds
         )
 
-        max_context_retries = 3
+        max_context_retries = CHALLENGE_RETRY_LIMIT
         for attempt in range(1, max_context_retries + 1):
             await self._wait_if_paused()
             if self._cancelled:

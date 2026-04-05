@@ -29,6 +29,11 @@ from src.workers.response_poller import ResponsePoller
 
 logger = logging.getLogger(__name__)
 
+# Reuse the same cap everywhere challenge recovery reopens a fresh
+# browser context so repeated security popups do not get a one-shot path.
+CHALLENGE_RETRY_LIMIT = 5
+
+
 class ArenaWorker:
     """Full lifecycle manager for a single Arena browser window.
 
@@ -219,6 +224,20 @@ class ArenaWorker:
     @staticmethod
     def _normalize_text(value: Optional[str]) -> str:
         return " ".join((value or "").replace("\u200b", "").split()).strip()
+
+    @classmethod
+    def _normalize_model_name(cls, value: Optional[str]) -> str:
+        return cls._normalize_text(value).lower()
+
+    @classmethod
+    def _model_names_match(
+        cls,
+        current_name: Optional[str],
+        requested_name: Optional[str],
+    ) -> bool:
+        current = cls._normalize_model_name(current_name)
+        requested = cls._normalize_model_name(requested_name)
+        return bool(current and requested and current == requested)
 
     @staticmethod
     async def _wait_if_paused(
@@ -1483,7 +1502,7 @@ class ArenaWorker:
     async def _handle_challenge(
         self,
         challenge: ChallengeType,
-        max_retries: int = 3,
+        max_retries: int = CHALLENGE_RETRY_LIMIT,
         clear_cookies: bool = False,
         pause_event: Optional[asyncio.Event] = None,
     ) -> None:
@@ -1588,7 +1607,7 @@ class ArenaWorker:
         model_a: Optional[str] = None,
         model_b: Optional[str] = None,
         mark_started: bool = True,
-        retry_on_challenge: int = 1,
+        retry_on_challenge: int = CHALLENGE_RETRY_LIMIT,
         pause_event: Optional[asyncio.Event] = None,
         images: Optional[list] = None,
     ) -> None:
@@ -1729,7 +1748,7 @@ class ArenaWorker:
 
     async def submit_prepared_prompt(
         self,
-        retry_on_challenge: int = 1,
+        retry_on_challenge: int = CHALLENGE_RETRY_LIMIT,
         pause_event: Optional[asyncio.Event] = None,
     ) -> None:
         """Submit a prompt that has already been prepared in the composer."""
@@ -1836,7 +1855,7 @@ class ArenaWorker:
                 )
                 await self._handle_challenge(
                     challenge,
-                    max_retries=1,
+                    max_retries=CHALLENGE_RETRY_LIMIT,
                     clear_cookies=False,
                     pause_event=pause_event,
                 )
@@ -2010,7 +2029,7 @@ class ArenaWorker:
             )
             await self._handle_challenge(
                 challenge,
-                max_retries=1,
+                max_retries=CHALLENGE_RETRY_LIMIT,
                 clear_cookies=False,
                 pause_event=pause_event,
             )
@@ -2079,7 +2098,7 @@ class ArenaWorker:
         prompt: str,
         model_a: Optional[str] = None,
         model_b: Optional[str] = None,
-        retry_on_challenge: int = 1,
+        retry_on_challenge: int = CHALLENGE_RETRY_LIMIT,
         pause_event: Optional[asyncio.Event] = None,
         images: Optional[list] = None,
     ) -> None:
@@ -2543,7 +2562,7 @@ class ArenaWorker:
         await self._log("warning", message)
         await self._handle_challenge(
             recovery_challenge,
-            max_retries=1,
+            max_retries=CHALLENGE_RETRY_LIMIT,
             clear_cookies=False,
             pause_event=pause_event,
         )
@@ -2726,6 +2745,88 @@ class ArenaWorker:
 
         return None
 
+    async def _get_current_model_labels(self) -> list[str]:
+        """Return visible side-by-side model labels ordered as A, then B."""
+        assert self._page is not None
+        dropdown_sel = self._selectors.get("model_dropdown")
+        labels = await self._page.evaluate(
+            """(selector) => {
+                const isVisible = (el) => {
+                    if (!el) return false;
+                    const style = window.getComputedStyle(el);
+                    const rect = el.getBoundingClientRect();
+                    return (
+                        style.display !== "none" &&
+                        style.visibility !== "hidden" &&
+                        rect.width > 0 &&
+                        rect.height > 0
+                    );
+                };
+
+                const buttonMatches = (btn) => {
+                    const text = (btn.innerText || btn.textContent || "")
+                        .trim()
+                        .toLowerCase();
+                    if (!text) return false;
+                    if (btn.closest('[role="dialog"]')) return false;
+                    return ![
+                        "direct",
+                        "side",
+                        "text",
+                        "code",
+                        "image",
+                        "search",
+                    ].some((value) => text === value);
+                };
+
+                const buttonScore = (btn) => {
+                    let score = 0;
+                    if (btn.querySelector("span.font-mono")) score += 5;
+                    if (btn.querySelector("span.truncate")) score += 2;
+                    const text = (btn.innerText || "").toLowerCase();
+                    if (
+                        text.includes("gpt") ||
+                        text.includes("claude") ||
+                        text.includes("gemini") ||
+                        text.includes("llama") ||
+                        text.includes("-")
+                    ) {
+                        score += 2;
+                    }
+                    return score;
+                };
+
+                const readLabel = (btn) => {
+                    const labelNode =
+                        btn.querySelector("span.truncate.text-left") ||
+                        btn.querySelector("span.truncate") ||
+                        btn.querySelector("span.font-mono") ||
+                        btn;
+                    const text = (labelNode.innerText || labelNode.textContent || "")
+                        .split("\\n")
+                        .map((part) => part.trim())
+                        .filter(Boolean)
+                        .join(" ");
+                    return text.trim();
+                };
+
+                return Array.from(
+                    new Set([
+                        ...document.querySelectorAll(selector),
+                        ...document.querySelectorAll('button[aria-haspopup="dialog"]'),
+                    ])
+                )
+                    .filter(isVisible)
+                    .filter(buttonMatches)
+                    .sort((a, b) => buttonScore(b) - buttonScore(a))
+                    .slice(0, 2)
+                    .map(readLabel)
+                    .filter(Boolean);
+            }""",
+            dropdown_sel,
+        )
+        return [self._normalize_text(label) for label in labels]
+
     async def _select_model(
         self,
         model_name: str,
@@ -2736,6 +2837,25 @@ class ArenaWorker:
         search for *model_name*, and select it.
         """
         label = "A" if index == 0 else "B"
+        current_models = await self._get_current_model_labels()
+        current_label = current_models[index] if len(current_models) > index else ""
+        if self._model_names_match(current_label, model_name):
+            await self._log(
+                "info",
+                f"Model {label} already selected as '{current_label}'; skipping re-selection",
+            )
+            return
+
+        other_index = 1 - index
+        other_label = current_models[other_index] if len(current_models) > other_index else ""
+        if self._model_names_match(other_label, model_name):
+            other_side = "A" if other_index == 0 else "B"
+            await self._log(
+                "warning",
+                f"Model {label} selection skipped: '{model_name}' is already selected on side {other_side}",
+            )
+            return
+
         timeout_seconds = 30.0
         deadline = asyncio.get_running_loop().time() + timeout_seconds
         last_issue = f"Model {label} selector was not usable"
@@ -2918,7 +3038,7 @@ class ArenaWorker:
         self,
         baseline_responses: Optional[tuple[str, str]] = None,
         pause_event: Optional[asyncio.Event] = None,
-        _recovery_retries: int = 2,
+        _recovery_retries: int = CHALLENGE_RETRY_LIMIT,
         _poll_timeout_retries: int = 1,
         _poll_timeout_override_seconds: Optional[float] = None,
     ) -> WindowResult:
