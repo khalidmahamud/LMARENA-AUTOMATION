@@ -252,7 +252,7 @@
       var limit = parseInt(proxyLimitInput.value, 10) || 10;
       var test = proxyTestInput.checked;
       proxyFetchStatus.style.color = "var(--text-dim)";
-      proxyFetchStatus.textContent = test ? "Fetching & testing..." : "Fetching...";
+      proxyFetchStatus.textContent = test ? "Loading & testing XLSX proxies..." : "Loading XLSX proxies...";
       fetchProxiesBtn.disabled = true;
 
       var qs = "protocol=" + encodeURIComponent(protocol) + "&limit=" + limit;
@@ -270,7 +270,7 @@
             proxyFetchStatus.style.color = "var(--orange)";
             proxyFetchStatus.textContent = data.tested
               ? "0 alive out of " + (data.total_tested || 0) + " tested"
-              : "No proxies found";
+              : "No proxies found in XLSX";
             return;
           }
           var lines = data.proxies.map(function (p) { return p.server; });
@@ -278,7 +278,7 @@
           proxyFetchStatus.style.color = "var(--green)";
           proxyFetchStatus.textContent = data.tested
             ? data.count + " alive out of " + data.total_tested + " tested"
-            : data.count + " proxies loaded";
+            : data.count + " proxies loaded from XLSX";
         })
         .catch(function (err) {
           proxyFetchStatus.style.color = "var(--red)";

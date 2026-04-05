@@ -81,6 +81,7 @@ class AppConfig(BaseModel):
     arena_url: str = Field(default="https://arena.ai/text/direct")
     output_dir: str = Field(default="outputs")
     log_level: str = Field(default="INFO")
+    proxy_source_xlsx: str = Field(default="proxy_saver/good_proxies.xlsx")
 
     @classmethod
     def from_yaml(cls, path: str) -> AppConfig:

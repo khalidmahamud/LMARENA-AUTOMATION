@@ -44,3 +44,4 @@ preview:
 arena_url: "https://arena.ai/text/side-by-side"
 output_dir: "outputs"
 log_level: "INFO"
+proxy_source_xlsx: "proxy_saver/good_proxies.xlsx"

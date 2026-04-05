@@ -5,9 +5,9 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from functools import partial
 import random
 import time
-import urllib.request
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -15,13 +15,8 @@ from typing import Callable, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
-PROXIFLY_URL = (
-    "https://cdn.jsdelivr.net/gh/proxifly/free-proxy-list@main"
-    "/proxies/protocols/{protocol}/data.json"
-)
-
 MAX_FAIL_COUNT = 3
-STALE_THRESHOLD = 3600.0  # prune auto-fetched unhealthy proxies after 1 hour
+STALE_THRESHOLD = 3600.0  # prune reloadable unhealthy proxies after 1 hour
 CHALLENGER_RECHECK_COOLDOWN = 600.0  # avoid re-testing same challenger too frequently
 
 
@@ -54,12 +49,14 @@ class ProxyPool:
     def __init__(
         self,
         check_fn: Optional[Callable[[str, int], bool]] = None,
+        source_loader: Optional[Callable[[str, Optional[int]], List[dict]]] = None,
         max_healthy: int = 50,
     ) -> None:
         self._entries: Dict[str, ProxyEntry] = {}
         self._healthy_index: int = 0
         self._lock = asyncio.Lock()
         self._check_fn = check_fn
+        self._source_loader = source_loader
         self._max_healthy = max_healthy
         self._max_latency_ms: float = 5000.0
         self._refresh_task: Optional[asyncio.Task] = None
@@ -388,12 +385,12 @@ class ProxyPool:
         stats["healthy"] = self.healthy_count
         stats["unhealthy"] = len(self._entries) - stats["healthy"]
 
-        # ── Step 2: Purge stale auto-fetched unhealthy proxies (>1 hour) ──
+        # ── Step 2: Purge stale reloadable unhealthy proxies (>1 hour) ──
         now = time.time()
         to_remove = [
             server for server, e in self._entries.items()
             if not e.healthy
-            and e.source == "auto_fetch"
+            and e.source != "manual"
             and e.last_checked
             and (now - e.last_checked) > STALE_THRESHOLD
         ]
@@ -408,22 +405,20 @@ class ProxyPool:
         # ── Step 3: Fetch challengers to fill gaps or replace slower proxies ──
         gap = self._max_healthy - self.healthy_count
         challenger_count = gap if gap > 0 else min(3, max(1, self._max_healthy // 3))
-        if challenger_count > 0 and self._check_fn:
+        if challenger_count > 0 and self._check_fn and self._source_loader:
             candidate_budget = max(effective_fetch_limit, challenger_count * 5)
             logger.info(
-                "Pool has %d/%d healthy — testing up to %d challenger proxies",
+                "Pool has %d/%d healthy — testing up to %d challenger proxies from source",
                 self.healthy_count,
                 self._max_healthy,
                 candidate_budget,
             )
-            url = PROXIFLY_URL.format(protocol=protocol)
             try:
-                def _fetch():
-                    req = urllib.request.Request(url, headers={"User-Agent": "LMArenaAutomation/1.0"})
-                    with urllib.request.urlopen(req, timeout=15) as resp:
-                        return json.loads(resp.read().decode())
-
-                data = await loop.run_in_executor(None, _fetch)
+                source_scan_limit = max(candidate_budget * 5, self._max_healthy * 3)
+                data = await loop.run_in_executor(
+                    None,
+                    partial(self._source_loader, protocol, source_scan_limit),
+                )
                 random.shuffle(data)
 
                 # Keep a short cooldown so each cycle explores fresh candidates.
@@ -439,7 +434,7 @@ class ProxyPool:
                 seen = set()
                 candidates = []
                 for entry in data:
-                    proxy = entry.get("proxy") if isinstance(entry, dict) else None
+                    proxy = entry.get("server") if isinstance(entry, dict) else None
                     if (
                         not proxy
                         or proxy in seen
@@ -461,20 +456,28 @@ class ProxyPool:
                     results = await self._check_in_batches(candidates, timeout=5)
                     good = sorted(
                         [
-                            {"server": proxy, "latency_ms": round(latency, 1)}
-                            for proxy, latency in zip(candidates, results)
+                            {
+                                "server": entry["server"],
+                                "username": entry.get("username"),
+                                "password": entry.get("password"),
+                                "latency_ms": round(latency, 1),
+                            }
+                            for entry, latency in zip(
+                                [e for e in data if e.get("server") in candidates],
+                                results,
+                            )
                             if latency > 0 and latency <= self._max_latency_ms
                         ],
                         key=lambda p: p["latency_ms"],
                     )
-                    added = self.add_proxies(good, source="auto_fetch")
+                    added = self.add_proxies(good, source="xlsx")
                     stats["added"] = added
                     if added:
                         logger.info("Filled pool with %d new proxies (%d still needed)",
                                     added, max(0, self._max_healthy - self.healthy_count))
 
             except Exception as exc:
-                logger.warning("Failed to fetch replacement proxies: %s", exc)
+                logger.warning("Failed to load replacement proxies from source: %s", exc)
 
         # ── Step 4: Save ──
         self.save_to_file()

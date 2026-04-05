@@ -12,9 +12,7 @@ import csv
 import io
 import json as json_mod
 import logging
-import random
 import re
-import urllib.request
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from functools import partial
@@ -34,6 +32,7 @@ from src.models.config import AppConfig
 from src.models.results import RunResult, WindowResult
 from src.orchestrator.run_orchestrator import RunOrchestrator
 from src.proxy.pool import ProxyPool
+from src.proxy.xlsx_source import load_proxy_candidates_from_xlsx
 from src.transport.ws_broadcaster import WsBroadcaster
 from src.transport.ws_handler import WsHandler
 from src.preview.screenshot_service import ScreenshotService
@@ -59,6 +58,15 @@ screenshot_service: ScreenshotService
 proxy_pool: ProxyPool
 
 
+def _load_proxy_source(protocol: str = "http", limit: int | None = None) -> list[dict]:
+    """Load proxy candidates from the configured XLSX source."""
+    return load_proxy_candidates_from_xlsx(
+        config.proxy_source_xlsx,
+        protocol=protocol,
+        limit=limit,
+    )
+
+
 @asynccontextmanager
 async def lifespan(application: FastAPI):
     """Startup / shutdown lifecycle."""
@@ -68,8 +76,11 @@ async def lifespan(application: FastAPI):
     SelectorRegistry.load("config/selectors.yaml")
 
     # Initialize proxy pool (load persisted proxies and settings)
-    proxy_pool = ProxyPool(check_fn=_check_proxy)
+    proxy_pool = ProxyPool(check_fn=_check_proxy, source_loader=_load_proxy_source)
     proxy_pool.load_from_file()
+    source_exists = Path(config.proxy_source_xlsx).exists()
+    if not source_exists:
+        logger.warning("Proxy source XLSX not found: %s", config.proxy_source_xlsx)
 
     # Resume auto-refresh if it was enabled before shutdown
     ar = proxy_pool.auto_refresh_settings
@@ -85,10 +96,14 @@ async def lifespan(application: FastAPI):
             int(ar.get("fetch_limit", 20)),
             ar["interval"],
         )
-    elif proxy_pool.total_count > 0:
-        # Not auto-refreshing, but have loaded proxies — health-check them in background
+    elif proxy_pool.total_count > 0 or source_exists:
+        # Not auto-refreshing — populate/re-check the pool from the persisted entries and XLSX source.
         asyncio.create_task(proxy_pool.health_check_all())
-        logger.info("Background health check started for %d loaded proxies", proxy_pool.total_count)
+        logger.info(
+            "Background health check started (loaded=%d, source=%s)",
+            proxy_pool.total_count,
+            config.proxy_source_xlsx,
+        )
 
     event_bus = EventBus()
     broadcaster = WsBroadcaster(event_bus)
@@ -562,20 +577,12 @@ async def open_preview_window(
     )
 
 
-# ── Free proxy endpoint ──
-
 @app.post("/api/close-all-windows")
 async def close_all_windows():
     """Stop active runs and close every currently open browser window."""
     await ws_handler._handle_stop_run()
     await browser_manager.close_open_windows()
     return {"ok": True}
-
-
-PROXIFLY_URL = (
-    "https://cdn.jsdelivr.net/gh/proxifly/free-proxy-list@main"
-    "/proxies/protocols/{protocol}/data.json"
-)
 
 
 TEST_URL = "https://arena.ai/"
@@ -645,7 +652,7 @@ def _check_proxy(proxy_server: str, timeout: int = 5) -> float:
 async def fetch_free_proxies(
     protocol: str = "http", limit: int = 10, test: bool = False
 ):
-    """Fetch free proxies from proxifly. If test=true, health-check each proxy."""
+    """Load proxies from the configured XLSX source. If test=true, health-check each proxy."""
     allowed = {"http", "https", "socks4", "socks5"}
     if protocol not in allowed:
         return JSONResponse(
@@ -654,43 +661,49 @@ async def fetch_free_proxies(
         )
     limit = max(1, min(limit, 100))
 
-    url = PROXIFLY_URL.format(protocol=protocol)
     try:
-        def _fetch():
-            req = urllib.request.Request(url, headers={"User-Agent": "LMArenaAutomation/1.0"})
-            with urllib.request.urlopen(req, timeout=15) as resp:
-                return json_mod.loads(resp.read().decode())
-
-        data = await asyncio.get_event_loop().run_in_executor(None, _fetch)
+        source_limit = limit if not test else max(limit * 10, 50)
+        data = await asyncio.get_event_loop().run_in_executor(
+            None,
+            partial(_load_proxy_source, protocol, source_limit),
+        )
     except Exception as exc:
-        logger.error("Failed to fetch proxies from proxifly: %s", exc)
-        return JSONResponse({"error": f"Failed to fetch proxies: {exc}"}, status_code=502)
-
-    random.shuffle(data)
+        logger.error("Failed to load proxies from XLSX source: %s", exc)
+        return JSONResponse({"error": f"Failed to load proxies: {exc}"}, status_code=502)
 
     if not test:
-        proxies = [{"server": entry["proxy"]} for entry in data[:limit] if "proxy" in entry]
-        return {"proxies": proxies, "count": len(proxies), "protocol": protocol, "tested": False}
+        proxies = data[:limit]
+        return {
+            "proxies": proxies,
+            "count": len(proxies),
+            "protocol": protocol,
+            "tested": False,
+            "source": config.proxy_source_xlsx,
+        }
 
-    # Health-check mode: test a larger pool to find enough working proxies
-    pool_size = min(len(data), limit * 10)
-    candidates = [entry["proxy"] for entry in data[:pool_size] if "proxy" in entry]
+    candidates = data[:source_limit]
+    candidate_servers = [entry["server"] for entry in candidates if entry.get("server")]
     logger.info("Testing %d proxies to find %d working ones...", len(candidates), limit)
 
     # Check in batches of 20 to avoid overwhelming the network
     loop = asyncio.get_event_loop()
     results = []
     batch_size = 20
-    for i in range(0, len(candidates), batch_size):
-        batch = candidates[i : i + batch_size]
+    for i in range(0, len(candidate_servers), batch_size):
+        batch = candidate_servers[i : i + batch_size]
         batch_results = await asyncio.gather(
             *(loop.run_in_executor(None, _check_proxy, proxy) for proxy in batch)
         )
         results.extend(batch_results)
 
     alive = [
-        {"server": proxy, "latency_ms": round(latency, 1)}
-        for proxy, latency in zip(candidates, results)
+        {
+            "server": entry["server"],
+            "username": entry.get("username"),
+            "password": entry.get("password"),
+            "latency_ms": round(latency, 1),
+        }
+        for entry, latency in zip(candidates, results)
         if latency > 0
     ]
     alive.sort(key=lambda p: p["latency_ms"])
@@ -699,9 +712,16 @@ async def fetch_free_proxies(
 
     # Also add to proxy pool
     if alive:
-        proxy_pool.add_proxies(alive, source="auto_fetch")
+        proxy_pool.add_proxies(alive, source="xlsx")
 
-    return {"proxies": alive, "count": len(alive), "protocol": protocol, "tested": True, "total_tested": len(candidates)}
+    return {
+        "proxies": alive,
+        "count": len(alive),
+        "protocol": protocol,
+        "tested": True,
+        "total_tested": len(candidates),
+        "source": config.proxy_source_xlsx,
+    }
 
 
 # ── Proxy pool endpoints ──
