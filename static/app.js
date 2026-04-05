@@ -332,6 +332,53 @@
   var _lastPoolHealthy = null;
   var _lastPoolTotal = null;
 
+  // ── Proxy Pool Utilities ──
+
+  function setProxyStatus(text, level) {
+    if (!proxyPoolStatusEl) return;
+    proxyPoolStatusEl.textContent = text;
+    var colors = { success: "var(--green)", error: "var(--red)", warn: "var(--orange)", info: "var(--text-dim)" };
+    proxyPoolStatusEl.style.color = colors[level] || colors.info;
+  }
+
+  function healthColor(healthy, degraded) {
+    return healthy > 0 ? "var(--green)" : degraded > 0 ? "var(--orange)" : "var(--text-dim)";
+  }
+
+  function proxyApiCall(url, opts) {
+    var method = (opts && opts.method) || "POST";
+    var loadingMsg = opts && opts.loadingMsg;
+    var successMsg = opts && opts.successMsg;
+    var logMsg = opts && opts.logMsg;
+    var btn = opts && opts.btn;
+
+    if (loadingMsg) setProxyStatus(loadingMsg, "info");
+    if (btn) btn.disabled = true;
+
+    return fetch(url, { method: method })
+      .then(function (r) {
+        if (!r.ok) throw new Error("status " + r.status);
+        return r.json();
+      })
+      .then(function (data) {
+        if (data.error) {
+          setProxyStatus(data.error, "error");
+          return data;
+        }
+        var msg = typeof successMsg === "function" ? successMsg(data) : successMsg;
+        if (msg) setProxyStatus(msg, "success");
+        if (logMsg) appendProxyLog("info", typeof logMsg === "function" ? logMsg(data) : logMsg);
+        refreshPoolStatus();
+        return data;
+      })
+      .catch(function (err) {
+        setProxyStatus("Error: " + err.message, "error");
+      })
+      .finally(function () {
+        if (btn) btn.disabled = false;
+      });
+  }
+
   // ── Proxy Pool Controls ──
 
   function refreshPoolStatus() {
@@ -352,7 +399,7 @@
 
         // Update settings modal
         proxyPoolCounts.textContent = h + " healthy / " + t + " total";
-        proxyPoolCounts.style.color = h > 0 ? "var(--green)" : d > 0 ? "var(--orange)" : "var(--text-dim)";
+        proxyPoolCounts.style.color = healthColor(h, d);
         if (autoRefreshToggle) {
           autoRefreshToggle.checked = isEnabled;
         }
@@ -386,7 +433,7 @@
         if (plogPoolCount) plogPoolCount.textContent = h + " healthy / " + t + " total";
         if (plogAvgLatency) {
           plogAvgLatency.textContent = avgLat !== null ? Math.round(avgLat) + "ms" : "--";
-          plogAvgLatency.style.color = avgLat !== null && avgLat < maxLat * 0.5 ? "var(--green)" : avgLat !== null && avgLat < maxLat ? "var(--orange)" : "var(--text-dim)";
+          plogAvgLatency.style.color = avgLat !== null && avgLat < maxLat * 0.5 ? "var(--green)" : avgLat !== null && avgLat < maxLat ? "var(--orange)" : "var(--text-dim)";  // latency color (distinct thresholds)
         }
         if (plogThreshold) plogThreshold.textContent = "< " + maxLat + "ms";
         if (plogAutoRefresh) {
@@ -475,26 +522,18 @@
 
   if (checkPoolBtn) {
     checkPoolBtn.addEventListener("click", function () {
-      proxyPoolStatusEl.textContent = "Checking...";
-      proxyPoolStatusEl.style.color = "var(--text-dim)";
-      checkPoolBtn.disabled = true;
-      fetch("/api/proxy-pool/health-check", { method: "POST" })
-        .then(function (r) { return r.json(); })
-        .then(function (data) {
+      proxyApiCall("/api/proxy-pool/health-check", {
+        btn: checkPoolBtn,
+        loadingMsg: "Checking...",
+        successMsg: function (data) {
           var msg = data.healthy + " healthy, " + data.unhealthy + " unhealthy, " + data.recovered + " recovered";
           if (data.avg_latency_ms) msg += " | avg " + Math.round(data.avg_latency_ms) + "ms";
-          proxyPoolStatusEl.textContent = msg;
-          proxyPoolStatusEl.style.color = data.healthy > 0 ? "var(--green)" : "var(--orange)";
-          appendProxyLog("info", "Health check: " + msg);
-          refreshPoolStatus();
-        })
-        .catch(function (err) {
-          proxyPoolStatusEl.textContent = "Check failed: " + err.message;
-          proxyPoolStatusEl.style.color = "var(--red)";
-        })
-        .finally(function () {
-          checkPoolBtn.disabled = false;
-        });
+          return msg;
+        },
+        logMsg: function (data) {
+          return "Health check: " + data.healthy + " healthy, " + data.unhealthy + " unhealthy";
+        },
+      });
     });
   }
 
@@ -507,22 +546,11 @@
       var qs = this.checked
         ? "?protocol=" + encodeURIComponent(protocol) + "&limit=20&interval=" + intervalSec
         : "";
-      fetch("/api/proxy-pool/auto-refresh/" + endpoint + qs, { method: "POST" })
-        .then(function (r) { return r.json(); })
-        .then(function () {
-          proxyPoolStatusEl.textContent = autoRefreshToggle.checked
-            ? "Auto-refresh started (" + intervalMin + "min)"
-            : "Auto-refresh stopped";
-          proxyPoolStatusEl.style.color = "var(--green)";
-          appendProxyLog("info", autoRefreshToggle.checked
-            ? "Auto-refresh started (" + intervalMin + "min interval)"
-            : "Auto-refresh stopped");
-          refreshPoolStatus();
-        })
-        .catch(function (err) {
-          proxyPoolStatusEl.textContent = "Error: " + err.message;
-          proxyPoolStatusEl.style.color = "var(--red)";
-        });
+      var isStart = this.checked;
+      proxyApiCall("/api/proxy-pool/auto-refresh/" + endpoint + qs, {
+        successMsg: isStart ? "Auto-refresh started (" + intervalMin + "min)" : "Auto-refresh stopped",
+        logMsg: isStart ? "Auto-refresh started (" + intervalMin + "min interval)" : "Auto-refresh stopped",
+      });
     });
   }
 
@@ -536,22 +564,13 @@
         if (!intervalMin || intervalMin < 1) return;
         intervalMin = Math.min(60, Math.max(1, intervalMin));
         el.value = intervalMin;
-        // Only restart if auto-refresh is currently active
         if (autoRefreshToggle && autoRefreshToggle.checked) {
           var intervalSec = intervalMin * 60;
           var protocol = proxyProtocolInput.value;
-          fetch("/api/proxy-pool/auto-refresh/start?protocol=" + encodeURIComponent(protocol) + "&limit=20&interval=" + intervalSec, { method: "POST" })
-            .then(function (r) { return r.json(); })
-            .then(function () {
-              proxyPoolStatusEl.textContent = "Auto-refresh interval updated (" + intervalMin + "min)";
-              proxyPoolStatusEl.style.color = "var(--green)";
-              appendProxyLog("info", "Auto-refresh interval updated to " + intervalMin + "min");
-              refreshPoolStatus();
-            })
-            .catch(function (err) {
-              proxyPoolStatusEl.textContent = "Error: " + err.message;
-              proxyPoolStatusEl.style.color = "var(--red)";
-            });
+          proxyApiCall("/api/proxy-pool/auto-refresh/start?protocol=" + encodeURIComponent(protocol) + "&limit=20&interval=" + intervalSec, {
+            successMsg: "Auto-refresh interval updated (" + intervalMin + "min)",
+            logMsg: "Auto-refresh interval updated to " + intervalMin + "min",
+          });
         }
       }, 800);
     });
@@ -567,20 +586,9 @@
         if (!limit || limit < 1) return;
         limit = Math.min(500, limit);
         el.value = limit;
-        fetch("/api/proxy-pool/max-size?limit=" + limit, { method: "POST" })
-          .then(function (r) {
-            if (!r.ok) throw new Error("status " + r.status);
-            return r.json();
-          })
-          .then(function () {
-            proxyPoolStatusEl.textContent = "Max pool size set to " + limit;
-            proxyPoolStatusEl.style.color = "var(--green)";
-            refreshPoolStatus();
-          })
-          .catch(function (err) {
-            proxyPoolStatusEl.textContent = "Error: " + err.message;
-            proxyPoolStatusEl.style.color = "var(--red)";
-          });
+        proxyApiCall("/api/proxy-pool/max-size?limit=" + limit, {
+          successMsg: "Max pool size set to " + limit,
+        });
       }, 600);
     });
   }
@@ -595,21 +603,10 @@
         if (!ms || ms < 500) return;
         ms = Math.min(30000, ms);
         el.value = ms;
-        fetch("/api/proxy-pool/max-latency?ms=" + ms, { method: "POST" })
-          .then(function (r) {
-            if (!r.ok) throw new Error("status " + r.status);
-            return r.json();
-          })
-          .then(function () {
-            proxyPoolStatusEl.textContent = "Max latency set to " + ms + "ms";
-            proxyPoolStatusEl.style.color = "var(--green)";
-            appendProxyLog("info", "Latency threshold set to " + ms + "ms");
-            refreshPoolStatus();
-          })
-          .catch(function (err) {
-            proxyPoolStatusEl.textContent = "Error: " + err.message;
-            proxyPoolStatusEl.style.color = "var(--red)";
-          });
+        proxyApiCall("/api/proxy-pool/max-latency?ms=" + ms, {
+          successMsg: "Max latency set to " + ms + "ms",
+          logMsg: "Latency threshold set to " + ms + "ms",
+        });
       }, 600);
     });
   }

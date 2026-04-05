@@ -32,7 +32,7 @@ from src.models.config import AppConfig
 from src.models.results import RunResult, WindowResult
 from src.orchestrator.run_orchestrator import RunOrchestrator
 from src.proxy.pool import ProxyPool
-from src.proxy.xlsx_source import load_proxy_candidates_from_xlsx
+from src.proxy.xlsx_source import load_proxy_candidates_from_xlsx, write_back_latencies_to_xlsx
 from src.transport.ws_broadcaster import WsBroadcaster
 from src.transport.ws_handler import WsHandler
 from src.preview.screenshot_service import ScreenshotService
@@ -59,12 +59,20 @@ proxy_pool: ProxyPool
 
 
 def _load_proxy_source(protocol: str = "http", limit: int | None = None) -> list[dict]:
-    """Load proxy candidates from the configured XLSX source."""
+    """Load proxy candidates from the configured XLSX source, sorted by latency."""
     return load_proxy_candidates_from_xlsx(
         config.proxy_source_xlsx,
         protocol=protocol,
         limit=limit,
+        sort_by_latency=True,
     )
+
+
+def _write_back_latencies(updates: dict[str, dict]) -> None:
+    """Persist updated latency values back to the XLSX source."""
+    count = write_back_latencies_to_xlsx(config.proxy_source_xlsx, updates)
+    if count:
+        logger.info("Wrote back latency updates for %d proxies to %s", count, config.proxy_source_xlsx)
 
 
 @asynccontextmanager
@@ -75,13 +83,30 @@ async def lifespan(application: FastAPI):
     config = AppConfig.from_yaml("config/default_config.yaml")
     SelectorRegistry.load("config/selectors.yaml")
 
-    # Initialize proxy pool from the XLSX source only.
-    proxy_pool = ProxyPool(check_fn=_check_proxy, source_loader=_load_proxy_source)
+    # Initialize proxy pool with health-check, source loader, and write-back callback.
+    proxy_pool = ProxyPool(
+        check_fn=_check_proxy,
+        source_loader=_load_proxy_source,
+        on_latency_update=_write_back_latencies,
+    )
     source_exists = Path(config.proxy_source_xlsx).exists()
     if not source_exists:
         logger.warning("Proxy source XLSX not found: %s", config.proxy_source_xlsx)
-    elif source_exists:
-        # Populate and check the pool directly from the XLSX source on startup.
+    else:
+        # Phase 1: Immediately pre-load top proxies sorted by latency (fast, no network).
+        top_candidates = load_proxy_candidates_from_xlsx(
+            config.proxy_source_xlsx,
+            sort_by_latency=True,
+            limit=proxy_pool._max_healthy,
+        )
+        if top_candidates:
+            added = proxy_pool.add_proxies(top_candidates, source="xlsx")
+            logger.info(
+                "Pre-loaded %d proxies sorted by latency from %s",
+                added,
+                config.proxy_source_xlsx,
+            )
+        # Phase 2: Background health check validates pre-loaded proxies and fills gaps.
         asyncio.create_task(proxy_pool.health_check_all())
         logger.info(
             "Background health check started from source=%s",

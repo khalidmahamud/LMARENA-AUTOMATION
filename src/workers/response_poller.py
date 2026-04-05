@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import time
 from typing import Any, Callable, Coroutine, Dict, List, Optional, Tuple
 
@@ -31,6 +32,11 @@ class ResponsePoller:
 
     def __init__(self, config: TimingConfig) -> None:
         self._config = config
+
+    _REASONING_HEADER_RE = re.compile(
+        r"^(thought for \d+|thought for a|reasoned for \d+|thinking(?:\.\.\.)?$|reasoning(?:\.\.\.)?$)",
+        re.IGNORECASE,
+    )
 
     async def poll(
         self,
@@ -202,6 +208,12 @@ class ResponsePoller:
                 if len(slides) > 1
                 else ""
             )
+            if self._looks_like_reasoning_summary(cur_a):
+                cur_a = ""
+                cur_html_a = ""
+            if self._looks_like_reasoning_summary(cur_b):
+                cur_b = ""
+                cur_html_b = ""
             copy_ready = (
                 len(slides) >= 2
                 and slides[0]["has_copy_button"]
@@ -226,6 +238,11 @@ class ResponsePoller:
             streaming_active = (
                 streaming_a or streaming_b or stop_generation_active
             )
+            if streaming_active:
+                await self._scroll_streaming_responses_to_bottom(
+                    page,
+                    slide_sel,
+                )
 
             # Per-slide stability: track each model independently
             baseline_ok_a = (
@@ -344,10 +361,84 @@ class ResponsePoller:
             pass
 
     @staticmethod
+    async def _scroll_streaming_responses_to_bottom(
+        page: Page,
+        slide_selector: str,
+    ) -> None:
+        """Keep the visible response panes pinned near the latest streamed text."""
+        try:
+            await page.evaluate(
+                """(slideSelector) => {
+                    const isVisible = (el) => {
+                        if (!el) return false;
+                        const style = window.getComputedStyle(el);
+                        const rect = el.getBoundingClientRect();
+                        return (
+                            style.display !== "none" &&
+                            style.visibility !== "hidden" &&
+                            rect.width > 0 &&
+                            rect.height > 0
+                        );
+                    };
+
+                    const visibleSlides = Array.from(
+                        document.querySelectorAll(slideSelector)
+                    ).filter(isVisible);
+
+                    for (const slide of visibleSlides) {
+                        const scrollables = Array.from(
+                            slide.querySelectorAll("div, section, article")
+                        ).filter((node) => {
+                            if (!isVisible(node)) return false;
+                            const style = window.getComputedStyle(node);
+                            const canScrollY =
+                                style.overflowY === "auto" ||
+                                style.overflowY === "scroll";
+                            return canScrollY && node.scrollHeight > node.clientHeight + 12;
+                        });
+
+                        for (const node of scrollables) {
+                            node.scrollTo({
+                                top: node.scrollHeight,
+                                behavior: "smooth",
+                            });
+                        }
+
+                        const proseNodes = Array.from(
+                            slide.querySelectorAll(".prose")
+                        ).filter(isVisible);
+                        const lastProse = proseNodes[proseNodes.length - 1];
+                        if (lastProse) {
+                            lastProse.scrollIntoView({
+                                behavior: "smooth",
+                                block: "end",
+                                inline: "nearest",
+                            });
+                        }
+                    }
+
+                    window.scrollTo({
+                        top: document.documentElement.scrollHeight,
+                        behavior: "smooth",
+                    });
+                }""",
+                slide_selector,
+            )
+        except Exception as exc:
+            logger.debug("Streaming auto-scroll skipped: %s", exc)
+
+    @staticmethod
     def _normalize_text(text: str) -> str:
         return " ".join(
             text.replace("\u200b", "").replace("\ufeff", "").split()
         ).strip()
+
+    @classmethod
+    def _looks_like_reasoning_summary(cls, text: str) -> bool:
+        normalized = cls._normalize_text(text).lower()
+        if not normalized:
+            return False
+        return bool(cls._REASONING_HEADER_RE.match(normalized))
 
     @staticmethod
     async def _has_visible_element(
@@ -520,6 +611,47 @@ class ResponsePoller:
                         );
                     };
 
+                    const normalize = (value) =>
+                        (value || "")
+                            .replace(/\\s+/g, " ")
+                            .trim()
+                            .toLowerCase();
+
+                    const isReasoningLabel = (value) => {
+                        const text = normalize(value);
+                        if (!text) return false;
+                        return (
+                            text.startsWith("thought for ") ||
+                            text === "thinking" ||
+                            text === "thinking..." ||
+                            text.startsWith("reasoned for ") ||
+                            text === "reasoning" ||
+                            text === "reasoning..."
+                        );
+                    };
+
+                    const isReasoningNode = (node) => {
+                        if (!node) return false;
+                        if (node.closest(".not-prose")) return true;
+
+                        const ownText = normalize(node.innerText || node.textContent);
+                        if (isReasoningLabel(ownText)) return true;
+
+                        const disclosure = node.closest("[data-state]");
+                        if (!disclosure) return false;
+
+                        if (disclosure.classList.contains("not-prose")) {
+                            return true;
+                        }
+
+                        const trigger = disclosure.querySelector(
+                            "button, summary, [role='button'], p"
+                        );
+                        return isReasoningLabel(
+                            trigger ? trigger.innerText || trigger.textContent : ""
+                        );
+                    };
+
                     const hasRetryIcon = (button) => {
                         const paths = Array.from(
                             button.querySelectorAll("svg path")
@@ -536,7 +668,12 @@ class ResponsePoller:
                             const proseNodes = Array.from(
                                 slide.querySelectorAll(".prose")
                             ).filter(isVisible);
-                            const responseNode = proseNodes.length
+                            const candidateNodes = proseNodes.filter(
+                                (node) => !isReasoningNode(node)
+                            );
+                            const responseNode = candidateNodes.length
+                                ? candidateNodes[candidateNodes.length - 1]
+                                : proseNodes.length && !proseNodes.some(isReasoningNode)
                                 ? proseNodes[proseNodes.length - 1]
                                 : null;
                             const modelNode = slide.querySelector("span.truncate");

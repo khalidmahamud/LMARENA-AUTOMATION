@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import logging
 from functools import partial
-import random
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -47,6 +46,7 @@ class ProxyPool:
         check_fn: Optional[Callable[[str, int], bool]] = None,
         source_loader: Optional[Callable[[str, Optional[int]], List[dict]]] = None,
         max_healthy: int = 50,
+        on_latency_update: Optional[Callable[[Dict[str, Dict]], None]] = None,
     ) -> None:
         self._entries: Dict[str, ProxyEntry] = {}
         self._healthy_index: int = 0
@@ -54,6 +54,7 @@ class ProxyPool:
         self._check_fn = check_fn
         self._source_loader = source_loader
         self._max_healthy = max_healthy
+        self._on_latency_update = on_latency_update
         self._max_latency_ms: float = 5000.0
         self._refresh_task: Optional[asyncio.Task] = None
         self._running = False
@@ -304,6 +305,25 @@ class ProxyPool:
 
             stats["avg_latency_ms"] = round(sum(latencies) / len(latencies), 1) if latencies else None
 
+            # Write back updated latencies to XLSX source
+            if self._on_latency_update:
+                updates = {}
+                for entry in entries:
+                    if entry.latency_ms is not None and entry.source == "xlsx":
+                        updates[entry.server] = {
+                            "latency_ms": entry.latency_ms,
+                            "checked_at": datetime.now(timezone.utc).strftime(
+                                "%Y-%m-%d %H:%M:%S UTC"
+                            ),
+                        }
+                if updates:
+                    try:
+                        await loop.run_in_executor(
+                            None, self._on_latency_update, updates
+                        )
+                    except Exception as exc:
+                        logger.warning("Failed to write back latency updates: %s", exc)
+
         stats["healthy"] = self.healthy_count
         stats["unhealthy"] = len(self._entries) - stats["healthy"]
 
@@ -341,7 +361,8 @@ class ProxyPool:
                     None,
                     partial(self._source_loader, protocol, source_scan_limit),
                 )
-                random.shuffle(data)
+                # Prefer low-latency candidates from the source
+                data.sort(key=lambda d: d.get("latency_ms") or float("inf"))
 
                 # Keep a short cooldown so each cycle explores fresh candidates.
                 now = time.time()

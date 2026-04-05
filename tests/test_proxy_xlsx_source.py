@@ -32,7 +32,7 @@ class LoadProxyCandidatesFromXlsxTests(unittest.TestCase):
 
         proxies = load_proxy_candidates_from_xlsx(path, protocol="http", limit=1)
 
-        self.assertEqual(proxies, [{"server": "http://1.2.3.4:8080"}])
+        self.assertEqual(proxies, [{"server": "http://1.2.3.4:8080", "latency_ms": 100.0}])
 
     def test_builds_servers_from_ip_port_and_filters_by_protocol(self) -> None:
         path = self._write_workbook(
