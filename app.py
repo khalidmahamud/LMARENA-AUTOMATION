@@ -75,33 +75,16 @@ async def lifespan(application: FastAPI):
     config = AppConfig.from_yaml("config/default_config.yaml")
     SelectorRegistry.load("config/selectors.yaml")
 
-    # Initialize proxy pool (load persisted proxies and settings)
+    # Initialize proxy pool from the XLSX source only.
     proxy_pool = ProxyPool(check_fn=_check_proxy, source_loader=_load_proxy_source)
-    proxy_pool.load_from_file()
     source_exists = Path(config.proxy_source_xlsx).exists()
     if not source_exists:
         logger.warning("Proxy source XLSX not found: %s", config.proxy_source_xlsx)
-
-    # Resume auto-refresh if it was enabled before shutdown
-    ar = proxy_pool.auto_refresh_settings
-    if ar["enabled"]:
-        await proxy_pool.start_auto_refresh(
-            protocol=ar["protocol"],
-            fetch_limit=int(ar.get("fetch_limit", 20)),
-            interval=ar["interval"],
-        )
-        logger.info(
-            "Auto-refresh resumed (protocol=%s, fetch_limit=%d, interval=%.0fs)",
-            ar["protocol"],
-            int(ar.get("fetch_limit", 20)),
-            ar["interval"],
-        )
-    elif proxy_pool.total_count > 0 or source_exists:
-        # Not auto-refreshing — populate/re-check the pool from the persisted entries and XLSX source.
+    elif source_exists:
+        # Populate and check the pool directly from the XLSX source on startup.
         asyncio.create_task(proxy_pool.health_check_all())
         logger.info(
-            "Background health check started (loaded=%d, source=%s)",
-            proxy_pool.total_count,
+            "Background health check started from source=%s",
             config.proxy_source_xlsx,
         )
 
@@ -123,9 +106,7 @@ async def lifespan(application: FastAPI):
     logger.info("Server ready — open http://localhost:8000")
     yield
 
-    # Shutdown: stop the task but preserve the saved auto-refresh preference
-    await proxy_pool.stop_auto_refresh(clear_enabled=False)
-    proxy_pool.save_to_file()
+    await proxy_pool.stop_auto_refresh()
     await screenshot_service.stop()
     await browser_manager.close_all()
     logger.info("Shutdown complete")
@@ -744,20 +725,6 @@ async def proxy_pool_status():
         }
 
 
-@app.post("/api/proxy-pool/save")
-async def save_proxy_pool():
-    """Persist current pool to disk."""
-    path = proxy_pool.save_to_file()
-    return {"saved": True, "path": str(path), "count": proxy_pool.total_count}
-
-
-@app.post("/api/proxy-pool/load")
-async def load_proxy_pool():
-    """Load pool from disk."""
-    count = proxy_pool.load_from_file()
-    return {"loaded": True, "count": count}
-
-
 @app.post("/api/proxy-pool/add")
 async def add_to_proxy_pool(request: dict):
     """Manually add proxies to the pool. Body: {"proxies": [...]}"""
@@ -770,19 +737,17 @@ async def add_to_proxy_pool(request: dict):
 async def start_auto_refresh(
     protocol: str = "http", limit: int = 20, interval: int = 300
 ):
-    """Start the background auto-refresh task and persist the preference."""
+    """Start the background auto-refresh task."""
     await proxy_pool.start_auto_refresh(
         protocol=protocol, fetch_limit=limit, interval=float(interval)
     )
-    proxy_pool.save_to_file()
     return {"started": True, "interval": interval}
 
 
 @app.post("/api/proxy-pool/auto-refresh/stop")
 async def stop_auto_refresh():
-    """Stop the background auto-refresh task and persist the preference."""
+    """Stop the background auto-refresh task."""
     await proxy_pool.stop_auto_refresh()
-    proxy_pool.save_to_file()
     return {"stopped": True}
 
 
@@ -790,7 +755,6 @@ async def stop_auto_refresh():
 async def set_pool_max_size(limit: int = 50):
     """Update the max healthy proxies cap."""
     proxy_pool.set_max_healthy(limit)
-    proxy_pool.save_to_file()
     return {"max_healthy": limit}
 
 
@@ -798,7 +762,6 @@ async def set_pool_max_size(limit: int = 50):
 async def set_pool_max_latency(ms: int = 5000):
     """Update the max latency threshold in ms."""
     proxy_pool.set_max_latency(float(ms))
-    proxy_pool.save_to_file()
     return {"max_latency_ms": ms}
 
 

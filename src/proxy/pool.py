@@ -1,16 +1,14 @@
-"""Health-aware, persistent, auto-refreshing proxy pool."""
+"""Health-aware, auto-refreshing proxy pool backed by an XLSX source."""
 
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 from functools import partial
 import random
 import time
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Callable, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
@@ -42,9 +40,7 @@ class ProxyEntry:
 
 
 class ProxyPool:
-    """Central proxy pool with health tracking, persistence, and auto-refresh."""
-
-    PERSIST_PATH = Path("data/proxy_pool.json")
+    """Central proxy pool with health tracking and auto-refresh."""
 
     def __init__(
         self,
@@ -62,7 +58,6 @@ class ProxyPool:
         self._refresh_task: Optional[asyncio.Task] = None
         self._running = False
         self._last_refresh: Optional[str] = None
-        # Persisted auto-refresh settings
         self._auto_refresh_protocol: str = "http"
         self._auto_refresh_enabled: bool = False
         self._auto_refresh_interval: float = 300.0
@@ -188,75 +183,6 @@ class ProxyPool:
         """Remove a proxy entirely."""
         self._entries.pop(server, None)
 
-    # ── Persistence ──
-
-    def save_to_file(self, path: Optional[Path] = None) -> Path:
-        """Serialize pool to JSON."""
-        path = path or self.PERSIST_PATH
-        path.parent.mkdir(parents=True, exist_ok=True)
-        self._trim_pool_to_cap()
-        ranked = sorted(self._entries.values(), key=self._entry_rank)
-
-        data = {
-            "version": 1,
-            "saved_at": datetime.now(timezone.utc).isoformat(),
-            "max_healthy": self._max_healthy,
-            "max_latency_ms": self._max_latency_ms,
-            "auto_refresh_enabled": self._auto_refresh_enabled,
-            "auto_refresh_protocol": self._auto_refresh_protocol,
-            "auto_refresh_interval": self._auto_refresh_interval,
-            "auto_refresh_fetch_limit": self._auto_refresh_fetch_limit,
-            "proxies": [asdict(e) for e in ranked],
-        }
-        path.write_text(json.dumps(data, indent=2))
-        logger.info("Proxy pool saved to %s (%d proxies)", path, len(ranked))
-        return path
-
-    def load_from_file(self, path: Optional[Path] = None) -> int:
-        """Load proxies and settings from JSON. Returns count loaded."""
-        path = path or self.PERSIST_PATH
-        if not path.exists():
-            return 0
-        try:
-            data = json.loads(path.read_text())
-
-            # Restore settings
-            if "max_healthy" in data:
-                self._max_healthy = max(1, data["max_healthy"])
-            if "max_latency_ms" in data:
-                self._max_latency_ms = max(100.0, float(data["max_latency_ms"]))
-            if "auto_refresh_enabled" in data:
-                self._auto_refresh_enabled = data["auto_refresh_enabled"]
-            if "auto_refresh_protocol" in data:
-                self._auto_refresh_protocol = data["auto_refresh_protocol"]
-            if "auto_refresh_interval" in data:
-                self._auto_refresh_interval = max(60.0, float(data["auto_refresh_interval"]))
-            if "auto_refresh_fetch_limit" in data:
-                self._auto_refresh_fetch_limit = max(1, int(data["auto_refresh_fetch_limit"]))
-
-            loaded = 0
-            for p in data.get("proxies", []):
-                server = p.get("server", "")
-                if not server or server in self._entries:
-                    continue
-                self._entries[server] = ProxyEntry(
-                    server=server,
-                    username=p.get("username"),
-                    password=p.get("password"),
-                    healthy=p.get("healthy", True),
-                    last_checked=p.get("last_checked"),
-                    fail_count=p.get("fail_count", 0),
-                    source=p.get("source", "manual"),
-                    latency_ms=p.get("latency_ms"),
-                )
-                loaded += 1
-            self._trim_pool_to_cap()
-            logger.info("Loaded %d proxies from %s (total: %d, max: %d)", loaded, path, len(self._entries), self._max_healthy)
-            return loaded
-        except Exception as exc:
-            logger.error("Failed to load proxy pool from %s: %s", path, exc)
-            return 0
-
     # ── Background Auto-Refresh ──
 
     async def start_auto_refresh(
@@ -283,11 +209,7 @@ class ProxyPool:
         )
 
     async def stop_auto_refresh(self, clear_enabled: bool = True) -> None:
-        """Cancel the background refresh task.
-
-        When shutting down the app, keep the persisted preference so auto-refresh
-        can resume on the next startup.
-        """
+        """Cancel the background refresh task."""
         self._running = False
         if clear_enabled:
             self._auto_refresh_enabled = False
@@ -479,9 +401,6 @@ class ProxyPool:
             except Exception as exc:
                 logger.warning("Failed to load replacement proxies from source: %s", exc)
 
-        # ── Step 4: Save ──
-        self.save_to_file()
-
         stats["healthy"] = self.healthy_count
         stats["unhealthy"] = len(self._entries) - stats["healthy"]
         return stats
@@ -527,16 +446,6 @@ class ProxyPool:
                 }
                 for e in self._entries.values()
             ],
-        }
-
-    @property
-    def auto_refresh_settings(self) -> dict:
-        """Return persisted auto-refresh settings."""
-        return {
-            "enabled": self._auto_refresh_enabled,
-            "protocol": self._auto_refresh_protocol,
-            "interval": self._auto_refresh_interval,
-            "fetch_limit": self._auto_refresh_fetch_limit,
         }
 
     @property

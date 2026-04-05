@@ -65,8 +65,6 @@
   const proxyFetchStatus  = document.getElementById("proxy-fetch-status");
   const proxyOnChallengeInput = document.getElementById("proxy-on-challenge");
   const windowsPerProxyInput  = document.getElementById("windows-per-proxy");
-  const savePoolBtn         = document.getElementById("save-pool-btn");
-  const loadPoolBtn         = document.getElementById("load-pool-btn");
   const checkPoolBtn        = document.getElementById("check-pool-btn");
   const autoRefreshToggle   = document.getElementById("auto-refresh-toggle");
   const proxyPoolCounts     = document.getElementById("proxy-pool-counts");
@@ -474,37 +472,6 @@
   // Poll pool status every 30 seconds
   setInterval(refreshPoolStatus, 30000);
   refreshPoolStatus();
-
-  if (savePoolBtn) {
-    savePoolBtn.addEventListener("click", function () {
-      fetch("/api/proxy-pool/save", { method: "POST" })
-        .then(function (r) { return r.json(); })
-        .then(function (data) {
-          proxyPoolStatusEl.textContent = "Saved " + data.count + " proxies";
-          proxyPoolStatusEl.style.color = "var(--green)";
-        })
-        .catch(function (err) {
-          proxyPoolStatusEl.textContent = "Save failed: " + err.message;
-          proxyPoolStatusEl.style.color = "var(--red)";
-        });
-    });
-  }
-
-  if (loadPoolBtn) {
-    loadPoolBtn.addEventListener("click", function () {
-      fetch("/api/proxy-pool/load", { method: "POST" })
-        .then(function (r) { return r.json(); })
-        .then(function (data) {
-          proxyPoolStatusEl.textContent = "Loaded " + data.count + " proxies";
-          proxyPoolStatusEl.style.color = "var(--green)";
-          refreshPoolStatus();
-        })
-        .catch(function (err) {
-          proxyPoolStatusEl.textContent = "Load failed: " + err.message;
-          proxyPoolStatusEl.style.color = "var(--red)";
-        });
-    });
-  }
 
   if (checkPoolBtn) {
     checkPoolBtn.addEventListener("click", function () {
