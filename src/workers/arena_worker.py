@@ -8,6 +8,7 @@ from typing import Callable, Coroutine, Optional
 from playwright.async_api import BrowserContext, ElementHandle, Page, Worker
 
 from src.browser.challenges import ChallengeType, detect_challenge
+from src.core.response_format import validate_response_format
 from src.browser.selectors import SelectorRegistry
 from src.core.events import Event, EventBus, EventType
 from src.core.exceptions import (
@@ -18,6 +19,7 @@ from src.core.exceptions import (
     NavigationError,
     PollingTimeoutError,
     RateLimitError,
+    ResponseFormatError,
     SubmissionError,
 )
 from src.core.state_machine import WorkerStateMachine
@@ -41,8 +43,11 @@ class ArenaWorker:
     all status changes through the shared ``EventBus``.
     """
 
-    # Callback type: async (worker_index) -> new BrowserContext
-    ContextRecreator = Callable[[int], Coroutine[None, None, BrowserContext]]
+    # Callback type: async (worker_index, reason, flag_problematic) -> new BrowserContext
+    ContextRecreator = Callable[
+        [int, Optional[str], bool],
+        Coroutine[None, None, BrowserContext],
+    ]
     # Callback type: (worker_index) -> proxy server string or None
     ProxyGetter = Callable[[int], Optional[str]]
     # Callback type: (worker_index) -> None
@@ -152,6 +157,51 @@ class ArenaWorker:
                 exc_info=True,
             )
 
+    def _validate_result_format(
+        self,
+        response_a: str,
+        response_b: str,
+        expected_response_format: str,
+    ) -> None:
+        if expected_response_format == "any":
+            return
+
+        mismatches = []
+        ok_a, detail_a = validate_response_format(
+            response_a,
+            expected_response_format,
+        )
+        if not ok_a:
+            mismatches.append(f"model A: {detail_a or 'format mismatch'}")
+
+        ok_b, detail_b = validate_response_format(
+            response_b,
+            expected_response_format,
+        )
+        if not ok_b:
+            mismatches.append(f"model B: {detail_b or 'format mismatch'}")
+
+        if mismatches:
+            raise ResponseFormatError(
+                self._id,
+                expected_response_format,
+                "; ".join(mismatches),
+            )
+
+    @staticmethod
+    def _is_problematic_proxy_recovery(recovery_type: str) -> bool:
+        return recovery_type in {
+            ChallengeType.TURNSTILE.value,
+            ChallengeType.RECAPTCHA.value,
+            ChallengeType.SECURITY_MODAL.value,
+            ChallengeType.RATE_LIMIT.value,
+            ChallengeType.LOGIN_WALL.value,
+            "terms_blocked",
+            "timeout",
+            "rate_limit",
+            "login_wall",
+        }
+
     async def _goto_arena_with_retries(
         self,
         pause_event: Optional[asyncio.Event],
@@ -199,7 +249,11 @@ class ArenaWorker:
                             "reopening window and retrying"
                         ),
                     )
-                    self._context = await self._context_recreator(self._id)
+                    self._context = await self._context_recreator(
+                        self._id,
+                        None,
+                        False,
+                    )
                     self._reset_zoom_service_worker_cache()
                     self._page = (
                         self._context.pages[0]
@@ -1546,7 +1600,11 @@ class ArenaWorker:
             )
 
             # Get a fresh context from the manager
-            self._context = await self._context_recreator(self._id)
+            self._context = await self._context_recreator(
+                self._id,
+                challenge.value,
+                True,
+            )
             self._reset_zoom_service_worker_cache()
             if clear_cookies:
                 await self._clear_cookies()
@@ -3038,6 +3096,7 @@ class ArenaWorker:
         self,
         baseline_responses: Optional[tuple[str, str]] = None,
         pause_event: Optional[asyncio.Event] = None,
+        expected_response_format: str = "any",
         _recovery_retries: int = CHALLENGE_RETRY_LIMIT,
         _poll_timeout_retries: int = 1,
         _poll_timeout_override_seconds: Optional[float] = None,
@@ -3081,6 +3140,11 @@ class ArenaWorker:
             # permission prompt during result collection.
             final_resp_a = resp_a
             final_resp_b = resp_b
+            self._validate_result_format(
+                final_resp_a,
+                final_resp_b,
+                expected_response_format,
+            )
 
             completed_at = datetime.now(timezone.utc)
             elapsed = (
@@ -3130,6 +3194,7 @@ class ArenaWorker:
                 recovery_retries=_recovery_retries,
                 poll_timeout_retries=_poll_timeout_retries,
                 poll_timeout_override_seconds=_poll_timeout_override_seconds,
+                expected_response_format=expected_response_format,
             )
 
         except ChallengeDetectedError as exc:
@@ -3148,6 +3213,7 @@ class ArenaWorker:
                 recovery_retries=_recovery_retries,
                 poll_timeout_retries=_poll_timeout_retries,
                 poll_timeout_override_seconds=_poll_timeout_override_seconds,
+                expected_response_format=expected_response_format,
             )
 
         except RateLimitError:
@@ -3166,6 +3232,7 @@ class ArenaWorker:
                 recovery_retries=_recovery_retries,
                 poll_timeout_retries=_poll_timeout_retries,
                 poll_timeout_override_seconds=_poll_timeout_override_seconds,
+                expected_response_format=expected_response_format,
             )
 
         except LoginDialogError:
@@ -3184,6 +3251,26 @@ class ArenaWorker:
                 recovery_retries=_recovery_retries,
                 poll_timeout_retries=_poll_timeout_retries,
                 poll_timeout_override_seconds=_poll_timeout_override_seconds,
+                expected_response_format=expected_response_format,
+            )
+
+        except ResponseFormatError:
+            if _recovery_retries <= 0 or self._context_recreator is None:
+                raise
+
+            return await self._recover_from_polling_restart(
+                reason_text=(
+                    f"Collected response did not match expected {expected_response_format} format - "
+                    "closing window, reopening fresh, and retrying"
+                ),
+                recovery_type="format_validation",
+                proxy_log_context="Format-validation retry proxy",
+                baseline_responses=baseline_responses,
+                pause_event=pause_event,
+                recovery_retries=_recovery_retries,
+                poll_timeout_retries=_poll_timeout_retries,
+                poll_timeout_override_seconds=_poll_timeout_override_seconds,
+                expected_response_format=expected_response_format,
             )
 
         except PollingTimeoutError as exc:
@@ -3198,6 +3285,7 @@ class ArenaWorker:
                 return await self.poll_for_completion(
                     baseline_responses=baseline_responses,
                     pause_event=pause_event,
+                    expected_response_format=expected_response_format,
                     _recovery_retries=_recovery_retries,
                     _poll_timeout_retries=_poll_timeout_retries - 1,
                     _poll_timeout_override_seconds=120.0,
@@ -3251,6 +3339,7 @@ class ArenaWorker:
         recovery_retries: int,
         poll_timeout_retries: int,
         poll_timeout_override_seconds: Optional[float],
+        expected_response_format: str = "any",
     ) -> WindowResult:
         assert self._context_recreator is not None
         assert self._last_prompt is not None
@@ -3270,7 +3359,11 @@ class ArenaWorker:
             "info",
             f"Requesting a fresh browser context after '{recovery_type}' while polling",
         )
-        self._context = await self._context_recreator(self._id)
+        self._context = await self._context_recreator(
+            self._id,
+            recovery_type,
+            self._is_problematic_proxy_recovery(recovery_type),
+        )
         self._reset_zoom_service_worker_cache()
         self._page = (
             self._context.pages[0]
@@ -3317,6 +3410,7 @@ class ArenaWorker:
         return await self.poll_for_completion(
             baseline_responses=baseline_responses,
             pause_event=pause_event,
+            expected_response_format=expected_response_format,
             _recovery_retries=recovery_retries - 1,
             _poll_timeout_retries=poll_timeout_retries,
             _poll_timeout_override_seconds=poll_timeout_override_seconds,
@@ -3375,7 +3469,11 @@ class ArenaWorker:
 
         # 3. Recreate the browser context (closes old window, opens fresh one)
         await self._ensure_active(pause_event)
-        self._context = await self._context_recreator(self._id)
+        self._context = await self._context_recreator(
+            self._id,
+            None,
+            False,
+        )
         self._reset_zoom_service_worker_cache()
         await self._log_current_proxy("Recovery reset proxy")
 

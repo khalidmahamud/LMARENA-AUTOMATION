@@ -13,6 +13,7 @@
   let runStartTime = null;
   let activeRunId = null;
   let runResults = null; // last run results for JSON view
+  let autoDownloadedRunIds = {};
   let workerStartTimes = {};
   let workerData = {};   // live data per worker
   let incrementalResults = {}; // worker_id -> result payload (available as each worker completes)
@@ -51,12 +52,14 @@
   const arenaUrlInput     = document.getElementById("arena-url");
   const modelAInput       = document.getElementById("model-a");
   const modelBInput       = document.getElementById("model-b");
+  const responseFormatInput = document.getElementById("response-format");
   const retainOutputInput = document.getElementById("retain-output");
   const zoomInput         = document.getElementById("zoom");
   const clearCookiesInput = document.getElementById("clear-cookies");
   const incognitoModeInput = document.getElementById("incognito-mode");
   const minimizedModeInput = document.getElementById("minimized-mode");
   const simultaneousStartInput = document.getElementById("simultaneous-start");
+  const autoDownloadCompleteInput = document.getElementById("auto-download-complete");
   const proxyListInput    = document.getElementById("proxy-list");
   const proxyProtocolInput = document.getElementById("proxy-protocol");
   const proxyLimitInput   = document.getElementById("proxy-limit");
@@ -65,6 +68,7 @@
   const proxyFetchStatus  = document.getElementById("proxy-fetch-status");
   const proxyOnChallengeInput = document.getElementById("proxy-on-challenge");
   const windowsPerProxyInput  = document.getElementById("windows-per-proxy");
+  const proxyCooldownMinutesInput = document.getElementById("proxy-cooldown-minutes");
   const checkPoolBtn        = document.getElementById("check-pool-btn");
   const autoRefreshToggle   = document.getElementById("auto-refresh-toggle");
   const proxyPoolCounts     = document.getElementById("proxy-pool-counts");
@@ -345,6 +349,40 @@
     return healthy > 0 ? "var(--green)" : degraded > 0 ? "var(--orange)" : "var(--text-dim)";
   }
 
+  function renderProxyRow(p, maxLat) {
+    var addr = p.server.replace(/^https?:\/\//, "").replace(/^socks[45]:\/\//, "");
+    var lat = p.healthy && p.latency_ms != null ? Math.round(p.latency_ms) : null;
+    var barPct = lat != null && maxLat > 0 ? Math.min(100, Math.round((lat / maxLat) * 100)) : 0;
+    var barColor = p.cooling_down ? "var(--orange)" :
+      p.degraded ? "var(--orange)" :
+      !p.healthy ? "var(--red)" :
+      lat != null && lat < maxLat * 0.3 ? "var(--green)" :
+      lat != null && lat < maxLat * 0.6 ? "#a3d977" :
+      lat != null && lat < maxLat * 0.8 ? "var(--orange)" : "var(--red)";
+    var statusDot = p.healthy ? "green" : (p.cooling_down || p.degraded) ? "amber" : "red";
+    var cooldownMin = p.cooldown_remaining_seconds ? Math.max(1, Math.ceil(p.cooldown_remaining_seconds / 60)) : 0;
+    var latText = p.cooling_down ? (cooldownMin + "m cool") : lat != null ? lat + "ms" : p.degraded ? "retry" : "--";
+    var titleParts = [p.server];
+    if (p.flagged_problematic) titleParts.push("flagged problematic");
+    if (p.last_failure_reason) titleParts.push("reason: " + p.last_failure_reason);
+    return '<div class="proxy-row">' +
+      '<span class="proxy-row-dot ' + statusDot + '"></span>' +
+      '<span class="proxy-row-addr" title="' + titleParts.join(" | ") + '">' + addr + '</span>' +
+      '<div class="proxy-row-bar"><div class="proxy-row-bar-fill" style="width:' + barPct + '%;background:' + barColor + '"></div></div>' +
+      '<span class="proxy-row-lat">' + latText + '</span>' +
+      '</div>';
+  }
+
+  function renderProxySection(title, proxies, maxLat, isOpen) {
+    var body = proxies.length
+      ? proxies.map(function (p) { return renderProxyRow(p, maxLat); }).join("")
+      : '<div class="proxy-section-empty">No proxies</div>';
+    return '<details class="proxy-list-section"' + (isOpen ? ' open' : '') + '>' +
+      '<summary>' + title + ' <span class="proxy-section-count">(' + proxies.length + ')</span></summary>' +
+      '<div class="proxy-list-section-body">' + body + '</div>' +
+      '</details>';
+  }
+
   function proxyApiCall(url, opts) {
     var method = (opts && opts.method) || "POST";
     var loadingMsg = opts && opts.loadingMsg;
@@ -410,8 +448,8 @@
           poolMaxLatencyInput.value = maxLat;
         }
         if (poolRefreshIntervalInput && poolRefreshIntervalInput !== document.activeElement) {
-          var intervalSec = typeof data.auto_refresh_interval === "number" ? data.auto_refresh_interval : 300;
-          poolRefreshIntervalInput.value = Math.round(intervalSec / 60);
+          var intervalSec = typeof data.auto_refresh_interval === "number" ? data.auto_refresh_interval : 60;
+          poolRefreshIntervalInput.value = Math.max(1, Math.round(intervalSec / 60));
         }
 
         // Update sidebar tracker — show healthy / max
@@ -459,33 +497,22 @@
         // Render per-proxy list
         if (proxyListEl && data.proxies) {
           var proxies = data.proxies.slice().sort(function (a, b) {
-            var rankA = a.healthy ? 0 : a.degraded ? 1 : 2;
-            var rankB = b.healthy ? 0 : b.degraded ? 1 : 2;
+            var rankA = a.healthy ? 0 : a.cooling_down ? 1 : a.degraded ? 2 : 3;
+            var rankB = b.healthy ? 0 : b.cooling_down ? 1 : b.degraded ? 2 : 3;
             if (rankA !== rankB) return rankA - rankB;
             var la = a.latency_ms != null ? a.latency_ms : 99999;
             var lb = b.latency_ms != null ? b.latency_ms : 99999;
             return la - lb;
           });
-          var html = "";
-          for (var i = 0; i < proxies.length; i++) {
-            var p = proxies[i];
-            var addr = p.server.replace(/^https?:\/\//, "").replace(/^socks[45]:\/\//, "");
-            var lat = p.healthy && p.latency_ms != null ? Math.round(p.latency_ms) : null;
-            var barPct = lat != null && maxLat > 0 ? Math.min(100, Math.round((lat / maxLat) * 100)) : 0;
-            var barColor = p.degraded ? "var(--orange)" :
-              !p.healthy ? "var(--red)" :
-              lat != null && lat < maxLat * 0.3 ? "var(--green)" :
-              lat != null && lat < maxLat * 0.6 ? "#a3d977" :
-              lat != null && lat < maxLat * 0.8 ? "var(--orange)" : "var(--red)";
-            var statusDot = p.healthy ? "green" : p.degraded ? "amber" : "red";
-            var latText = lat != null ? lat + "ms" : p.degraded ? "retry" : "--";
-            html += '<div class="proxy-row">' +
-              '<span class="proxy-row-dot ' + statusDot + '"></span>' +
-              '<span class="proxy-row-addr" title="' + p.server + '">' + addr + '</span>' +
-              '<div class="proxy-row-bar"><div class="proxy-row-bar-fill" style="width:' + barPct + '%;background:' + barColor + '"></div></div>' +
-              '<span class="proxy-row-lat">' + latText + '</span>' +
-              '</div>';
-          }
+          var cooling = proxies.filter(function (p) { return p.cooling_down; });
+          var healthy = proxies.filter(function (p) { return p.healthy; });
+          var degraded = proxies.filter(function (p) { return p.degraded && !p.cooling_down; });
+          var unhealthy = proxies.filter(function (p) { return !p.healthy && !p.cooling_down; });
+          var html =
+            renderProxySection("Healthy", healthy, maxLat, healthy.length > 0) +
+            renderProxySection("In Cooldown", cooling, maxLat, cooling.length > 0) +
+            renderProxySection("Degraded", degraded, maxLat, false) +
+            renderProxySection("Unhealthy", unhealthy, maxLat, unhealthy.length > 0 && healthy.length === 0);
           proxyListEl.innerHTML = html;
         }
 
@@ -541,7 +568,7 @@
     autoRefreshToggle.addEventListener("change", function () {
       var endpoint = this.checked ? "start" : "stop";
       var protocol = proxyProtocolInput.value;
-      var intervalMin = parseInt(poolRefreshIntervalInput ? poolRefreshIntervalInput.value : "5", 10) || 5;
+      var intervalMin = parseInt(poolRefreshIntervalInput ? poolRefreshIntervalInput.value : "1", 10) || 1;
       var intervalSec = Math.max(60, Math.min(3600, intervalMin * 60));
       var qs = this.checked
         ? "?protocol=" + encodeURIComponent(protocol) + "&limit=20&interval=" + intervalSec
@@ -756,6 +783,7 @@
     workerData = {};
     incrementalResults = {};
     runResults = null;
+    autoDownloadedRunIds = {};
     htmlBlocksCache = {};
     previewEntryKeys = [];
     previewIndex = 0;
@@ -1237,6 +1265,17 @@
         ? `${runPrefix}Run complete \u2014 ${succeeded} succeeded, ${failed} failed in ${msg.total_elapsed_seconds.toFixed(1)}s`
         : `${runPrefix}Run complete \u2014 ${enrichedResults.length} ${unitLabel} finished in ${msg.total_elapsed_seconds.toFixed(1)}s`
     );
+
+    if (
+      autoDownloadCompleteInput &&
+      autoDownloadCompleteInput.checked &&
+      msg.run_id &&
+      !autoDownloadedRunIds[msg.run_id]
+    ) {
+      autoDownloadedRunIds[msg.run_id] = true;
+      triggerExportDownload("/export", msg.run_id);
+      appendLog("info", `${runPrefix}Auto-downloaded Excel export`);
+    }
   }
 
   // ══════════════════════════════════════
@@ -1374,6 +1413,7 @@
       prompts_per_session: parseInt(promptsPerSessionInput.value, 10) || 1,
       model_a: modelAInput.value.trim() || null,
       model_b: modelBInput.value.trim() || null,
+      response_format: responseFormatInput.value,
       retain_output: retainOutputInput.value,
       clear_cookies: clearCookiesInput.checked,
       incognito: incognitoModeInput.checked,
@@ -1396,7 +1436,8 @@
       margin: parseInt(tileMarginInput.value, 10) || 0,
       proxies: parseProxyList(proxyListInput.value),
       proxy_on_challenge: proxyOnChallengeInput.checked,
-      windows_per_proxy: parseInt(windowsPerProxyInput.value, 10) || 4,
+      windows_per_proxy: parseInt(windowsPerProxyInput.value, 10) || 2,
+      problematic_ip_cooldown_minutes: parseInt(proxyCooldownMinutesInput.value, 10) || 30,
     });
 
     if (isFileMode) {
@@ -1486,6 +1527,26 @@
   // Export dropdown
   const exportDropdown = document.getElementById("export-dropdown");
 
+  function buildExportUrl(basePath, runId, preferScopeAll) {
+    const url = new URL(basePath, window.location.origin);
+    if (preferScopeAll && promptMode === "instruction") {
+      url.searchParams.set("scope", "all");
+    } else if (runId) {
+      url.searchParams.set("run_id", runId);
+    }
+    return url.pathname + url.search;
+  }
+
+  function triggerExportDownload(basePath, runId) {
+    const link = document.createElement("a");
+    link.href = buildExportUrl(basePath, runId, false);
+    link.setAttribute("download", "");
+    link.style.display = "none";
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+  }
+
   exportBtn.addEventListener("click", (e) => {
     e.stopPropagation();
     exportDropdown.classList.toggle("hidden");
@@ -1504,11 +1565,7 @@
     link.addEventListener("click", () => {
       const raw = link.getAttribute("href") || "";
       const basePath = raw.split("?")[0];
-      const url = new URL(basePath, window.location.origin);
-      if (promptMode === "instruction") {
-        url.searchParams.set("scope", "all");
-      }
-      link.setAttribute("href", url.pathname + url.search);
+      link.setAttribute("href", buildExportUrl(basePath, activeRunId, true));
     });
   });
 
@@ -3094,6 +3151,7 @@ html, body { margin: 0; padding: 0; background: #fff; color: #111;
       prompts_per_session: parseInt(promptsPerSessionInput.value, 10) || 1,
       model_a: modelA,
       model_b: modelB,
+      response_format: responseFormatInput.value,
       retain_output: retain,
       clear_cookies: clearCookies,
       incognito: incognito,
@@ -3109,7 +3167,8 @@ html, body { margin: 0; padding: 0; background: #fff; color: #111;
       margin: parseInt(tileMarginInput.value, 10) || 0,
       proxies: parseProxyList(proxyListInput.value),
       proxy_on_challenge: proxyOnChallengeInput.checked,
-      windows_per_proxy: parseInt(windowsPerProxyInput.value, 10) || 4,
+      windows_per_proxy: parseInt(windowsPerProxyInput.value, 10) || 2,
+      problematic_ip_cooldown_minutes: parseInt(proxyCooldownMinutesInput.value, 10) || 30,
     };
 
     // Pre-computed tiling for parallel instruction runs
@@ -3654,6 +3713,7 @@ html, body { margin: 0; padding: 0; background: #fff; color: #111;
     { el: arenaUrlInput,      key: "arena_url" },
     { el: modelAInput,        key: "model_a" },
     { el: modelBInput,        key: "model_b" },
+    { el: responseFormatInput, key: "response_format" },
     { el: retainOutputInput,  key: "retain_output" },
     { el: zoomInput,          key: "zoom" },
     { el: clearCookiesInput,  key: "clear_cookies", checkbox: true },
@@ -3661,6 +3721,10 @@ html, body { margin: 0; padding: 0; background: #fff; color: #111;
     { el: minimizedModeInput, key: "minimized_mode", checkbox: true },
     { el: headlessModeInput, key: "headless_mode", checkbox: true },
     { el: simultaneousStartInput, key: "simultaneous_start", checkbox: true },
+    { el: autoDownloadCompleteInput, key: "auto_download_complete", checkbox: true },
+    { el: windowsPerProxyInput, key: "windows_per_proxy" },
+    { el: proxyCooldownMinutesInput, key: "proxy_cooldown_minutes" },
+    { el: poolRefreshIntervalInput, key: "pool_refresh_interval" },
     { el: startMonitorInput,  key: "start_monitor" },
     { el: monitorCountInput,  key: "monitor_count" },
     { el: monitorWidthInput,  key: "monitor_width" },

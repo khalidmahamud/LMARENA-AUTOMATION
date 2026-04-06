@@ -308,7 +308,10 @@
           </div>
         </div>
         <div class="proxy-list" id="proxy-list"></div>
-        <div class="proxy-log-entries" id="proxy-log-entries"></div>
+        <details class="proxy-log-section" id="proxy-activity-section" open>
+          <summary>Activity</summary>
+          <div class="proxy-log-entries" id="proxy-log-entries"></div>
+        </details>
       </div>
     </aside>
 
@@ -406,6 +409,27 @@
         </details>
 
         <details class="settings-section">
+          <summary>Results</summary>
+          <div class="settings-grid">
+            <div class="form-group">
+              <label for="response-format">Expected Response Format</label>
+              <select id="response-format">
+                <option value="any">Any</option>
+                <option value="json">JSON</option>
+                <option value="html">HTML</option>
+                <option value="plain_text">Plain Text</option>
+              </select>
+            </div>
+            <div class="form-group checkbox-group">
+              <label>
+                <input type="checkbox" id="auto-download-complete" />
+                Auto-download Excel when run completes
+              </label>
+            </div>
+          </div>
+        </details>
+
+        <details class="settings-section">
           <summary>Proxies</summary>
           <div class="settings-grid">
             <div class="form-group">
@@ -445,7 +469,11 @@
             </div>
             <div class="form-group" id="windows-per-proxy-group">
               <label for="windows-per-proxy">Windows per proxy IP</label>
-              <input type="number" id="windows-per-proxy" value="4" min="1" max="50" style="width: 70px;" />
+              <input type="number" id="windows-per-proxy" value="2" min="1" max="50" style="width: 70px;" />
+            </div>
+            <div class="form-group" id="proxy-cooldown-group">
+              <label for="proxy-cooldown-minutes">Problematic IP cooldown (min)</label>
+              <input type="number" id="proxy-cooldown-minutes" value="30" min="1" max="720" style="width: 90px;" />
             </div>
           </div>
           <!-- Proxy Pool Status -->
@@ -457,11 +485,11 @@
             <div class="proxy-pool-controls">
               <button type="button" id="check-pool-btn" class="btn-pool">Health Check</button>
               <label class="auto-refresh-label">
-                <input type="checkbox" id="auto-refresh-toggle" />
+                <input type="checkbox" id="auto-refresh-toggle" checked />
                 Auto-refresh
               </label>
               <label class="pool-max-label">
-                Every <input type="number" id="pool-refresh-interval" value="5" min="1" max="60" /> min
+                Every <input type="number" id="pool-refresh-interval" value="1" min="1" max="60" /> min
               </label>
               <label class="pool-max-label">
                 Max <input type="number" id="pool-max-size" value="50" min="1" max="500" />

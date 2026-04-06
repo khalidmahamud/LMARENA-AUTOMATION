@@ -150,6 +150,11 @@ class WsBroadcaster:
                     f"Generation failed on window {event.worker_id}. "
                     "Automatic recovery is in progress."
                 )
+            elif challenge_type == "format_validation":
+                message = (
+                    f"Response format validation failed on window {event.worker_id}. "
+                    "Automatic retry is in progress."
+                )
             else:
                 message = (
                     f"Challenge detected on window {event.worker_id}. "

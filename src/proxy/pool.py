@@ -15,6 +15,7 @@ logger = logging.getLogger(__name__)
 MAX_FAIL_COUNT = 3
 STALE_THRESHOLD = 3600.0  # prune reloadable unhealthy proxies after 1 hour
 CHALLENGER_RECHECK_COOLDOWN = 600.0  # avoid re-testing same challenger too frequently
+DEFAULT_PROBLEM_COOLDOWN = 1800.0
 
 
 @dataclass
@@ -27,6 +28,15 @@ class ProxyEntry:
     fail_count: int = 0
     source: str = "manual"
     latency_ms: Optional[float] = None
+    cooldown_until: Optional[float] = None
+    last_failure_reason: Optional[str] = None
+    problematic: bool = False
+
+    def is_in_cooldown(self, now: Optional[float] = None) -> bool:
+        if self.cooldown_until is None:
+            return False
+        current = time.time() if now is None else now
+        return self.cooldown_until > current
 
     def to_playwright_dict(self) -> dict:
         """Return a Playwright-compatible proxy dict."""
@@ -61,7 +71,7 @@ class ProxyPool:
         self._last_refresh: Optional[str] = None
         self._auto_refresh_protocol: str = "http"
         self._auto_refresh_enabled: bool = False
-        self._auto_refresh_interval: float = 300.0
+        self._auto_refresh_interval: float = 60.0
         self._auto_refresh_fetch_limit: int = 20
         self._challenger_recent_checks: Dict[str, float] = {}
 
@@ -70,7 +80,11 @@ class ProxyPool:
     @staticmethod
     def _is_usable(entry: ProxyEntry) -> bool:
         """A proxy is usable only after a successful recent latency check."""
-        return entry.healthy and entry.latency_ms is not None
+        return (
+            entry.healthy
+            and entry.latency_ms is not None
+            and not entry.is_in_cooldown()
+        )
 
     @staticmethod
     def _entry_rank(entry: ProxyEntry) -> tuple:
@@ -179,6 +193,50 @@ class ProxyPool:
         entry.fail_count = 0
         entry.healthy = True
         entry.last_checked = time.time()
+        entry.cooldown_until = None
+        entry.last_failure_reason = None
+        entry.problematic = False
+
+    def mark_problematic(
+        self,
+        server: str,
+        *,
+        reason: Optional[str] = None,
+        cooldown_seconds: Optional[float] = None,
+    ) -> None:
+        """Flag a proxy/IP as problematic and keep it out of rotation for a cooldown."""
+        entry = self._entries.get(server)
+        if not entry:
+            return
+        now = time.time()
+        cooldown = max(
+            60.0,
+            float(
+                DEFAULT_PROBLEM_COOLDOWN
+                if cooldown_seconds is None
+                else cooldown_seconds
+            ),
+        )
+        entry.fail_count = max(entry.fail_count + 1, MAX_FAIL_COUNT)
+        entry.healthy = False
+        entry.last_checked = now
+        entry.latency_ms = None
+        entry.cooldown_until = now + cooldown
+        entry.last_failure_reason = reason
+        entry.problematic = True
+        logger.info(
+            "Proxy %s flagged problematic for %.0f minutes%s",
+            server,
+            cooldown / 60.0,
+            f" (reason={reason})" if reason else "",
+        )
+
+    def is_in_cooldown(self, server: str) -> bool:
+        """Return whether a specific proxy is still cooling down."""
+        entry = self._entries.get(server)
+        if not entry:
+            return False
+        return entry.is_in_cooldown()
 
     def remove_proxy(self, server: str) -> None:
         """Remove a proxy entirely."""
@@ -190,7 +248,7 @@ class ProxyPool:
         self,
         protocol: str = "http",
         fetch_limit: int = 20,
-        interval: float = 300.0,
+        interval: float = 60.0,
     ) -> None:
         """Start background task that periodically fetches and health-checks proxies."""
         await self.stop_auto_refresh()
@@ -272,17 +330,25 @@ class ProxyPool:
             "dropped": 0, "recovered": 0,
             "fetched": 0, "added": 0,
             "avg_latency_ms": None,
+            "cooling_down": 0,
         }
 
         # ── Step 1: Re-check ALL existing proxies (in batches of 20) ──
         if self._check_fn and self._entries:
+            now = time.time()
             entries = list(self._entries.values())
+            entries_to_check = []
+            for entry in entries:
+                if entry.is_in_cooldown(now):
+                    stats["cooling_down"] += 1
+                    continue
+                entries_to_check.append(entry)
             results = await self._check_in_batches(
-                [e.server for e in entries], timeout=5
+                [e.server for e in entries_to_check], timeout=5
             )
-            stats["checked"] = len(entries)
+            stats["checked"] = len(entries_to_check)
             latencies = []
-            for entry, latency in zip(entries, results):
+            for entry, latency in zip(entries_to_check, results):
                 entry.last_checked = time.time()
                 if latency > 0 and latency <= self._max_latency_ms:
                     if not entry.healthy:
@@ -290,6 +356,9 @@ class ProxyPool:
                     entry.healthy = True
                     entry.fail_count = 0
                     entry.latency_ms = round(latency, 1)
+                    entry.cooldown_until = None
+                    entry.last_failure_reason = None
+                    entry.problematic = False
                     latencies.append(latency)
                 else:
                     # Do not keep showing a stale "good" latency after a failed check.
@@ -308,7 +377,7 @@ class ProxyPool:
             # Write back updated latencies to XLSX source
             if self._on_latency_update:
                 updates = {}
-                for entry in entries:
+                for entry in entries_to_check:
                     if entry.latency_ms is not None and entry.source == "xlsx":
                         updates[entry.server] = {
                             "latency_ms": entry.latency_ms,
@@ -440,14 +509,18 @@ class ProxyPool:
         healthy_entries = [e for e in self._entries.values() if self._is_usable(e)]
         degraded_entries = [e for e in self._entries.values() if e.healthy and e.latency_ms is None]
         unhealthy_entries = [e for e in self._entries.values() if not e.healthy]
+        cooling_entries = [e for e in self._entries.values() if e.is_in_cooldown()]
         latencies = [e.latency_ms for e in healthy_entries if e.latency_ms is not None]
         avg_latency = round(sum(latencies) / len(latencies), 1) if latencies else None
+        now = time.time()
         return {
             "total": len(self._entries),
             "healthy": len(healthy_entries),
             "raw_healthy": len([e for e in self._entries.values() if e.healthy]),
             "degraded": len(degraded_entries),
             "unhealthy": len(unhealthy_entries),
+            "cooling_down": len(cooling_entries),
+            "problematic": len([e for e in self._entries.values() if e.problematic]),
             "max_healthy": self._max_healthy,
             "max_latency_ms": self._max_latency_ms,
             "avg_latency_ms": avg_latency,
@@ -464,6 +537,14 @@ class ProxyPool:
                     "last_checked": e.last_checked,
                     "source": e.source,
                     "latency_ms": e.latency_ms,
+                    "cooling_down": e.is_in_cooldown(now),
+                    "cooldown_remaining_seconds": (
+                        max(0, round(e.cooldown_until - now))
+                        if e.cooldown_until and e.cooldown_until > now
+                        else 0
+                    ),
+                    "flagged_problematic": e.problematic,
+                    "last_failure_reason": e.last_failure_reason,
                 }
                 for e in self._entries.values()
             ],

@@ -52,6 +52,7 @@ class StartRunRequest(BaseModel):
     submission_gap_seconds: Optional[float] = Field(default=None, ge=5.0)
     model_a: Optional[str] = None
     model_b: Optional[str] = None
+    response_format: Literal["any", "json", "html", "plain_text"] = "any"
     retain_output: str = Field(default="both")  # "both", "model_a", "model_b"
     clear_cookies: bool = False
     incognito: bool = False
@@ -72,7 +73,8 @@ class StartRunRequest(BaseModel):
     # Proxy list — each dict: {"server": "http://host:port", "username": "...", "password": "..."}
     proxies: Optional[List[dict]] = Field(default=None)
     proxy_on_challenge: bool = False
-    windows_per_proxy: int = Field(default=4, ge=1, le=50)
+    windows_per_proxy: int = Field(default=2, ge=1, le=50)
+    problematic_ip_cooldown_minutes: int = Field(default=30, ge=1, le=720)
     # Shared tiling for concurrent instruction runs.
     layout_group_id: Optional[str] = Field(default=None, max_length=100)
     # Pre-computed tiling: total windows across a concurrent layout group and

@@ -112,6 +112,12 @@ async def lifespan(application: FastAPI):
             "Background health check started from source=%s",
             config.proxy_source_xlsx,
         )
+        await proxy_pool.start_auto_refresh(
+            protocol="http",
+            fetch_limit=20,
+            interval=60.0,
+        )
+        logger.info("Proxy auto-refresh enabled by default")
 
     event_bus = EventBus()
     broadcaster = WsBroadcaster(event_bus)
@@ -760,7 +766,7 @@ async def add_to_proxy_pool(request: dict):
 
 @app.post("/api/proxy-pool/auto-refresh/start")
 async def start_auto_refresh(
-    protocol: str = "http", limit: int = 20, interval: int = 300
+    protocol: str = "http", limit: int = 20, interval: int = 60
 ):
     """Start the background auto-refresh task."""
     await proxy_pool.start_auto_refresh(

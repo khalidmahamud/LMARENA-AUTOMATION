@@ -35,7 +35,7 @@ class _RunGroup:
         "proxies", "proxy_on_challenge", "proxy_assign_counter",
         "context_proxies", "incognito_mode", "zoom_pct",
         "windows_per_proxy", "layout_group_id", "headless_mode",
-        "minimized_mode",
+        "minimized_mode", "problematic_ip_cooldown_seconds",
     )
 
     def __init__(self) -> None:
@@ -51,7 +51,8 @@ class _RunGroup:
         self.headless_mode: bool = False
         self.minimized_mode: bool = False
         self.zoom_pct: int = 100
-        self.windows_per_proxy: int = 4
+        self.windows_per_proxy: int = 2
+        self.problematic_ip_cooldown_seconds: float = 1800.0
         self.layout_group_id: Optional[str] = None
 
 
@@ -93,7 +94,8 @@ class BrowserManager:
         incognito: Optional[bool] = None,
         proxies: Optional[List[dict]] = None,
         proxy_on_challenge: bool = False,
-        windows_per_proxy: int = 4,
+        windows_per_proxy: int = 2,
+        problematic_ip_cooldown_minutes: int = 30,
         zoom_pct: int = 100,
         run_id: Optional[str] = None,
         layout_group_id: Optional[str] = None,
@@ -238,6 +240,10 @@ class BrowserManager:
             group.context_proxies.clear()
             group.zoom_pct = max(25, min(200, int(zoom_pct)))
             group.windows_per_proxy = max(1, int(windows_per_proxy))
+            group.problematic_ip_cooldown_seconds = max(
+                60.0,
+                float(problematic_ip_cooldown_minutes) * 60.0,
+            )
 
             # Seed the pool with manually provided proxies
             if group.proxies and self._proxy_pool:
@@ -261,10 +267,7 @@ class BrowserManager:
                 if group.proxy_on_challenge:
                     proxy = self._assign_proactive_proxy(group, i)
                 else:
-                    proxy = (
-                        group.proxies[i % len(group.proxies)]
-                        if group.proxies else None
-                    )
+                    proxy = self._pick_manual_proxy(group)
                 ctx = await self._launch_context(
                     profile_dir, tile, proxy=proxy,
                     headless_mode=group.headless_mode,
@@ -457,9 +460,7 @@ class BrowserManager:
 
         # Fallback: round-robin through manual list
         if group.proxies:
-            proxy = group.proxies[group.proxy_assign_counter % len(group.proxies)]
-            group.proxy_assign_counter += 1
-            return proxy
+            return self._pick_manual_proxy(group)
 
         # No proxies available — bare IP
         return None
@@ -476,6 +477,27 @@ class BrowserManager:
             if p.get("server") == server:
                 return p
         return None
+
+    def _is_proxy_assignable(self, server: Optional[str]) -> bool:
+        if not server:
+            return False
+        if self._proxy_pool is None:
+            return True
+        return not self._proxy_pool.is_in_cooldown(server)
+
+    def _flag_problematic_proxy(
+        self,
+        group: _RunGroup,
+        server: Optional[str],
+        reason: Optional[str],
+    ) -> None:
+        if not server or self._proxy_pool is None:
+            return
+        self._proxy_pool.mark_problematic(
+            server,
+            reason=reason,
+            cooldown_seconds=group.problematic_ip_cooldown_seconds,
+        )
 
     def _pick_pool_proxy(
         self,
@@ -513,20 +535,17 @@ class BrowserManager:
             return None
 
         total = len(group.proxies)
-        fallback: Optional[dict] = None
         for _ in range(total):
             candidate = group.proxies[group.proxy_assign_counter % total]
             group.proxy_assign_counter += 1
-            if fallback is None:
-                fallback = candidate
             server = candidate.get("server")
+            if not self._is_proxy_assignable(server):
+                continue
             if avoid_server and server == avoid_server and total > 1:
                 continue
             return candidate
 
-        if fallback and avoid_server and fallback.get("server") == avoid_server:
-            return None
-        return fallback
+        return None
 
     async def _retile_context(
         self,
@@ -612,7 +631,13 @@ class BrowserManager:
         for gkey in list(self._groups):
             await self.close_contexts(run_id=gkey)
 
-    async def recreate_context(self, index: int, run_id: Optional[str] = None) -> BrowserContext:
+    async def recreate_context(
+        self,
+        index: int,
+        run_id: Optional[str] = None,
+        proxy_failure_reason: Optional[str] = None,
+        flag_proxy_as_problematic: bool = False,
+    ) -> BrowserContext:
         """Close context *index* and launch a fresh window in the same tile."""
         if self._playwright is None:
             raise RuntimeError("Playwright not running")
@@ -650,30 +675,36 @@ class BrowserManager:
         # Launch new context at the same tile position
         tile = group.tiles[index]
         old_proxy = group.context_proxies.get(index)
-        if group.proxy_on_challenge:
-            # Immediately penalize the previous proxy for this window.
-            if old_proxy and self._proxy_pool:
-                self._proxy_pool.mark_unhealthy(old_proxy)
+        if flag_proxy_as_problematic:
+            self._flag_problematic_proxy(group, old_proxy, proxy_failure_reason)
 
+        should_rotate_proxy = (
+            group.proxy_on_challenge
+            or flag_proxy_as_problematic
+            or (old_proxy is not None and not self._is_proxy_assignable(old_proxy))
+        )
+        if should_rotate_proxy:
             proxy = self._pick_pool_proxy(avoid_server=old_proxy)
             if proxy is None:
                 proxy = self._pick_manual_proxy(group, avoid_server=old_proxy)
 
             if proxy:
                 logger.info(
-                    "Challenge mode: assigning proxy %s to context %d (prev=%s)",
+                    "Proxy rotation: assigning proxy %s to context %d (prev=%s, reason=%s)",
                     proxy.get("server", "???"),
                     index,
                     old_proxy or "none",
+                    proxy_failure_reason or "n/a",
                 )
             else:
                 logger.warning(
-                    "Challenge mode: no alternate proxy for context %d (prev=%s); using direct/no proxy fallback",
+                    "Proxy rotation: no alternate proxy for context %d (prev=%s, reason=%s); using direct/no proxy fallback",
                     index,
                     old_proxy or "none",
+                    proxy_failure_reason or "n/a",
                 )
         else:
-            proxy = group.proxies[index % len(group.proxies)] if group.proxies else None
+            proxy = self._pick_manual_proxy(group)
         ctx = await self._launch_context(
             profile_dir, tile, proxy=proxy,
             headless_mode=group.headless_mode,
@@ -827,17 +858,14 @@ class BrowserManager:
         if not server:
             return
 
-        # Navigation timeouts are usually hard proxy failures; apply extra penalty.
-        strikes = 2 if reason == "goto_timeout" else 1
-        for _ in range(strikes):
-            self._proxy_pool.mark_unhealthy(server)
+        self._flag_problematic_proxy(group, server, reason)
         logger.info(
-            "Proxy failure reported for context %d (run=%s, server=%s, reason=%s, strikes=%d)",
+            "Proxy failure reported for context %d (run=%s, server=%s, reason=%s, cooldown=%.0fmin)",
             index,
             gkey[:8],
             server,
             reason or "unknown",
-            strikes,
+            group.problematic_ip_cooldown_seconds / 60.0,
         )
 
     async def _get_zoom_service_worker(self, ctx: BrowserContext) -> Optional[Worker]:

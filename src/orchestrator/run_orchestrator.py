@@ -212,6 +212,7 @@ class RunOrchestrator:
             proxies=proxy_list,
             proxy_on_challenge=request.proxy_on_challenge,
             windows_per_proxy=request.windows_per_proxy,
+            problematic_ip_cooldown_minutes=request.problematic_ip_cooldown_minutes,
             zoom_pct=request.zoom_pct,
             run_id=run_id,
             layout_group_id=request.layout_group_id,
@@ -220,8 +221,17 @@ class RunOrchestrator:
         )
 
         # Create run_id-scoped callbacks for workers
-        async def _recreator(index: int) -> object:
-            return await self._browser_manager.recreate_context(index, run_id=run_id)
+        async def _recreator(
+            index: int,
+            reason: Optional[str] = None,
+            flag_problematic: bool = False,
+        ) -> object:
+            return await self._browser_manager.recreate_context(
+                index,
+                run_id=run_id,
+                proxy_failure_reason=reason,
+                flag_proxy_as_problematic=flag_problematic,
+            )
 
         def _proxy_getter(index: int) -> object:
             return self._browser_manager.get_context_proxy(index, run_id=run_id)
@@ -1387,6 +1397,7 @@ class RunOrchestrator:
         batch_idx: int,
         gap: float,
         retain: str,
+        response_format: str,
         baseline_responses: Optional[Tuple[str, str]] = None,
         turn_index: int = 0,
         model_a: Optional[str] = None,
@@ -1409,6 +1420,7 @@ class RunOrchestrator:
             prompt=prompt,
             batch_idx=batch_idx,
             retain=retain,
+            response_format=response_format,
             baseline_responses=baseline_responses,
             turn_index=turn_index,
         )
@@ -1492,6 +1504,7 @@ class RunOrchestrator:
                 batch_idx=batch_idx,
                 gap=gap,
                 retain=request.retain_output,
+                response_format=request.response_format,
                 baseline_responses=baseline_responses,
                 turn_index=0,
                 model_a=prompt_model_a,
@@ -1555,6 +1568,7 @@ class RunOrchestrator:
                     batch_idx=batch_idx,
                     gap=gap,
                     retain=request.retain_output,
+                    response_format=request.response_format,
                     baseline_responses=baseline,
                     turn_index=turn_idx,
                     images=turn_image_dicts,
@@ -1854,12 +1868,14 @@ class RunOrchestrator:
         prompt: str,
         batch_idx: int,
         retain: str,
+        response_format: str,
         baseline_responses: Optional[Tuple[str, str]] = None,
         turn_index: int = 0,
     ) -> WindowResult:
         result = await worker.poll_for_completion(
             baseline_responses=baseline_responses,
             pause_event=self._resume_event,
+            expected_response_format=response_format,
         )
         result.prompt = prompt
         result.batch_index = batch_idx
@@ -2223,6 +2239,7 @@ class RunOrchestrator:
             result = await worker.poll_for_completion(
                 baseline_responses=recovery_baseline,
                 pause_event=self._resume_event,
+                expected_response_format=request.response_format,
             )
             result.prompt = prompt
             result.batch_index = batch_idx

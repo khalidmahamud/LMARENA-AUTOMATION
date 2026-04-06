@@ -125,6 +125,18 @@ class ResponseExtractionError(WorkerError):
     """Failed to extract response text from DOM."""
 
 
+class ResponseFormatError(WorkerError):
+    """Collected response did not match the requested output format."""
+
+    def __init__(self, worker_id: int, expected_format: str, detail: str):
+        self.expected_format = expected_format
+        self.detail = detail
+        super().__init__(
+            f"Response format validation failed for {expected_format}: {detail}",
+            worker_id,
+        )
+
+
 # ──── Orchestrator Layer ────
 
 
