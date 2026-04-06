@@ -145,6 +145,46 @@ class ArenaWorker:
         text = str(exc).lower()
         return "page.goto" in text and "timeout" in text
 
+    @staticmethod
+    def _is_initial_window_url(url: Optional[str]) -> bool:
+        value = (url or "").strip().lower()
+        return value in {
+            "",
+            "about:blank",
+            "chrome://newtab/",
+            "chrome://new-tab-page/",
+            "edge://newtab/",
+        }
+
+    @classmethod
+    def _should_retry_navigation_in_same_window(
+        cls,
+        exc: Exception,
+        attempt: int,
+    ) -> bool:
+        if attempt != 1:
+            return False
+        text = str(exc).lower()
+        return any(
+            marker in text
+            for marker in (
+                "err_connection_closed",
+                "err_connection_reset",
+                "err_aborted",
+                "frame was detached",
+            )
+        )
+
+    @staticmethod
+    def _describe_navigation_error(exc: Exception) -> str:
+        raw = " ".join(str(exc).split()).strip()
+        if not raw:
+            raw = exc.__class__.__name__
+        detail = f"{exc.__class__.__name__}: {raw}"
+        if len(detail) > 220:
+            detail = f"{detail[:217]}..."
+        return detail
+
     def _report_proxy_navigation_failure(self, reason: str) -> None:
         if not self._proxy_failure_reporter:
             return
@@ -156,6 +196,73 @@ class ArenaWorker:
                 self._id,
                 exc_info=True,
             )
+
+    async def _wait_for_fresh_window_ready(
+        self,
+        pause_event: Optional[asyncio.Event] = None,
+    ) -> None:
+        assert self._page is not None
+        try:
+            page_url = self._page.url
+        except Exception:
+            page_url = ""
+
+        if not self._is_initial_window_url(page_url):
+            return
+
+        await self._log(
+            "debug",
+            "Fresh browser window opened; waiting for the bootstrap tab to settle before first Arena navigation",
+        )
+        try:
+            await self._page.wait_for_load_state(
+                "domcontentloaded",
+                timeout=2500,
+            )
+        except Exception:
+            pass
+        await self._sleep_with_controls(1.5, pause_event)
+
+    async def _prepare_page_for_arena_navigation(
+        self,
+        pause_event: Optional[asyncio.Event] = None,
+    ) -> None:
+        assert self._page is not None
+        current_page = self._page
+
+        try:
+            current_url = current_page.url
+        except Exception:
+            current_url = ""
+
+        if not self._is_initial_window_url(current_url):
+            return
+
+        await self._wait_for_fresh_window_ready(pause_event)
+
+        # Do not drive the bootstrap/new-tab page directly. On some Chromium
+        # launches that tab is still spinning up even after the window is
+        # visible, which causes the first Arena navigation to race and fail.
+        await self._log(
+            "debug",
+            "Bootstrap tab is still the initial tab; opening a dedicated Arena tab instead",
+        )
+        automation_page = await self._context.new_page()
+        self._page = automation_page
+
+        try:
+            await automation_page.wait_for_load_state(
+                "domcontentloaded",
+                timeout=2000,
+            )
+        except Exception:
+            pass
+
+        if current_page is not automation_page:
+            try:
+                await current_page.close()
+            except Exception:
+                pass
 
     def _validate_result_format(
         self,
@@ -231,22 +338,28 @@ class ArenaWorker:
                 )
                 return
             except Exception as exc:
+                await self._ensure_active(pause_event)
                 last_exc = exc
                 timeout_hit = self._is_navigation_timeout(exc)
                 self._report_proxy_navigation_failure(
                     "goto_timeout" if timeout_hit else "goto_error"
+                )
+                error_detail = self._describe_navigation_error(exc)
+                retry_in_same_window = self._should_retry_navigation_in_same_window(
+                    exc,
+                    attempt,
                 )
 
                 if attempt >= attempts:
                     await self.state_machine.force_error(str(exc))
                     raise NavigationError(str(exc), self._id) from exc
 
-                if self._context_recreator is not None:
+                if self._context_recreator is not None and not retry_in_same_window:
                     await self._log(
                         "warning",
                         (
                             f"Arena navigation attempt {attempt}/{attempts} failed; "
-                            "reopening window and retrying"
+                            f"{error_detail}; reopening window and retrying"
                         ),
                     )
                     self._context = await self._context_recreator(
@@ -260,13 +373,21 @@ class ArenaWorker:
                         if self._context.pages
                         else await self._context.new_page()
                     )
+                    await self._prepare_page_for_arena_navigation(pause_event)
                     await self._log_current_proxy("Navigation retry proxy")
+                    # Let the recreated browser settle before retrying
+                    await self._sleep_with_controls(2.0, pause_event)
                 else:
+                    retry_text = (
+                        "retrying once in the same window before recycling it"
+                        if retry_in_same_window
+                        else "retrying in current window"
+                    )
                     await self._log(
                         "warning",
                         (
                             f"Arena navigation attempt {attempt}/{attempts} failed; "
-                            "retrying in current window"
+                            f"{error_detail}; {retry_text}"
                         ),
                     )
                 await self._sleep_with_controls(min(1.5 * attempt, 4.0), pause_event)
@@ -845,11 +966,6 @@ class ArenaWorker:
         await self._ensure_active(pause_event)
         await self._log("info", "Preparing browser context for Arena")
 
-        # Optionally clear cookies before navigation.
-        if clear_cookies:
-            await self._log("info", "Clearing cookies before Arena navigation")
-            await self._clear_cookies()
-
         # Reuse the default page from persistent context (closing all pages
         # kills the browser process), or create one if none exist.
         if self._context.pages:
@@ -862,6 +978,23 @@ class ArenaWorker:
                     pass
         else:
             self._page = await self._context.new_page()
+
+        await self._wait_for_fresh_window_ready(pause_event)
+
+        # Optionally clear cookies before navigation.
+        if clear_cookies:
+            await self._log("info", "Clearing cookies before Arena navigation")
+            await self._clear_cookies()
+
+        # Ensure the browser is responsive before navigating to Arena.
+        # Freshly-launched persistent contexts sometimes are not ready for
+        # page.goto() yet; loading about:blank first confirms the browser
+        # process is fully initialized.
+        try:
+            await self._page.goto("about:blank", timeout=10_000)
+            await self._page.wait_for_load_state("load", timeout=5_000)
+        except Exception:
+            await self._sleep_with_controls(3.0, pause_event)
 
         await self.state_machine.transition(WorkerState.NAVIGATING)
         await self._goto_arena_with_retries(
