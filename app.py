@@ -216,7 +216,7 @@ INSTRUCTION_FIELDS = {
 _TURN_COLUMN_RE = re.compile(r"^(prompt|images)_(\d+)$")
 
 BOOL_FIELDS = {"clear_cookies", "incognito", "simultaneous_start"}
-INT_FIELDS = {"window_count": (1, 12), "zoom_pct": (25, 200)}
+INT_FIELDS = {"window_count": (1, None), "zoom_pct": (25, 200)}
 FLOAT_FIELDS = {"submission_gap_seconds": (5.0, 300.0)}
 
 ALLOWED_IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".gif"}
@@ -314,7 +314,11 @@ def _coerce_instruction(
             inst[key] = bool(v)
         elif key in INT_FIELDS:
             lo, hi = INT_FIELDS[key]
-            inst[key] = max(lo, min(hi, int(float(v))))
+            value = int(float(v))
+            if hi is None:
+                inst[key] = max(lo, value)
+            else:
+                inst[key] = max(lo, min(hi, value))
         elif key in FLOAT_FIELDS:
             lo, hi = FLOAT_FIELDS[key]
             inst[key] = max(lo, min(hi, float(v)))

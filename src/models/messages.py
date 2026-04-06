@@ -48,7 +48,7 @@ class StartRunRequest(BaseModel):
     turns: Optional[List[PromptTurn]] = Field(default=None, max_length=10)
     system_prompt: str = Field(default="", max_length=100_000)
     combine_with_first: bool = False
-    window_count: int = Field(default=2, ge=1, le=12)
+    window_count: int = Field(default=2, ge=1)
     submission_gap_seconds: Optional[float] = Field(default=None, ge=5.0)
     model_a: Optional[str] = None
     model_b: Optional[str] = None
@@ -79,7 +79,7 @@ class StartRunRequest(BaseModel):
     layout_group_id: Optional[str] = Field(default=None, max_length=100)
     # Pre-computed tiling: total windows across a concurrent layout group and
     # this run's offset inside that shared layout.
-    total_windows: Optional[int] = Field(default=None, ge=1, le=100)
+    total_windows: Optional[int] = Field(default=None, ge=1)
     tile_offset: Optional[int] = Field(default=None, ge=0)
 
     @model_validator(mode="after")

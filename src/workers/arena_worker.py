@@ -84,6 +84,7 @@ class ArenaWorker:
         self._last_prompt: Optional[str] = None
         self._last_model_a: Optional[str] = None
         self._last_model_b: Optional[str] = None
+        self._last_images: Optional[list] = None
         self._zoom_service_worker: Optional[Worker] = None
         self._zoom_service_worker_checked = False
 
@@ -139,6 +140,31 @@ class ArenaWorker:
             await self._log("info", f"{context}: {proxy}")
         else:
             await self._log("debug", f"{context}: direct/no proxy")
+
+    @staticmethod
+    def _copy_images(images: Optional[list]) -> Optional[list]:
+        if not images:
+            return None
+        return list(images)
+
+    async def _replay_last_prompt(
+        self,
+        retry_on_challenge: int,
+        pause_event: Optional[asyncio.Event] = None,
+    ) -> None:
+        if self._last_prompt is None:
+            raise RuntimeError(
+                f"Worker {self._id}: no last prompt available for replay"
+            )
+
+        await self.submit_prompt(
+            prompt=self._last_prompt,
+            model_a=self._last_model_a,
+            model_b=self._last_model_b,
+            retry_on_challenge=retry_on_challenge,
+            pause_event=pause_event,
+            images=self._copy_images(self._last_images),
+        )
 
     @staticmethod
     def _is_navigation_timeout(exc: Exception) -> bool:
@@ -1812,6 +1838,7 @@ class ArenaWorker:
         self._last_prompt = prompt
         self._last_model_a = model_a
         self._last_model_b = model_b
+        self._last_images = self._copy_images(images)
 
         try:
             await self._dismiss_known_dialogs(
@@ -2022,10 +2049,7 @@ class ArenaWorker:
                     clear_cookies=False,
                     pause_event=pause_event,
                 )
-                return await self.submit_prompt(
-                    prompt=self._last_prompt,
-                    model_a=self._last_model_a,
-                    model_b=self._last_model_b,
+                return await self._replay_last_prompt(
                     retry_on_challenge=retry_on_challenge - 1,
                     pause_event=pause_event,
                 )
@@ -2052,10 +2076,7 @@ class ArenaWorker:
                 )
                 if self.state_machine.state != WorkerState.READY:
                     await self.state_machine.transition(WorkerState.READY)
-                return await self.submit_prompt(
-                    prompt=self._last_prompt,
-                    model_a=self._last_model_a,
-                    model_b=self._last_model_b,
+                return await self._replay_last_prompt(
                     retry_on_challenge=retry_on_challenge - 1,
                     pause_event=pause_event,
                 )
@@ -2184,10 +2205,7 @@ class ArenaWorker:
                 clear_cookies=False,
                 pause_event=pause_event,
             )
-            return await self.submit_prompt(
-                prompt=self._last_prompt,
-                model_a=self._last_model_a,
-                model_b=self._last_model_b,
+            return await self._replay_last_prompt(
                 retry_on_challenge=retry_on_challenge - 1,
                 pause_event=pause_event,
             )
@@ -2226,10 +2244,7 @@ class ArenaWorker:
             )
             if self.state_machine.state != WorkerState.READY:
                 await self.state_machine.transition(WorkerState.READY)
-            return await self.submit_prompt(
-                prompt=self._last_prompt,
-                model_a=self._last_model_a,
-                model_b=self._last_model_b,
+            return await self._replay_last_prompt(
                 retry_on_challenge=retry_on_challenge - 1,
                 pause_event=pause_event,
             )
@@ -2759,10 +2774,7 @@ class ArenaWorker:
         )
         if self.state_machine.state != WorkerState.READY:
             await self.state_machine.transition(WorkerState.READY)
-        return await self.submit_prompt(
-            prompt=self._last_prompt,
-            model_a=self._last_model_a,
-            model_b=self._last_model_b,
+        return await self._replay_last_prompt(
             retry_on_challenge=retry_on_challenge - 1,
             pause_event=pause_event,
         )
@@ -3529,10 +3541,8 @@ class ArenaWorker:
             "info",
             "Replaying the last prompt in the refreshed browser context",
         )
-        await self.submit_prompt(
-            prompt=self._last_prompt,
-            model_a=self._last_model_a,
-            model_b=self._last_model_b,
+        await self._replay_last_prompt(
+            retry_on_challenge=CHALLENGE_RETRY_LIMIT,
             pause_event=pause_event,
         )
         await self._log(

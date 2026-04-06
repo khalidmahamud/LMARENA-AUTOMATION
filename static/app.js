@@ -17,6 +17,8 @@
   let workerStartTimes = {};
   let workerData = {};   // live data per worker
   let incrementalResults = {}; // worker_id -> result payload (available as each worker completes)
+  let instructionSequenceStartTime = null;
+  let instructionSequenceElapsedSeconds = null;
 
   // Multi-prompt card state
   let promptCards = {};     // cardId -> card state object
@@ -196,6 +198,8 @@
   // Footer stats
   const statRuns        = document.getElementById("stat-runs");
   const statAvgTime     = document.getElementById("stat-avg-time");
+  const statLastRunTime = document.getElementById("stat-last-run-time");
+  const statTotalTime   = document.getElementById("stat-total-time");
   const statSuccessRate = document.getElementById("stat-success-rate");
   const statTokens      = document.getElementById("stat-tokens");
 
@@ -1214,7 +1218,7 @@
     if (!append) {
       progressFill.style.width = "100%";
       progressPct.textContent = "100%";
-      etaText.textContent = "Complete";
+      etaText.textContent = "Complete in " + formatDuration(msg.total_elapsed_seconds || 0);
     }
 
     // Store results for JSON view
@@ -2650,13 +2654,24 @@ html, body { margin: 0; padding: 0; background: #fff; color: #111;
 
   const STATS_KEY = "lmarena_stats";
 
+  function defaultStats() {
+    return {
+      totalRuns: 0,
+      totalTime: 0,
+      lastRunTime: 0,
+      totalSuccess: 0,
+      totalWindows: 0,
+      totalTokens: 0,
+    };
+  }
+
   function loadStats() {
     try {
       const raw = localStorage.getItem(STATS_KEY);
-      if (!raw) return { totalRuns: 0, totalTime: 0, totalSuccess: 0, totalWindows: 0, totalTokens: 0 };
-      return JSON.parse(raw);
+      if (!raw) return defaultStats();
+      return Object.assign(defaultStats(), JSON.parse(raw));
     } catch {
-      return { totalRuns: 0, totalTime: 0, totalSuccess: 0, totalWindows: 0, totalTokens: 0 };
+      return defaultStats();
     }
   }
 
@@ -2668,13 +2683,17 @@ html, body { margin: 0; padding: 0; background: #fff; color: #111;
     const s = loadStats();
     statRuns.textContent = s.totalRuns;
     if (s.totalRuns > 0) {
-      const avgTime = Math.round(s.totalTime / s.totalRuns);
-      statAvgTime.textContent = `${avgTime}s`;
+      const avgTime = s.totalTime / s.totalRuns;
+      statAvgTime.textContent = formatDuration(avgTime);
+      statLastRunTime.textContent = s.lastRunTime > 0 ? formatDuration(s.lastRunTime) : "\u2014";
+      statTotalTime.textContent = s.totalTime > 0 ? formatDuration(s.totalTime) : "\u2014";
       const rate = s.totalWindows > 0 ? ((s.totalSuccess / s.totalWindows) * 100).toFixed(1) : 0;
       statSuccessRate.textContent = `${rate}%`;
       statSuccessRate.className = parseFloat(rate) >= 90 ? "highlight" : "";
     } else {
       statAvgTime.textContent = "\u2014";
+      statLastRunTime.textContent = "\u2014";
+      statTotalTime.textContent = "\u2014";
       statSuccessRate.textContent = "\u2014";
     }
     statTokens.textContent = formatNumber(s.totalTokens);
@@ -2684,6 +2703,7 @@ html, body { margin: 0; padding: 0; background: #fff; color: #111;
     const s = loadStats();
     s.totalRuns += 1;
     s.totalTime += msg.total_elapsed_seconds || 0;
+    s.lastRunTime = msg.total_elapsed_seconds || 0;
 
     let runTokens = 0;
     let runSuccess = 0;
@@ -3019,7 +3039,7 @@ html, body { margin: 0; padding: 0; background: #fff; color: #111;
         '</div>' +
         '<button class="btn-add-turn" title="Add another turn to this conversation">+ Add Turn</button>' +
         '<div class="card-settings-row">' +
-          '<label>Win <input type="number" class="card-window-count" value="4" min="1" max="12" /></label>' +
+          '<label>Win <input type="number" class="card-window-count" value="4" min="1" /></label>' +
           '<label>Gap <input type="number" class="card-gap" value="30" min="5" max="300" /></label>' +
           '<label>A <input type="text" class="card-model-a" placeholder="any" /></label>' +
           '<label>B <input type="text" class="card-model-b" placeholder="any" /></label>' +
@@ -3377,7 +3397,7 @@ html, body { margin: 0; padding: 0; background: #fff; color: #111;
       var countEl = el.querySelector(".card-results-count");
       if (fillEl) fillEl.style.width = "100%";
       if (pctEl) pctEl.textContent = "100%";
-      if (etaEl) etaEl.textContent = "Complete";
+      if (etaEl) etaEl.textContent = "Done in " + formatDuration(msg.total_elapsed_seconds || 0);
       if (countEl) countEl.textContent = msg.results.length;
     }
 
@@ -3576,6 +3596,8 @@ html, body { margin: 0; padding: 0; background: #fff; color: #111;
     currentInstructionCardId = null;
     instructionRunning = false;
     instructionStopRequested = false;
+    instructionSequenceStartTime = null;
+    instructionSequenceElapsedSeconds = null;
     promptCards = {};
     nextCardIndex = 1;
     if (instructionCardsContainer) instructionCardsContainer.innerHTML = "";
@@ -3588,6 +3610,8 @@ html, body { margin: 0; padding: 0; background: #fff; color: #111;
     if (instructionRunning) return;
     instructionRunning = true;
     instructionStopRequested = false;
+    instructionSequenceStartTime = Date.now();
+    instructionSequenceElapsedSeconds = null;
 
     // Build queue of card IDs that are not yet completed
     instructionRunQueue = Object.keys(promptCards).filter(function (cid) {
@@ -3648,6 +3672,9 @@ html, body { margin: 0; padding: 0; background: #fff; color: #111;
     instructionRunning = false;
     instructionStopRequested = false;
     currentInstructionCardId = null;
+    if (instructionSequenceStartTime) {
+      instructionSequenceElapsedSeconds = (Date.now() - instructionSequenceStartTime) / 1000;
+    }
     instructionRunBtn.disabled = false;
     instructionStopBtn.disabled = true;
     updateInstructionOverallProgress();
@@ -3661,7 +3688,17 @@ html, body { margin: 0; padding: 0; background: #fff; color: #111;
       if (!c.running && Object.keys(c.incrementalResults || {}).length > 0) done++;
     });
     var pct = total > 0 ? Math.round((done / total) * 100) : 0;
-    if (instructionEta) instructionEta.textContent = done + " / " + total;
+    if (instructionEta) {
+      var baseLabel = done + " / " + total;
+      if (instructionRunning && instructionSequenceStartTime) {
+        var elapsed = (Date.now() - instructionSequenceStartTime) / 1000;
+        instructionEta.textContent = baseLabel + " · " + formatDuration(elapsed) + " elapsed";
+      } else if (!instructionRunning && instructionSequenceElapsedSeconds != null && total > 0 && done === total) {
+        instructionEta.textContent = baseLabel + " · Complete in " + formatDuration(instructionSequenceElapsedSeconds);
+      } else {
+        instructionEta.textContent = baseLabel;
+      }
+    }
     if (instructionProgressFill) instructionProgressFill.style.width = pct + "%";
     if (instructionProgressPct) instructionProgressPct.textContent = pct + "%";
   }

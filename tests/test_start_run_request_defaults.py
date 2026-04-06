@@ -11,6 +11,11 @@ class StartRunRequestDefaultsTests(unittest.TestCase):
         self.assertEqual(request.problematic_ip_cooldown_minutes, 30)
         self.assertEqual(request.response_format, "any")
 
+    def test_window_count_is_not_capped_at_twelve(self) -> None:
+        request = StartRunRequest(prompt="hello", window_count=24)
+
+        self.assertEqual(request.window_count, 24)
+
 
 if __name__ == "__main__":
     unittest.main()

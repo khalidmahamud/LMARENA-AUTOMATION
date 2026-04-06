@@ -52,7 +52,7 @@ class TypingConfig(BaseModel):
 
 
 class BrowserConfig(BaseModel):
-    window_count: int = Field(default=2, ge=1, le=12)
+    window_count: int = Field(default=2, ge=1)
     window_size: WindowSize = Field(default_factory=WindowSize)
     headless: bool = Field(default=False)
     incognito: bool = Field(default=False)
